@@ -6,34 +6,66 @@ import Topology from './components/Topology';
 import Terminal from './components/Terminal';
 import Settings from './components/Settings';
 import UserManagement from './components/UserManagement';
+import AuditLogs from './components/AuditLogs';
 import Login from './components/Login';
-import { INITIAL_SWITCHES } from './constants';
 import { Switch } from './types';
 import { LanguageProvider } from './lib/i18n';
 
 function AppContent() {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [user, setUser] = useState<{ id: string, username: string, role: string } | null>(null);
   const [activeTab, setActiveTab] = useState('inventory');
-  const [switches, setSwitches] = useState<Switch[]>(INITIAL_SWITCHES);
+  const [switches, setSwitches] = useState<Switch[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  if (!isAuthenticated) {
-    return <Login onLogin={() => setIsAuthenticated(true)} />;
+  const fetchInventory = async () => {
+    try {
+      const response = await fetch('/api/inventory', {
+        headers: { 
+          'x-user-role': user?.role || 'viewer',
+          'x-user-name': user?.username || 'unknown'
+        }
+      });
+      const data = await response.json();
+      setSwitches(data);
+    } catch (error) {
+      console.error('Failed to fetch inventory:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  React.useEffect(() => {
+    if (user) {
+      fetchInventory();
+      // Poll every 5 seconds to catch discovery results
+      const interval = setInterval(fetchInventory, 5000);
+      return () => clearInterval(interval);
+    }
+  }, [user]);
+
+  if (!user) {
+    return <Login onLogin={(userData) => setUser(userData)} />;
   }
+
+  const isAdmin = user.role === 'admin';
+  const isOperator = user.role === 'admin' || user.role === 'operator';
 
   const renderContent = () => {
     switch (activeTab) {
       case 'dashboard':
         return <Dashboard switches={switches} />;
       case 'inventory':
-        return <Inventory switches={switches} setSwitches={setSwitches} />;
+        return <Inventory switches={switches} setSwitches={setSwitches} role={user.role} username={user.username} />;
       case 'topology':
         return <Topology switches={switches} />;
       case 'terminal':
-        return <Terminal switches={switches} />;
+        return <Terminal switches={switches} role={user.role} />;
       case 'users':
-        return <UserManagement />;
+        return isAdmin ? <UserManagement role={user.role} username={user.username} /> : <Dashboard switches={switches} />;
+      case 'audit':
+        return isAdmin ? <AuditLogs role={user.role} username={user.username} /> : <Dashboard switches={switches} />;
       case 'settings':
-        return <Settings />;
+        return <Settings role={user.role} username={user.username} />;
       default:
         return <Dashboard switches={switches} />;
     }
@@ -44,7 +76,8 @@ function AppContent() {
       <Sidebar 
         activeTab={activeTab} 
         setActiveTab={setActiveTab} 
-        onLogout={() => setIsAuthenticated(false)} 
+        onLogout={() => setUser(null)} 
+        user={user}
       />
       
       <main className="flex-1 flex flex-col min-w-0 overflow-y-auto">

@@ -1,20 +1,153 @@
 import React from 'react';
 import { Key, Shield, UserCheck, HardDrive, Cpu, Database } from 'lucide-react';
 import { useTranslation } from '../lib/i18n';
+import { cn } from '../lib/utils';
 
-const Settings: React.FC = () => {
+interface SettingsProps {
+  role?: string;
+  username?: string;
+}
+
+const Settings: React.FC<SettingsProps> = ({ role, username }) => {
   const { t } = useTranslation();
+  const isAdmin = role === 'admin';
+  const isOperator = role === 'admin' || role === 'operator';
   const [testStatus, setTestStatus] = React.useState<'idle' | 'testing' | 'success' | 'error'>('idle');
+  const [ldapConfig, setLdapConfig] = React.useState({ 
+    enabled: false,
+    host: 'ad.company.local', 
+    port: '389', 
+    baseDN: 'dc=company,dc=local', 
+    adminGroup: 'OU=Admins,DC=company,DC=local',
+    operatorGroup: 'OU=Operators,DC=company,DC=local'
+  });
+  const [discoveryConfig, setDiscoveryConfig] = React.useState({ subnets: '10.0.0.0/24, 192.168.1.0/24', username: 'admin', password: '' });
+  const [snmpConfig, setSnmpConfig] = React.useState({ community: 'public', version: 'SNMP v2c' });
+  const [trapConfig, setTrapConfig] = React.useState({ ip: '10.10.50.10', port: '162' });
 
-  const handleTestConnection = () => {
+  React.useEffect(() => {
+    const fetchConfig = async () => {
+      try {
+        const response = await fetch('/api/config/system', {
+          headers: { 
+            'x-user-role': role || 'viewer',
+            'x-user-name': username || 'unknown'
+          }
+        });
+        const data = await response.json();
+        setLdapConfig(prev => ({
+          ...prev,
+          enabled: data.ldapEnabled,
+          adminGroup: data.ldapAdminGroup,
+          operatorGroup: data.ldapOperatorGroup
+        }));
+      } catch (err) {
+        console.error('Failed to load system config');
+      }
+    };
+    fetchConfig();
+  }, [role, username]);
+
+  const saveSystemConfig = async (newLdap: any) => {
+    try {
+      await fetch('/api/config/system', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'x-user-role': role || 'viewer',
+          'x-user-name': username || 'unknown'
+        },
+        body: JSON.stringify({
+          ldapEnabled: newLdap.enabled,
+          ldapAdminGroup: newLdap.adminGroup,
+          ldapOperatorGroup: newLdap.operatorGroup
+        }),
+      });
+    } catch (err) {
+      alert('Failed to save config');
+    }
+  };
+
+  const handleTestConnection = async () => {
     setTestStatus('testing');
-    // Simulate LDAP connection test
-    setTimeout(() => {
-      const isSuccess = Math.random() > 0.3; // 70% success rate for simulation
-      setTestStatus(isSuccess ? 'success' : 'error');
-      
-      setTimeout(() => setTestStatus('idle'), 3000);
-    }, 2000);
+    try {
+      const response = await fetch('/api/auth/ldap/test', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'x-user-role': role || 'viewer',
+          'x-user-name': username || 'unknown'
+        },
+        body: JSON.stringify({
+          ...ldapConfig,
+          host: ldapConfig.host,
+          port: ldapConfig.port,
+          baseDN: ldapConfig.baseDN,
+          adminGroup: ldapConfig.adminGroup,
+          operatorGroup: ldapConfig.operatorGroup
+        }),
+      });
+      const data = await response.json();
+      setTestStatus(data.success ? 'success' : 'error');
+    } catch (error) {
+      setTestStatus('error');
+    } finally {
+      setTimeout(() => setTestStatus('idle'), 5000);
+    }
+  };
+
+  const handleStartDiscovery = async () => {
+    try {
+      const response = await fetch('/api/discovery/start', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'x-user-role': role || 'viewer',
+          'x-user-name': username || 'unknown'
+        },
+        body: JSON.stringify(discoveryConfig),
+      });
+      const data = await response.json();
+      alert(data.message);
+    } catch (error) {
+      alert('Failed to initiate discovery.');
+    }
+  };
+
+  const handleSaveSNMP = async () => {
+    try {
+      const response = await fetch('/api/config/snmp', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'x-user-role': role || 'viewer',
+          'x-user-name': username || 'unknown'
+        },
+        body: JSON.stringify(snmpConfig),
+      });
+      const data = await response.json();
+      alert(data.message);
+    } catch (error) {
+      alert('Failed to save SNMP config.');
+    }
+  };
+
+  const handleSaveTrap = async () => {
+    try {
+      const response = await fetch('/api/config/trap-receiver', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'x-user-role': role || 'viewer',
+          'x-user-name': username || 'unknown'
+        },
+        body: JSON.stringify(trapConfig),
+      });
+      const data = await response.json();
+      alert(data.message);
+    } catch (error) {
+      alert('Failed to save Trap Receiver config.');
+    }
   };
 
   return (
@@ -26,12 +159,26 @@ const Settings: React.FC = () => {
 
       <div className="space-y-6">
         {/* LDAP / AD Section */}
-        <div className="bg-[#25262b] border border-[#373a40] rounded overflow-hidden">
+        <div className={cn("bg-[#25262b] border border-[#373a40] rounded overflow-hidden", !isAdmin && "opacity-50 pointer-events-none")}>
           <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center justify-between">
             <div className="flex items-center gap-3">
               <UserCheck className="text-[#228be6]" size={18} />
               <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('ldapAuth')}</h3>
+              <div className="flex items-center gap-2 ml-4">
+                <input 
+                  type="checkbox" 
+                  checked={ldapConfig.enabled}
+                  onChange={(e) => {
+                    const next = { ...ldapConfig, enabled: e.target.checked };
+                    setLdapConfig(next);
+                    saveSystemConfig(next);
+                  }}
+                  className="w-4 h-4 rounded border-[#373a40] bg-[#141517] text-[#228be6]"
+                />
+                <span className="text-[10px] font-bold text-[#909296] uppercase">{t('enableLdap')}</span>
+              </div>
             </div>
+            {!isAdmin && <span className="text-[10px] bg-red-500/20 text-red-500 px-2 py-0.5 rounded font-bold uppercase tracking-widest">Admin Only</span>}
             {testStatus !== 'idle' && (
               <div className={`text-[10px] font-bold uppercase py-1 px-3 rounded ${
                 testStatus === 'testing' ? 'text-amber-500 bg-amber-500/10' :
@@ -48,23 +195,50 @@ const Settings: React.FC = () => {
             <div className="grid grid-cols-2 gap-6">
               <div className="space-y-2">
                 <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('ldapDC')}</label>
-                <input className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" placeholder="ad.company.local" />
+                <input 
+                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" 
+                  value={ldapConfig.host}
+                  onChange={(e) => setLdapConfig({...ldapConfig, host: e.target.value})}
+                  placeholder="ad.company.local" 
+                />
               </div>
               <div className="space-y-2">
                 <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('ldapPort')}</label>
-                <input className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" placeholder="389 (LDAP) or 636 (LDAPS)" />
+                <input 
+                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" 
+                  value={ldapConfig.port}
+                  onChange={(e) => setLdapConfig({...ldapConfig, port: e.target.value})}
+                  placeholder="389" 
+                />
               </div>
-              <div className="space-y-2">
-                <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('baseDN')}</label>
-                <input className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" placeholder="dc=company,dc=local" />
+              <div className="grid grid-cols-1 gap-6 col-span-2">
+                <div className="space-y-2">
+                  <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('baseDN')}</label>
+                  <input 
+                    className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" 
+                    value={ldapConfig.baseDN}
+                    onChange={(e) => setLdapConfig({...ldapConfig, baseDN: e.target.value})}
+                    placeholder="dc=company,dc=local" 
+                  />
+                </div>
               </div>
               <div className="space-y-2">
                 <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('serviceAccount')}</label>
-                <input className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" placeholder="cn=ldap-user,ou=Service Accounts,dc=company,dc=local" />
+                <input 
+                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" 
+                  value={ldapConfig.adminGroup}
+                  onChange={(e) => setLdapConfig({...ldapConfig, adminGroup: e.target.value})}
+                  placeholder="OU=Admins,DC=company,DC=local" 
+                />
               </div>
-              <div className="space-y-2">
+               <div className="space-y-2">
                 <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('accessGroup')}</label>
-                <input className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" placeholder="cn=NetAdmins,ou=Groups,dc=company,dc=local" />
+                <input 
+                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" 
+                  value={ldapConfig.operatorGroup}
+                  onChange={(e) => setLdapConfig({...ldapConfig, operatorGroup: e.target.value})}
+                  placeholder="OU=Operators,DC=company,DC=local" 
+                />
               </div>
             </div>
             
@@ -77,47 +251,56 @@ const Settings: React.FC = () => {
                 {testStatus === 'testing' && <Cpu className="animate-spin" size={12} />}
                 {t('testConn')}
               </button>
-              <button 
-                onClick={() => {
-                  alert('Configuration saved to server.');
-                }}
-                className="px-6 py-2 border border-[#373a40] text-[#c1c2c5] rounded text-[10px] font-bold uppercase tracking-widest hover:bg-[#2c2e33] transition-all"
-              >
-                {t('saveChanges')}
-              </button>
             </div>
           </div>
         </div>
 
         {/* Auto-Discovery Section */}
-        <div className="bg-[#25262b] border border-[#373a40] rounded overflow-hidden">
+        <div className={cn("bg-[#25262b] border border-[#373a40] rounded overflow-hidden", !isOperator && "opacity-50 pointer-events-none")}>
           <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
             <Database className="text-[#228be6]" size={18} />
             <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('autoDiscovery')}</h3>
+            {!isOperator && <span className="text-[10px] bg-red-500/20 text-red-500 px-2 py-0.5 rounded font-bold uppercase tracking-widest ml-auto">Privileged Action Required</span>}
           </div>
           <div className="p-6 space-y-6">
             <div className="grid grid-cols-1 gap-6">
               <div className="space-y-2">
                 <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('discoverySubnets')}</label>
-                <input className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" placeholder="10.0.0.0/24, 192.168.1.0/24" />
+                <input 
+                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" 
+                  value={discoveryConfig.subnets}
+                  onChange={(e) => setDiscoveryConfig({...discoveryConfig, subnets: e.target.value})}
+                  placeholder="10.0.0.0/24, 192.168.1.0/24" 
+                />
               </div>
             </div>
             
             <div className="grid grid-cols-2 gap-6">
               <div className="space-y-2">
                 <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('username')}</label>
-                <input className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" placeholder="admin" />
+                <input 
+                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" 
+                  value={discoveryConfig.username}
+                  onChange={(e) => setDiscoveryConfig({...discoveryConfig, username: e.target.value})}
+                  placeholder="admin" 
+                />
               </div>
               <div className="space-y-2">
                 <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">Password</label>
-                <input type="password" className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" placeholder="••••••••" />
+                <input 
+                  type="password" 
+                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" 
+                  value={discoveryConfig.password}
+                  onChange={(e) => setDiscoveryConfig({...discoveryConfig, password: e.target.value})}
+                  placeholder="••••••••" 
+                />
               </div>
             </div>
 
             <div className="pt-4 border-t border-[#373a40] flex justify-between items-center">
               <p className="text-[10px] text-[#5c5f66] uppercase">{t('sshCredentials')}</p>
               <button 
-                onClick={() => alert('Discovery scan started on background.')}
+                onClick={handleStartDiscovery}
                 className="px-6 py-2 bg-[#40c057] hover:bg-[#37b24d] text-white rounded text-[10px] font-bold uppercase tracking-widest transition-all shadow-lg"
               >
                 {t('startDiscovery')}
@@ -127,80 +310,85 @@ const Settings: React.FC = () => {
         </div>
 
         {/* SNMP Configuration Section */}
-        <div className="bg-[#25262b] border border-[#373a40] rounded overflow-hidden">
+        <div className={cn("bg-[#25262b] border border-[#373a40] rounded overflow-hidden", !isAdmin && "opacity-50 pointer-events-none")}>
           <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
             <Shield className="text-[#fab005]" size={18} />
             <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('snmpConfig')}</h3>
+            {!isAdmin && <span className="text-[10px] bg-red-500/20 text-red-500 px-2 py-0.5 rounded font-bold uppercase tracking-widest ml-auto">Admin Only</span>}
           </div>
           <div className="p-6 space-y-6">
             <div className="grid grid-cols-2 gap-6">
               <div className="space-y-2">
                 <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('snmpCommunity')}</label>
-                <input className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" placeholder="public" />
+                <input 
+                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" 
+                  value={snmpConfig.community}
+                  onChange={(e) => setSnmpConfig({...snmpConfig, community: e.target.value})}
+                  placeholder="public" 
+                />
               </div>
               <div className="space-y-2">
                 <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('snmpVersion')}</label>
-                <select className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors">
+                <select 
+                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors"
+                  value={snmpConfig.version}
+                  onChange={(e) => setSnmpConfig({...snmpConfig, version: e.target.value})}
+                >
                   <option>SNMP v2c</option>
                   <option>SNMP v3 (AuthPriv)</option>
                 </select>
               </div>
             </div>
+            <div className="flex justify-end">
+               <button 
+                onClick={handleSaveSNMP}
+                className="px-6 py-2 bg-[#fab005] hover:bg-[#f08c00] text-black rounded text-[10px] font-bold uppercase tracking-widest transition-all shadow-lg"
+              >
+                {t('saveChanges')}
+              </button>
+            </div>
           </div>
         </div>
 
-        {/* Resource Planning Info */}
-        <div className="bg-[#25262b] border border-[#373a40] rounded overflow-hidden">
+        {/* SNMP Trap Receiver Section */}
+        <div className={cn("bg-[#25262b] border border-[#373a40] rounded overflow-hidden", !isAdmin && "opacity-50 pointer-events-none")}>
           <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
-            <Cpu className="text-[#fab005]" size={18} />
-            <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('resourcePlanning')}</h3>
+            <Shield className="text-[#fab005]" size={18} />
+            <h3 className="text-sm font-bold text-white uppercase tracking-widest">SNMP Trap Receiver</h3>
+            {!isAdmin && <span className="text-[10px] bg-red-500/20 text-red-500 px-2 py-0.5 rounded font-bold uppercase tracking-widest ml-auto">Admin Only</span>}
           </div>
-          <div className="p-6">
-            <p className="text-xs text-[#909296] mb-6 leading-relaxed">
-              Based on the requested Nginx + PHP requirements (deployment instructions below), 
-              the following resources are recommended for a production environment managing up to 500 switches.
-            </p>
-            
-            <div className="grid grid-cols-3 gap-6">
-              <div className="flex items-center gap-4 p-4 bg-[#141517] border border-[#373a40] rounded">
-                <Cpu className="text-[#fab005]" size={24} />
-                <div>
-                  <p className="text-[10px] font-bold text-[#909296] uppercase">CPU</p>
-                  <p className="text-lg font-bold text-white leading-none mt-1">4 vCPU</p>
-                </div>
+          <div className="p-6 space-y-6">
+            <div className="grid grid-cols-2 gap-6">
+              <div className="space-y-2">
+                <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('trapReceiverIp')}</label>
+                <input 
+                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" 
+                  value={trapConfig.ip}
+                  onChange={(e) => setTrapConfig({...trapConfig, ip: e.target.value})}
+                  placeholder="10.0.0.10" 
+                />
               </div>
-              <div className="flex items-center gap-4 p-4 bg-[#141517] border border-[#373a40] rounded">
-                <Database className="text-[#228be6]" size={24} />
-                <div>
-                  <p className="text-[10px] font-bold text-[#909296] uppercase">RAM</p>
-                  <p className="text-lg font-bold text-white leading-none mt-1">8 GB</p>
-                </div>
-              </div>
-              <div className="flex items-center gap-4 p-4 bg-[#141517] border border-[#373a40] rounded">
-                <HardDrive className="text-[#fa5252]" size={24} />
-                <div>
-                  <p className="text-[10px] font-bold text-[#909296] uppercase">Disk (RAID 10)</p>
-                  <p className="text-lg font-bold text-white leading-none mt-1">100 GB</p>
-                </div>
+              <div className="space-y-2">
+                <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('trapReceiverPort')}</label>
+                <input 
+                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" 
+                  value={trapConfig.port}
+                  onChange={(e) => setTrapConfig({...trapConfig, port: e.target.value})}
+                  placeholder="162" 
+                />
               </div>
             </div>
-
-            <div className="mt-8 space-y-4">
-              <h4 className="text-xs font-bold text-white uppercase tracking-widest">Deployment Implementation Guide (Linux)</h4>
-              <div className="bg-[#141517] p-4 rounded font-mono text-[11px] text-[#40c057] overflow-x-auto border border-[#373a40]">
-                <p># Install Nginx, PHP (7.4+ or 8.x) & Extensions</p>
-                <p>sudo apt install nginx php-fpm php-curl php-ldap php-mbstring php-xml</p>
-                <p className="mt-2 text-white"># Nginx Host Configuration (/etc/nginx/sites-available/netnode)</p>
-                <p className="opacity-60">server {"{"}</p>
-                <p className="opacity-60 ml-4">listen 80;</p>
-                <p className="opacity-60 ml-4">root /var/www/netnode/public;</p>
-                <p className="opacity-60 ml-4">index index.php;</p>
-                <p className="opacity-60 ml-4">location ~ \.php$ {"{"} include snippets/fastcgi-php.conf; fastcgi_pass unix:/var/run/php/php8.1-fpm.sock; {"}"}</p>
-                <p className="opacity-60">{"}"}</p>
-              </div>
+            <div className="flex justify-end">
+               <button 
+                onClick={handleSaveTrap}
+                className="px-6 py-2 bg-[#fab005] hover:bg-[#f08c00] text-black rounded text-[10px] font-bold uppercase tracking-widest transition-all shadow-lg"
+              >
+                {t('saveChanges')}
+              </button>
             </div>
           </div>
         </div>
+
       </div>
     </div>
   );

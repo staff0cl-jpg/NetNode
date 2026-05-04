@@ -4,7 +4,7 @@ import { useTranslation } from '../lib/i18n';
 import { cn } from '../lib/utils';
 
 interface LoginProps {
-  onLogin: () => void;
+  onLogin: (user: { id: string, username: string, role: string }) => void;
 }
 
 const Login: React.FC<LoginProps> = ({ onLogin }) => {
@@ -13,11 +13,22 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
   const [password, setPassword] = useState('');
   const [error, setError] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (username === 'admin' && password === 'admin') {
-      onLogin();
-    } else {
+    try {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+      const data = await response.json();
+      if (data.success) {
+        onLogin(data.user);
+      } else {
+        setError(true);
+        setTimeout(() => setError(false), 3000);
+      }
+    } catch (error) {
       setError(true);
       setTimeout(() => setError(false), 3000);
     }

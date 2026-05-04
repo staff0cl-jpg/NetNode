@@ -20,7 +20,12 @@ interface DashboardProps {
 
 const Dashboard: React.FC<DashboardProps> = ({ switches }) => {
   const { t } = useTranslation();
-  
+  const [isMounted, setIsMounted] = React.useState(false);
+
+  React.useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
   const stats = [
     { label: t('totalSwitches'), value: switches.length, icon: Server, color: '#228be6' },
     { label: t('onlineNodes'), value: switches.filter(s => s.status === 'online').length, icon: ShieldCheck, color: '#40c057' },
@@ -64,56 +69,60 @@ const Dashboard: React.FC<DashboardProps> = ({ switches }) => {
         <div className="bg-[#25262b] p-6 border border-[#373a40] rounded shadow-sm">
           <h3 className="text-sm font-bold text-white uppercase tracking-widest mb-6">{t('throughput')}</h3>
           <div className="h-64 outline-none">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={data}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#373a40" vertical={false} />
-                <XAxis 
-                  dataKey="name" 
-                  stroke="#5c5f66" 
-                  fontSize={10} 
-                  tickLine={false} 
-                  axisLine={false} 
-                />
-                <YAxis 
-                  stroke="#5c5f66" 
-                  fontSize={10} 
-                  tickLine={false} 
-                  axisLine={false} 
-                />
-                <Tooltip 
-                  contentStyle={{ backgroundColor: '#1a1b1e', borderColor: '#373a40', color: '#c1c2c5' }}
-                />
-                <Line type="monotone" dataKey="traffic" stroke="#228be6" strokeWidth={2} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
+            {isMounted && (
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={data}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#373a40" vertical={false} />
+                  <XAxis 
+                    dataKey="name" 
+                    stroke="#5c5f66" 
+                    fontSize={10} 
+                    tickLine={false} 
+                    axisLine={false} 
+                  />
+                  <YAxis 
+                    stroke="#5c5f66" 
+                    fontSize={10} 
+                    tickLine={false} 
+                    axisLine={false} 
+                  />
+                  <Tooltip 
+                    contentStyle={{ backgroundColor: '#1a1b1e', borderColor: '#373a40', color: '#c1c2c5' }}
+                  />
+                  <Line type="monotone" dataKey="traffic" stroke="#228be6" strokeWidth={2} dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            )}
           </div>
         </div>
 
         <div className="bg-[#25262b] p-6 border border-[#373a40] rounded shadow-sm">
           <h3 className="text-sm font-bold text-white uppercase tracking-widest mb-6">{t('cpuLoadVendor')}</h3>
           <div className="h-64 outline-none">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={data}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#373a40" vertical={false} />
-                <XAxis 
-                  dataKey="name" 
-                  stroke="#5c5f66" 
-                  fontSize={10} 
-                  tickLine={false} 
-                  axisLine={false} 
-                />
-                <YAxis 
-                  stroke="#5c5f66" 
-                  fontSize={10} 
-                  tickLine={false} 
-                  axisLine={false} 
-                />
-                <Tooltip 
-                  contentStyle={{ backgroundColor: '#1a1b1e', borderColor: '#373a40', color: '#c1c2c5' }}
-                />
-                <Bar dataKey="load" fill="#40c057" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+            {isMounted && (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={data}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#373a40" vertical={false} />
+                  <XAxis 
+                    dataKey="name" 
+                    stroke="#5c5f66" 
+                    fontSize={10} 
+                    tickLine={false} 
+                    axisLine={false} 
+                  />
+                  <YAxis 
+                    stroke="#5c5f66" 
+                    fontSize={10} 
+                    tickLine={false} 
+                    axisLine={false} 
+                  />
+                  <Tooltip 
+                    contentStyle={{ backgroundColor: '#1a1b1e', borderColor: '#373a40', color: '#c1c2c5' }}
+                  />
+                  <Bar dataKey="load" fill="#40c057" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
           </div>
         </div>
       </div>

@@ -1,6 +1,11 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
-import { Plus, Search, Filter, MoreVertical, Edit2, Trash2, Cpu, Download } from 'lucide-react';
+import { Plus, Search, Filter, MoreVertical, Edit2, Trash2, Cpu, Download, ChevronUp, ChevronDown } from 'lucide-react';
+
+const SortIcon = ({ active, direction }: { active: boolean, direction?: 'asc' | 'desc' }) => {
+  if (!active) return <div className="w-3" />;
+  return direction === 'asc' ? <ChevronUp size={12} className="text-[#228be6]" /> : <ChevronDown size={12} className="text-[#228be6]" />;
+};
 import { Switch, Vendor } from '../types';
 import { MODELS, VENDORS } from '../constants';
 import { cn } from '../lib/utils';
@@ -9,11 +14,18 @@ import { useTranslation } from '../lib/i18n';
 interface InventoryProps {
   switches: Switch[];
   setSwitches: React.Dispatch<React.SetStateAction<Switch[]>>;
+  role?: string;
+  username?: string;
 }
 
-const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
+const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, username }) => {
   const { t } = useTranslation();
+  const isAdmin = role === 'admin';
+  const isOperator = role === 'operator' || isAdmin;
+  
   const [searchTerm, setSearchTerm] = useState('');
+  const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [sortConfig, setSortConfig] = useState<{ key: keyof Switch | 'vendorModel' | 'location'; direction: 'asc' | 'desc' } | null>(null);
   const [isAdding, setIsAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [newSwitch, setNewSwitch] = useState<Partial<Switch>>({
@@ -22,24 +34,58 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
     uptime: '0d 0h'
   });
 
-  const handleAdd = () => {
+  const handleAdd = async () => {
     if (!newSwitch.name || !newSwitch.ip || !newSwitch.city) return;
     
-    if (editingId) {
-      setSwitches(switches.map(s => s.id === editingId ? { ...newSwitch, id: editingId } as Switch : s));
-    } else {
-      const id = Date.now().toString();
-      setSwitches([...switches, { ...newSwitch, id } as Switch]);
+    try {
+      if (editingId) {
+        const response = await fetch(`/api/inventory/${editingId}`, {
+          method: 'PATCH',
+          headers: { 
+            'Content-Type': 'application/json',
+            'x-user-role': role || 'viewer',
+            'x-user-name': username || 'unknown'
+          },
+          body: JSON.stringify(newSwitch),
+        });
+        if (!response.ok) throw new Error('Update failed');
+      } else {
+        const response = await fetch('/api/inventory', {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json',
+            'x-user-role': role || 'viewer',
+            'x-user-name': username || 'unknown'
+          },
+          body: JSON.stringify(newSwitch),
+        });
+        if (!response.ok) throw new Error('Creation failed');
+      }
+      
+      // Refresh inventory in parent
+      // In a real app we'd trigger a parent refresh, here we'll assume App.tsx poller catches it 
+      // or we just close the modal. For better UX, let's just close and wait for poll.
+      setIsAdding(false);
+      setEditingId(null);
+      setNewSwitch({ vendor: 'HPE', status: 'online', uptime: '0d 0h' });
+    } catch (error) {
+      alert('Error saving device configuration');
     }
-    
-    setIsAdding(false);
-    setEditingId(null);
-    setNewSwitch({ vendor: 'HPE', status: 'online', uptime: '0d 0h' });
   };
 
-  const handleDelete = (id: string) => {
+  const handleDelete = async (id: string) => {
     if (confirm('Are you sure you want to remove this node from inventory?')) {
-      setSwitches(switches.filter(s => s.id !== id));
+      try {
+        await fetch(`/api/inventory/${id}`, {
+          method: 'DELETE',
+          headers: { 
+            'x-user-role': role || 'viewer',
+            'x-user-name': username || 'unknown'
+          }
+        });
+      } catch (error) {
+        alert('Error deleting device');
+      }
     }
   };
 
@@ -61,11 +107,48 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
     a.click();
   };
 
-  const filteredSwitches = switches.filter(s => 
-    s.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    s.city.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    s.ip.includes(searchTerm)
-  );
+  const handleSort = (key: keyof Switch | 'vendorModel' | 'location') => {
+    let direction: 'asc' | 'desc' = 'asc';
+    if (sortConfig && sortConfig.key === key && sortConfig.direction === 'asc') {
+      direction = 'desc';
+    }
+    setSortConfig({ key, direction });
+  };
+
+  const filteredSwitches = switches
+    .filter(s => {
+      const matchesSearch = 
+        s.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        s.city.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        s.vendor.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        s.model.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        s.ip.includes(searchTerm);
+      
+      const matchesStatus = statusFilter === 'all' || s.status === statusFilter;
+      
+      return matchesSearch && matchesStatus;
+    })
+    .sort((a, b) => {
+      if (!sortConfig) return 0;
+
+      let aValue: any;
+      let bValue: any;
+
+      if (sortConfig.key === 'vendorModel') {
+        aValue = `${a.vendor} ${a.model}`.toLowerCase();
+        bValue = `${b.vendor} ${b.model}`.toLowerCase();
+      } else if (sortConfig.key === 'location') {
+        aValue = `${a.city} ${a.zone}`.toLowerCase();
+        bValue = `${b.city} ${b.zone}`.toLowerCase();
+      } else {
+        aValue = (a[sortConfig.key as keyof Switch] as string).toLowerCase();
+        bValue = (b[sortConfig.key as keyof Switch] as string).toLowerCase();
+      }
+
+      if (aValue < bValue) return sortConfig.direction === 'asc' ? -1 : 1;
+      if (aValue > bValue) return sortConfig.direction === 'asc' ? 1 : -1;
+      return 0;
+    });
 
   return (
     <div className="p-8 space-y-6">
@@ -82,13 +165,15 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
             <Download size={18} />
             {t('exportCsv')}
           </button>
-          <button 
-            onClick={() => setIsAdding(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-sm font-bold transition-all shadow-lg"
-          >
-            <Plus size={18} />
-            {t('registerSwitch')}
-          </button>
+          {isAdmin && (
+            <button 
+              onClick={() => setIsAdding(true)}
+              className="flex items-center gap-2 px-4 py-2 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-sm font-bold transition-all shadow-lg"
+            >
+              <Plus size={18} />
+              {t('registerSwitch')}
+            </button>
+          )}
         </div>
       </header>
 
@@ -104,20 +189,57 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
               onChange={(e) => setSearchTerm(e.target.value)}
             />
           </div>
-          <button className="p-2 border border-[#373a40] rounded text-[#909296] hover:text-white transition-colors">
-            <Filter size={18} />
-          </button>
+          <select 
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className="px-4 py-2 bg-[#141517] border border-[#373a40] rounded text-sm text-white focus:outline-none focus:border-[#228be6] appearance-none"
+          >
+            <option value="all">All Status</option>
+            <option value="online">Online</option>
+            <option value="offline">Offline</option>
+            <option value="warning">Warning</option>
+          </select>
         </div>
 
         <table className="z-table">
           <thead>
             <tr>
-              <th>{t('status')}</th>
-              <th>{t('name')}</th>
-              <th>{t('vendorModel')}</th>
-              <th>{t('ipAddress')}</th>
-              <th>{t('location')}</th>
-              <th>{t('uptime')}</th>
+              <th onClick={() => handleSort('status')} className="cursor-pointer hover:text-white transition-colors">
+                <div className="flex items-center gap-2">
+                  {t('status')}
+                  <SortIcon active={sortConfig?.key === 'status'} direction={sortConfig?.direction} />
+                </div>
+              </th>
+              <th onClick={() => handleSort('name')} className="cursor-pointer hover:text-white transition-colors">
+                <div className="flex items-center gap-2">
+                  {t('name')}
+                  <SortIcon active={sortConfig?.key === 'name'} direction={sortConfig?.direction} />
+                </div>
+              </th>
+              <th onClick={() => handleSort('vendorModel')} className="cursor-pointer hover:text-white transition-colors">
+                <div className="flex items-center gap-2">
+                  {t('vendorModel')}
+                  <SortIcon active={sortConfig?.key === 'vendorModel'} direction={sortConfig?.direction} />
+                </div>
+              </th>
+              <th onClick={() => handleSort('ip')} className="cursor-pointer hover:text-white transition-colors">
+                <div className="flex items-center gap-2">
+                  {t('ipAddress')}
+                  <SortIcon active={sortConfig?.key === 'ip'} direction={sortConfig?.direction} />
+                </div>
+              </th>
+              <th onClick={() => handleSort('location')} className="cursor-pointer hover:text-white transition-colors">
+                <div className="flex items-center gap-2">
+                  {t('location')}
+                  <SortIcon active={sortConfig?.key === 'location'} direction={sortConfig?.direction} />
+                </div>
+              </th>
+              <th onClick={() => handleSort('uptime')} className="cursor-pointer hover:text-white transition-colors">
+                <div className="flex items-center gap-2">
+                  {t('uptime')}
+                  <SortIcon active={sortConfig?.key === 'uptime'} direction={sortConfig?.direction} />
+                </div>
+              </th>
               <th className="text-right">{t('actions')}</th>
             </tr>
           </thead>
@@ -150,20 +272,24 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
                 <td className="text-xs text-[#909296] font-mono">{sw.uptime}</td>
                 <td className="text-right">
                   <div className="flex justify-end gap-2 text-[#5c5f66]">
-                    <button 
-                      onClick={() => handleEdit(sw)}
-                      className="hover:text-white transition-colors"
-                      title={t('editNode')}
-                    >
-                      <Edit2 size={14} />
-                    </button>
-                    <button 
-                      onClick={() => handleDelete(sw.id)}
-                      className="hover:text-red-500 transition-colors"
-                      title="Delete Node"
-                    >
-                      <Trash2 size={14} />
-                    </button>
+                    {isAdmin && (
+                      <>
+                        <button 
+                          onClick={() => handleEdit(sw)}
+                          className="hover:text-white transition-colors"
+                          title={t('editNode')}
+                        >
+                          <Edit2 size={14} />
+                        </button>
+                        <button 
+                          onClick={() => handleDelete(sw.id)}
+                          className="hover:text-red-500 transition-colors"
+                          title="Delete Node"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </>
+                    )}
                     <button className="hover:text-white transition-colors"><MoreVertical size={14} /></button>
                   </div>
                 </td>

@@ -37,15 +37,19 @@ sudo systemctl enable --now nginx
 sudo systemctl enable --now php-fpm
 ```
 
-## 2. Build the Frontend
-To build the application for production, run on your workstation:
-```bash
-npm install
-npm run build
-```
-This generates a `dist/` folder containing all static assets.
+## 2. System Sizing Recommendations
 
-## 3. Nginx Configuration
+Scale your deployment based on the number of managed devices:
+
+| Scale | Devices | CPU | RAM | Storage |
+|-------|---------|-----|-----|---------|
+| **Small** | < 100 | 2 vCPU | 4 GB | 20 GB |
+| **Medium** | 100 - 500 | 4 vCPU | 8 GB | 100 GB |
+| **Large** | 500 - 1000+ | 8 vCPU | 16 GB | 250 GB+ |
+
+---
+
+## 3. Operating System Deployment Guides
 Place the contents of `dist/` into your web root (e.g. `/var/www/netnode/public`).
 
 Example Nginx host config:

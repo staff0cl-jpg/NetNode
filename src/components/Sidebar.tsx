@@ -1,5 +1,5 @@
 import React from 'react';
-import { LayoutDashboard, Database, Share2, Terminal as TerminalIcon, Settings, Network, Users, Languages } from 'lucide-react';
+import { LayoutDashboard, Database, Share2, Terminal as TerminalIcon, Settings, Network, Users, Languages, History } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useTranslation } from '../lib/i18n';
 
@@ -7,9 +7,10 @@ interface SidebarProps {
   activeTab: string;
   setActiveTab: (tab: string) => void;
   onLogout: () => void;
+  user: { username: string, role: string } | null;
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, onLogout }) => {
+const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, onLogout, user }) => {
   const { t, language, setLanguage } = useTranslation();
   
   const menuItems = [
@@ -17,9 +18,12 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, onLogout }) 
     { id: 'inventory', label: t('inventory'), icon: Database },
     { id: 'topology', label: t('topology'), icon: Share2 },
     { id: 'terminal', label: t('terminal'), icon: TerminalIcon },
-    { id: 'users', label: t('users'), icon: Users },
+    { id: 'users', label: t('users'), icon: Users, adminOnly: true },
+    { id: 'audit', label: t('auditLogs'), icon: History, adminOnly: true },
     { id: 'settings', label: t('settings'), icon: Settings },
   ];
+
+  const visibleMenuItems = menuItems.filter(item => !item.adminOnly || user?.role === 'admin');
 
   return (
     <aside className="w-64 bg-[#141517] border-r border-[#373a40] flex flex-col h-full overflow-hidden">
@@ -35,7 +39,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, onLogout }) 
       
       <nav className="flex-1 p-4 space-y-1">
         <p className="text-[10px] font-bold text-[#5c5f66] uppercase tracking-widest mb-4 px-2">{t('mainManagement')}</p>
-        {menuItems.map((item) => (
+        {visibleMenuItems.map((item) => (
           <button
             key={item.id}
             onClick={() => setActiveTab(item.id)}
@@ -65,11 +69,13 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, onLogout }) 
         </div>
 
         <div className="flex items-center justify-between px-2 py-2">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-[#373a40] flex items-center justify-center text-[10px] font-bold text-white">AD</div>
-            <div className="flex flex-col">
-              <span className="text-xs font-semibold text-white">Administrator</span>
-              <span className="text-[10px] text-[#909296]">Local Account</span>
+          <div className="flex items-center gap-3 overflow-hidden">
+            <div className="w-8 h-8 shrink-0 rounded-full bg-[#373a40] flex items-center justify-center text-[10px] font-bold text-white uppercase">
+              {user?.username.slice(0, 2)}
+            </div>
+            <div className="flex flex-col overflow-hidden">
+              <span className="text-xs font-semibold text-white truncate">{user?.username || 'Guest'}</span>
+              <span className="text-[10px] text-[#909296] uppercase">{user?.role || 'Viewer'}</span>
             </div>
           </div>
           <button 

@@ -1,4 +1,4 @@
-export type Vendor = 'HPE' | 'Aruba' | 'Cisco';
+export type Vendor = 'HPE' | 'Aruba' | 'Cisco' | 'Juniper' | 'MikroTik' | 'Huawei' | 'Arista';
 
 export interface Switch {
   id: string;
