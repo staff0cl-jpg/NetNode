@@ -30,9 +30,7 @@ let auditLogs: AuditLog[] = [];
 
 // System Config State
 let systemConfig = {
-  ldapEnabled: false,
-  ldapAdminGroup: 'OU=Admins,DC=company,DC=local',
-  ldapOperatorGroup: 'OU=Operators,DC=company,DC=local'
+  // Config fields can be added here
 };
 
 const logAction = (user: string, action: string, details: string, category: AuditLog['category']) => {
@@ -80,13 +78,32 @@ async function startServer() {
   app.post("/api/config/system", checkRole(['admin']), (req, res) => {
     const actor = req.headers["x-user-name"] as string || "unknown";
     systemConfig = { ...systemConfig, ...req.body };
-    logAction(actor, 'System Config Update', `Updated system settings: LDAP ${systemConfig.ldapEnabled}`, 'config');
+    logAction(actor, 'System Config Update', `Updated system settings`, 'config');
     res.json({ success: true, config: systemConfig });
+  });
+
+  // API: Inventory Bulk Actions
+  app.post("/api/inventory/bulk", checkRole(['admin', 'operator']), (req, res) => {
+    const { ids, action, value } = req.body;
+    const actor = req.headers["x-user-name"] as string || "unknown";
+
+    if (!Array.isArray(ids)) return res.status(400).json({ error: 'Invalid IDs' });
+
+    inventory = inventory.map(item => {
+      if (ids.includes(item.id)) {
+        if (action === 'status') return { ...item, status: value };
+        if (action === 'reboot') return { ...item, status: 'offline', uptime: '0d 0h' };
+      }
+      return item;
+    });
+
+    logAction(actor, 'Bulk Action', `Performed ${action} on ${ids.length} devices`, 'inventory');
+    res.json({ success: true, count: ids.length });
   });
 
   // API: Health Check
   app.get("/api/health", (req, res) => {
-    res.json({ status: "online", version: "2.4.0-pro", timestamp: new Date().toISOString() });
+    res.json({ status: "online", version: "pro", timestamp: new Date().toISOString() });
   });
 
   // API: Get Inventory
@@ -135,26 +152,6 @@ async function startServer() {
   app.post("/api/auth/login", (req, res) => {
     const { username, password } = req.body;
     
-    // Check LDAP first if enabled in config
-    if (systemConfig.ldapEnabled) {
-      logAction(username, 'LDAP Auth Attempt', `Attempting LDAP authentication for ${username}`, 'auth');
-      
-      // Simulated LDAP Auth Logic
-      // In a real system, we'd use 'ldapjs' to bind to AD here
-      if (password === 'password') { // Dummy check for demo
-        let role = 'viewer';
-        // Simulate group lookup: username with 'adm' gets admin, 'op' gets operator
-        if (username.toLowerCase().includes('adm')) {
-          role = 'admin';
-        } else if (username.toLowerCase().includes('op')) {
-          role = 'operator';
-        }
-        
-        logAction(username, 'Login Success (LDAP)', `User authenticated via LDAP as ${role}`, 'auth');
-        return res.json({ success: true, user: { id: 'ldap_' + username, username, role } });
-      }
-    }
-
     const user = users.find(u => u.username === username && u.password === password);
     if (user) {
       logAction(username, 'Login Success', 'User authenticated successfully', 'auth');
@@ -213,24 +210,6 @@ async function startServer() {
     }
     users = users.filter(u => u.id !== req.params.id);
     res.json({ success: true });
-  });
-
-  // API: LDAP Test
-  app.post("/api/auth/ldap/test", checkRole(['admin']), (req, res) => {
-    const { host, port, baseDN, adminGroup, operatorGroup } = req.body;
-    const actor = req.headers["x-user-name"] as string || "unknown";
-    
-    logAction(actor, 'LDAP Test', `Testing LDAP: ${host}, Admins: ${adminGroup}, Operators: ${operatorGroup}`, 'config');
-    
-    // Simulate complex check
-    setTimeout(() => {
-      const isOk = host && host.includes('.') && port && baseDN && baseDN.includes('=');
-      if (isOk) {
-        res.json({ success: true, message: "LDAP server reached. Group CNs verified and access granted." });
-      } else {
-        res.status(400).json({ success: false, message: "Invalid LDAP configuration or server unreachable." });
-      }
-    }, 1500);
   });
 
   // API: Auto-Discovery

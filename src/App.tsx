@@ -16,6 +16,7 @@ function AppContent() {
   const [activeTab, setActiveTab] = useState('inventory');
   const [switches, setSwitches] = useState<Switch[]>([]);
   const [loading, setLoading] = useState(true);
+  const [sshTarget, setSshTarget] = useState<Switch | null>(null);
 
   const fetchInventory = async () => {
     try {
@@ -55,11 +56,29 @@ function AppContent() {
       case 'dashboard':
         return <Dashboard switches={switches} />;
       case 'inventory':
-        return <Inventory switches={switches} setSwitches={setSwitches} role={user.role} username={user.username} />;
+        return (
+          <Inventory 
+            switches={switches} 
+            setSwitches={setSwitches} 
+            role={user.role} 
+            username={user.username} 
+            onOpenSSH={(sw) => {
+              setSshTarget(sw);
+              setActiveTab('terminal');
+            }}
+          />
+        );
       case 'topology':
         return <Topology switches={switches} />;
       case 'terminal':
-        return <Terminal switches={switches} role={user.role} />;
+        return (
+          <Terminal 
+            switches={switches} 
+            role={user.role} 
+            targetDevice={sshTarget}
+            onClearTarget={() => setSshTarget(null)}
+          />
+        );
       case 'users':
         return isAdmin ? <UserManagement role={user.role} username={user.username} /> : <Dashboard switches={switches} />;
       case 'audit':

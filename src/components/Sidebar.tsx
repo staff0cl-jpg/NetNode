@@ -29,11 +29,16 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, onLogout, us
     <aside className="w-64 bg-[#141517] border-r border-[#373a40] flex flex-col h-full overflow-hidden">
       <div className="p-6 flex items-center gap-3 border-b border-[#373a40]">
         <div className="w-10 h-10 bg-[#228be6] rounded flex items-center justify-center text-white shadow-lg">
-          <Network size={24} strokeWidth={2.5} />
+          <svg width="24" height="24" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M6 10H26" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+            <path d="M9 10V22C9 24.2091 10.7909 26 13 26C15.2091 26 17 24.2091 17 22V10" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+            <path d="M17 10V22C17 24.2091 18.7909 26 21 26C23.2091 26 25 24.2091 25 22V10" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+            <circle cx="13" cy="5" r="2.5" fill="currentColor" />
+            <circle cx="21" cy="5" r="2.5" fill="currentColor" />
+          </svg>
         </div>
         <div>
           <h1 className="font-bold text-white tracking-tight text-lg">NETNODE</h1>
-          <p className="text-[10px] text-[#909296] uppercase tracking-widest font-mono">Enterprise v2.4</p>
         </div>
       </div>
       

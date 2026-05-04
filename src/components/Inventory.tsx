@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
-import { Plus, Search, Filter, MoreVertical, Edit2, Trash2, Cpu, Download, ChevronUp, ChevronDown } from 'lucide-react';
+import { Plus, Search, Filter, MoreVertical, Edit2, Trash2, Cpu, Download, ChevronUp, ChevronDown, RefreshCw, Play, Square, CheckSquare, Terminal as TerminalIcon } from 'lucide-react';
 
 const SortIcon = ({ active, direction }: { active: boolean, direction?: 'asc' | 'desc' }) => {
   if (!active) return <div className="w-3" />;
@@ -16,15 +16,18 @@ interface InventoryProps {
   setSwitches: React.Dispatch<React.SetStateAction<Switch[]>>;
   role?: string;
   username?: string;
+  onOpenSSH?: (sw: Switch) => void;
 }
 
-const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, username }) => {
+const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, username, onOpenSSH }) => {
   const { t } = useTranslation();
   const isAdmin = role === 'admin';
   const isOperator = role === 'operator' || isAdmin;
   
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [isBulkProcessing, setIsBulkProcessing] = useState(false);
   const [sortConfig, setSortConfig] = useState<{ key: keyof Switch | 'vendorModel' | 'location'; direction: 'asc' | 'desc' } | null>(null);
   const [isAdding, setIsAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -115,6 +118,43 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
     setSortConfig({ key, direction });
   };
 
+  const handleBulkAction = async (action: string, value?: string) => {
+    if (selectedIds.length === 0) return;
+    setIsBulkProcessing(true);
+    try {
+      const response = await fetch('/api/inventory/bulk', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'x-user-role': role || 'viewer',
+          'x-user-name': username || 'unknown'
+        },
+        body: JSON.stringify({ ids: selectedIds, action, value }),
+      });
+      if (response.ok) {
+        setSelectedIds([]);
+      }
+    } catch (error) {
+      alert('Bulk action failed');
+    } finally {
+      setIsBulkProcessing(false);
+    }
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedIds.length === filteredSwitches.length) {
+      setSelectedIds([]);
+    } else {
+      setSelectedIds(filteredSwitches.map(s => s.id));
+    }
+  };
+
+  const toggleSelectOne = (id: string) => {
+    setSelectedIds(prev => 
+      prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]
+    );
+  };
+
   const filteredSwitches = switches
     .filter(s => {
       const matchesSearch = 
@@ -178,32 +218,77 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
       </header>
 
       <div className="bg-[#25262b] border border-[#373a40] rounded overflow-hidden">
-        <div className="p-4 border-b border-[#373a40] flex gap-4 items-center bg-[#1c1d21]">
-          <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-[#5c5f66]" size={16} />
-            <input 
-              type="text" 
-              placeholder={t('filterPlaceholder')}
-              className="w-full bg-[#141517] border border-[#373a40] pl-10 pr-4 py-2 rounded text-sm text-white focus:outline-none focus:border-[#228be6] transition-colors"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-            />
+        <div className="flex items-center justify-between bg-[#25262b] p-4 border border-[#373a40] rounded shadow-sm">
+          <div className="flex items-center gap-4 flex-1">
+            <div className="relative flex-1 max-w-md">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-[#5c5f66]" size={18} />
+              <input 
+                type="text" 
+                placeholder={t('filterPlaceholder')}
+                className="w-full bg-[#141517] border border-[#373a40] pl-10 pr-4 py-2 rounded text-sm text-white focus:outline-none focus:border-[#228be6] transition-colors"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+              />
+            </div>
+            <select 
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              className="px-4 py-2 bg-[#141517] border border-[#373a40] rounded text-sm text-white focus:outline-none focus:border-[#228be6] appearance-none"
+            >
+              <option value="all">All Status</option>
+              <option value="online">Online</option>
+              <option value="offline">Offline</option>
+              <option value="warning">Warning</option>
+            </select>
           </div>
-          <select 
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            className="px-4 py-2 bg-[#141517] border border-[#373a40] rounded text-sm text-white focus:outline-none focus:border-[#228be6] appearance-none"
+
+          <motion.div 
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: selectedIds.length > 0 ? 1 : 0, x: selectedIds.length > 0 ? 0 : 20 }}
+            className={cn(
+              "flex items-center gap-2 border-l border-[#373a40] pl-4 ml-4 transition-opacity",
+              selectedIds.length === 0 && "opacity-0 pointer-events-none"
+            )}
           >
-            <option value="all">All Status</option>
-            <option value="online">Online</option>
-            <option value="offline">Offline</option>
-            <option value="warning">Warning</option>
-          </select>
+            <span className="text-[10px] font-bold text-[#228be6] uppercase mr-2">{selectedIds.length} Selected</span>
+            <button 
+              onClick={() => handleBulkAction('status', 'online')}
+              disabled={isBulkProcessing || !isOperator}
+              className="p-1.5 hover:bg-[#141517] rounded text-[#40c057] transition-colors"
+              title="Bulk Set Online"
+            >
+              <Play size={16} />
+            </button>
+            <button 
+              onClick={() => handleBulkAction('status', 'offline')}
+              disabled={isBulkProcessing || !isOperator}
+              className="p-1.5 hover:bg-[#141517] rounded text-[#fa5252] transition-colors"
+              title="Bulk Set Offline"
+            >
+              <Square size={16} />
+            </button>
+            <button 
+              onClick={() => handleBulkAction('reboot')}
+              disabled={isBulkProcessing || !isOperator}
+              className="p-1.5 hover:bg-[#141517] rounded text-[#fab005] transition-colors"
+              title="Bulk Reboot"
+            >
+              <RefreshCw size={16} className={cn(isBulkProcessing && "animate-spin")} />
+            </button>
+          </motion.div>
         </div>
 
         <table className="z-table">
           <thead>
             <tr>
+              <th className="w-10">
+                <input 
+                  type="checkbox" 
+                  checked={selectedIds.length > 0 && selectedIds.length === filteredSwitches.length}
+                  onChange={toggleSelectAll}
+                  className="w-4 h-4 rounded border-[#373a40] bg-[#141517] text-[#228be6]"
+                />
+              </th>
               <th onClick={() => handleSort('status')} className="cursor-pointer hover:text-white transition-colors">
                 <div className="flex items-center gap-2">
                   {t('status')}
@@ -245,7 +330,15 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
           </thead>
           <tbody>
             {filteredSwitches.map((sw) => (
-              <tr key={sw.id}>
+              <tr key={sw.id} className={cn(selectedIds.includes(sw.id) && "bg-[#228be6]/5")}>
+                <td>
+                  <input 
+                    type="checkbox" 
+                    checked={selectedIds.includes(sw.id)}
+                    onChange={() => toggleSelectOne(sw.id)}
+                    className="w-4 h-4 rounded border-[#373a40] bg-[#141517] text-[#228be6]"
+                  />
+                </td>
                 <td>
                   <span className={cn(
                     "z-badge",
@@ -272,6 +365,13 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                 <td className="text-xs text-[#909296] font-mono">{sw.uptime}</td>
                 <td className="text-right">
                   <div className="flex justify-end gap-2 text-[#5c5f66]">
+                    <button 
+                      onClick={() => onOpenSSH?.(sw)}
+                      className="hover:text-[#228be6] transition-colors"
+                      title="Open SSH Session"
+                    >
+                      <TerminalIcon size={14} />
+                    </button>
                     {isAdmin && (
                       <>
                         <button 

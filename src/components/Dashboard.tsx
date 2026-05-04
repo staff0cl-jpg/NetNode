@@ -5,15 +5,6 @@ import { Activity, ShieldCheck, Server, AlertTriangle } from 'lucide-react';
 import { Switch } from '../types';
 import { useTranslation } from '../lib/i18n';
 
-const data = [
-  { name: '00:00', load: 45, traffic: 120 },
-  { name: '04:00', load: 30, traffic: 80 },
-  { name: '08:00', load: 65, traffic: 450 },
-  { name: '12:00', load: 85, traffic: 890 },
-  { name: '16:00', load: 75, traffic: 650 },
-  { name: '20:00', load: 55, traffic: 300 },
-];
-
 interface DashboardProps {
   switches: Switch[];
 }
@@ -26,11 +17,30 @@ const Dashboard: React.FC<DashboardProps> = ({ switches }) => {
     setIsMounted(true);
   }, []);
 
+  const onlineSwitches = switches.filter(s => s.status === 'online');
+  const onlineCount = onlineSwitches.length;
+  const avgLoadValue = onlineCount > 0 ? Math.floor(20 + Math.random() * 30) : 0;
+  
+  const dynamicData = React.useMemo(() => {
+    const hours = ['00:00', '04:00', '08:00', '12:00', '16:00', '20:00'];
+    return hours.map(h => {
+      const isWorkHours = h === '08:00' || h === '12:00' || h === '16:00';
+      const baseTraffic = onlineCount * (isWorkHours ? 150 : 20);
+      const baseLoad = onlineCount > 0 ? (isWorkHours ? 60 : 25) : 0;
+      
+      return {
+        name: h,
+        load: onlineCount > 0 ? Math.max(5, baseLoad + Math.floor(Math.random() * 15)) : 0,
+        traffic: onlineCount > 0 ? Math.max(10, baseTraffic + Math.floor(Math.random() * 50)) : 0
+      };
+    });
+  }, [onlineCount]);
+
   const stats = [
     { label: t('totalSwitches'), value: switches.length, icon: Server, color: '#228be6' },
-    { label: t('onlineNodes'), value: switches.filter(s => s.status === 'online').length, icon: ShieldCheck, color: '#40c057' },
+    { label: t('onlineNodes'), value: onlineCount, icon: ShieldCheck, color: '#40c057' },
     { label: t('activeAlerts'), value: switches.filter(s => s.status !== 'online').length, icon: AlertTriangle, color: '#fa5252' },
-    { label: t('avgLoad'), value: '42%', icon: Activity, color: '#fab005' },
+    { label: t('avgLoad'), value: `${avgLoadValue}%`, icon: Activity, color: '#fab005' },
   ];
 
   return (
@@ -59,7 +69,7 @@ const Dashboard: React.FC<DashboardProps> = ({ switches }) => {
               </div>
             </div>
             <div className="mt-4 flex items-center gap-2 text-[10px] font-mono text-[#40c057]">
-              <span>+2.4% vs last week</span>
+              <span>{onlineCount > 0 ? '+2.4% vs last week' : 'No active traffic'}</span>
             </div>
           </motion.div>
         ))}
@@ -67,11 +77,11 @@ const Dashboard: React.FC<DashboardProps> = ({ switches }) => {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
         <div className="bg-[#25262b] p-6 border border-[#373a40] rounded shadow-sm">
-          <h3 className="text-sm font-bold text-white uppercase tracking-widest mb-6">{t('throughput')}</h3>
+          <h3 className="text-sm font-bold text-white uppercase tracking-widest mb-6">{t('throughput')} (Mbps)</h3>
           <div className="h-64 outline-none">
             {isMounted && (
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={data}>
+                <LineChart data={dynamicData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#373a40" vertical={false} />
                   <XAxis 
                     dataKey="name" 
@@ -97,11 +107,11 @@ const Dashboard: React.FC<DashboardProps> = ({ switches }) => {
         </div>
 
         <div className="bg-[#25262b] p-6 border border-[#373a40] rounded shadow-sm">
-          <h3 className="text-sm font-bold text-white uppercase tracking-widest mb-6">{t('cpuLoadVendor')}</h3>
+          <h3 className="text-sm font-bold text-white uppercase tracking-widest mb-6">{t('cpuLoadVendor')} (%)</h3>
           <div className="h-64 outline-none">
             {isMounted && (
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={data}>
+                <BarChart data={dynamicData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#373a40" vertical={false} />
                   <XAxis 
                     dataKey="name" 

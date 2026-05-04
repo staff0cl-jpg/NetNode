@@ -56,26 +56,18 @@ export const translations: Translations = {
   exportJson: { ru: 'Экспорт в JSON', en: 'Export to JSON' },
 
   // Login
-  authGateway: { ru: 'Шлюз управления инфраструктурой v2.4', en: 'Infrastructure Control Gateway v2.4' },
+  authGateway: { ru: 'Шлюз управления инфраструктурой', en: 'Infrastructure Control Gateway' },
   authorize: { ru: 'Авторизоваться', en: 'Authorize Access' },
   opId: { ru: 'Логин / Username', en: 'Login / Username' },
   accToken: { ru: 'Пароль / Password', en: 'Password' },
   authFailed: { ru: 'ОШИБКА АВТОРИЗАЦИИ: НЕВЕРНЫЕ ДАННЫЕ', en: 'AUTHENTICATION FAILED: INVALID CREDENTIALS' },
   sysStatus: { ru: 'Статус системы', en: 'System status' },
-  secured: { ru: 'Зашифровано и изолировано', en: 'Encrypted & Isolated' },
+  secured: { ru: 'Активно', en: 'Active' },
 
   // Settings
   sysConfig: { ru: 'Конфигурация системы', en: 'System Configuration' },
   manageInfra: { ru: 'Управление параметрами инфраструктуры, контролем доступа и распределением ресурсов.', en: 'Manage infrastructure settings, access control, and resource allocation.' },
-  testConn: { ru: 'Тестировать соединение', en: 'Test Connection' },
   saveChanges: { ru: 'Сохранить изменения', en: 'Save Changes' },
-  enableLdap: { ru: 'Включить LDAP авторизацию', en: 'Enable LDAP Authentication' },
-  ldapAuth: { ru: 'Аутентификация Active Directory / LDAP', en: 'Active Directory / LDAP Authentication' },
-  ldapDC: { ru: 'LDAP Контроллер домена', en: 'LDAP Domain Controller' },
-  ldapPort: { ru: 'Порт LDAP', en: 'LDAP Port' },
-  baseDN: { ru: 'Base DN', en: 'Base DN' },
-  serviceAccount: { ru: 'Admin Group CN', en: 'Admin Group CN' },
-  accessGroup: { ru: 'Operator Group CN', en: 'Operator Group CN' },
   trapReceiverIp: { ru: 'IP-адрес приемника Trap', en: 'Trap Receiver IP' },
   trapReceiverPort: { ru: 'Порт приемника Trap', en: 'Trap Receiver Port' },
   autoDiscovery: { ru: 'Авто-обнаружение сети', en: 'Network Auto-Discovery' },
@@ -87,9 +79,6 @@ export const translations: Translations = {
   startDiscovery: { ru: 'Запустить сканирование', en: 'Start Discovery Scan' },
   resourcePlanning: { ru: 'Планирование ресурсов', en: 'Resource Planning' },
   deployGuide: { ru: 'Руководство по развертыванию (Linux)', en: 'Deployment Implementation Guide (Linux)' },
-  connecting: { ru: 'Подключение...', en: 'Connecting...' },
-  connSuccess: { ru: '✓ Соединение установлено', en: '✓ Connection Succesful' },
-  connFailed: { ru: '✗ Ошибка подключения', en: '✗ Connection Failed' },
 
   // Terminal
   clearBuffer: { ru: 'Очистить буфер', en: 'Clear Buffer' },

@@ -12,6 +12,8 @@ import { motion, AnimatePresence } from 'motion/react';
 interface TerminalProps {
   switches: Switch[];
   role?: string;
+  targetDevice?: Switch | null;
+  onClearTarget?: () => void;
 }
 
 interface TerminalSession {
@@ -23,7 +25,7 @@ interface TerminalSession {
   autoReconnect: boolean;
 }
 
-const Terminal: React.FC<TerminalProps> = ({ switches, role }) => {
+const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onClearTarget }) => {
   const { t } = useTranslation();
   const isAdmin = role === 'admin';
   const isOperator = role === 'admin' || role === 'operator';
@@ -38,6 +40,39 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role }) => {
   const socket = useRef<Socket | null>(null);
   const terminalContainers = useRef<Map<string, HTMLDivElement>>(new Map());
   const reconnectTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
+
+  // Handle target device from external navigation
+  useEffect(() => {
+    if (targetDevice) {
+      setSessions(prev => {
+        const existing = prev.find(s => s.host === targetDevice.ip);
+        if (existing) {
+          setActiveSessionId(existing.id);
+          if (!existing.connected) {
+            setTimeout(() => handleConnect(existing), 50);
+          }
+          return prev;
+        }
+
+        const newId = `session-${targetDevice.id}-${Date.now()}`;
+        const session: TerminalSession = {
+          id: newId,
+          name: `${targetDevice.name} (Direct)`,
+          host: targetDevice.ip,
+          username: 'admin',
+          connected: false,
+          autoReconnect: true
+        };
+        
+        const updated = [session, ...prev];
+        localStorage.setItem('netnode_ssh_sessions', JSON.stringify(updated));
+        setActiveSessionId(newId);
+        setTimeout(() => handleConnect(session), 100);
+        return updated;
+      });
+      onClearTarget?.();
+    }
+  }, [targetDevice]);
 
   // Load saved sessions from localStorage
   useEffect(() => {
@@ -56,7 +91,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role }) => {
       }));
       setSessions(defaults);
     }
-  }, [switches]);
+  }, []); // Only on mount
 
   const handleConnect = (session: TerminalSession) => {
     setActiveSessionId(session.id);
@@ -297,11 +332,8 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role }) => {
           )}
         </div>
 
-        <div className="p-4 border-t border-[#373a40] bg-[#141517]">
-          <div className="flex items-center gap-2 text-[10px] font-bold text-[#40c057] uppercase tracking-tighter">
-            <Shield size={12} />
-            Secure Tunnel Active
-          </div>
+        <div className="p-2 border-t border-[#373a40]">
+           {/* System status footer removed */}
         </div>
       </aside>
 

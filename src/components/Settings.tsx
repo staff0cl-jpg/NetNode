@@ -1,5 +1,5 @@
 import React from 'react';
-import { Key, Shield, UserCheck, HardDrive, Cpu, Database } from 'lucide-react';
+import { Key, Shield, HardDrive, Cpu, Database } from 'lucide-react';
 import { useTranslation } from '../lib/i18n';
 import { cn } from '../lib/utils';
 
@@ -12,15 +12,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
   const { t } = useTranslation();
   const isAdmin = role === 'admin';
   const isOperator = role === 'admin' || role === 'operator';
-  const [testStatus, setTestStatus] = React.useState<'idle' | 'testing' | 'success' | 'error'>('idle');
-  const [ldapConfig, setLdapConfig] = React.useState({ 
-    enabled: false,
-    host: 'ad.company.local', 
-    port: '389', 
-    baseDN: 'dc=company,dc=local', 
-    adminGroup: 'OU=Admins,DC=company,DC=local',
-    operatorGroup: 'OU=Operators,DC=company,DC=local'
-  });
   const [discoveryConfig, setDiscoveryConfig] = React.useState({ subnets: '10.0.0.0/24, 192.168.1.0/24', username: 'admin', password: '' });
   const [snmpConfig, setSnmpConfig] = React.useState({ community: 'public', version: 'SNMP v2c' });
   const [trapConfig, setTrapConfig] = React.useState({ ip: '10.10.50.10', port: '162' });
@@ -35,12 +26,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
           }
         });
         const data = await response.json();
-        setLdapConfig(prev => ({
-          ...prev,
-          enabled: data.ldapEnabled,
-          adminGroup: data.ldapAdminGroup,
-          operatorGroup: data.ldapOperatorGroup
-        }));
+        // Handle other system config if needed
       } catch (err) {
         console.error('Failed to load system config');
       }
@@ -48,7 +34,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
     fetchConfig();
   }, [role, username]);
 
-  const saveSystemConfig = async (newLdap: any) => {
+  const saveSystemConfig = async () => {
     try {
       await fetch('/api/config/system', {
         method: 'POST',
@@ -58,41 +44,11 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
           'x-user-name': username || 'unknown'
         },
         body: JSON.stringify({
-          ldapEnabled: newLdap.enabled,
-          ldapAdminGroup: newLdap.adminGroup,
-          ldapOperatorGroup: newLdap.operatorGroup
+          // Add fields to save if needed
         }),
       });
     } catch (err) {
       alert('Failed to save config');
-    }
-  };
-
-  const handleTestConnection = async () => {
-    setTestStatus('testing');
-    try {
-      const response = await fetch('/api/auth/ldap/test', {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
-        },
-        body: JSON.stringify({
-          ...ldapConfig,
-          host: ldapConfig.host,
-          port: ldapConfig.port,
-          baseDN: ldapConfig.baseDN,
-          adminGroup: ldapConfig.adminGroup,
-          operatorGroup: ldapConfig.operatorGroup
-        }),
-      });
-      const data = await response.json();
-      setTestStatus(data.success ? 'success' : 'error');
-    } catch (error) {
-      setTestStatus('error');
-    } finally {
-      setTimeout(() => setTestStatus('idle'), 5000);
     }
   };
 
@@ -158,103 +114,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       </header>
 
       <div className="space-y-6">
-        {/* LDAP / AD Section */}
-        <div className={cn("bg-[#25262b] border border-[#373a40] rounded overflow-hidden", !isAdmin && "opacity-50 pointer-events-none")}>
-          <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <UserCheck className="text-[#228be6]" size={18} />
-              <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('ldapAuth')}</h3>
-              <div className="flex items-center gap-2 ml-4">
-                <input 
-                  type="checkbox" 
-                  checked={ldapConfig.enabled}
-                  onChange={(e) => {
-                    const next = { ...ldapConfig, enabled: e.target.checked };
-                    setLdapConfig(next);
-                    saveSystemConfig(next);
-                  }}
-                  className="w-4 h-4 rounded border-[#373a40] bg-[#141517] text-[#228be6]"
-                />
-                <span className="text-[10px] font-bold text-[#909296] uppercase">{t('enableLdap')}</span>
-              </div>
-            </div>
-            {!isAdmin && <span className="text-[10px] bg-red-500/20 text-red-500 px-2 py-0.5 rounded font-bold uppercase tracking-widest">Admin Only</span>}
-            {testStatus !== 'idle' && (
-              <div className={`text-[10px] font-bold uppercase py-1 px-3 rounded ${
-                testStatus === 'testing' ? 'text-amber-500 bg-amber-500/10' :
-                testStatus === 'success' ? 'text-green-500 bg-green-500/10' :
-                'text-red-500 bg-red-500/10'
-              }`}>
-                {testStatus === 'testing' ? t('connecting') : 
-                 testStatus === 'success' ? t('connSuccess') : 
-                 t('connFailed')}
-              </div>
-            )}
-          </div>
-          <div className="p-6 space-y-4">
-            <div className="grid grid-cols-2 gap-6">
-              <div className="space-y-2">
-                <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('ldapDC')}</label>
-                <input 
-                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" 
-                  value={ldapConfig.host}
-                  onChange={(e) => setLdapConfig({...ldapConfig, host: e.target.value})}
-                  placeholder="ad.company.local" 
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('ldapPort')}</label>
-                <input 
-                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" 
-                  value={ldapConfig.port}
-                  onChange={(e) => setLdapConfig({...ldapConfig, port: e.target.value})}
-                  placeholder="389" 
-                />
-              </div>
-              <div className="grid grid-cols-1 gap-6 col-span-2">
-                <div className="space-y-2">
-                  <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('baseDN')}</label>
-                  <input 
-                    className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" 
-                    value={ldapConfig.baseDN}
-                    onChange={(e) => setLdapConfig({...ldapConfig, baseDN: e.target.value})}
-                    placeholder="dc=company,dc=local" 
-                  />
-                </div>
-              </div>
-              <div className="space-y-2">
-                <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('serviceAccount')}</label>
-                <input 
-                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" 
-                  value={ldapConfig.adminGroup}
-                  onChange={(e) => setLdapConfig({...ldapConfig, adminGroup: e.target.value})}
-                  placeholder="OU=Admins,DC=company,DC=local" 
-                />
-              </div>
-               <div className="space-y-2">
-                <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('accessGroup')}</label>
-                <input 
-                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" 
-                  value={ldapConfig.operatorGroup}
-                  onChange={(e) => setLdapConfig({...ldapConfig, operatorGroup: e.target.value})}
-                  placeholder="OU=Operators,DC=company,DC=local" 
-                />
-              </div>
-            </div>
-            
-            <div className="flex gap-3 pt-4">
-              <button 
-                onClick={handleTestConnection}
-                disabled={testStatus === 'testing'}
-                className="px-6 py-2 bg-[#228be6] text-white rounded text-[10px] font-bold uppercase tracking-widest hover:bg-[#1c7ed6] transition-all disabled:opacity-50 flex items-center gap-2"
-              >
-                {testStatus === 'testing' && <Cpu className="animate-spin" size={12} />}
-                {t('testConn')}
-              </button>
-            </div>
-          </div>
-        </div>
-
         {/* Auto-Discovery Section */}
         <div className={cn("bg-[#25262b] border border-[#373a40] rounded overflow-hidden", !isOperator && "opacity-50 pointer-events-none")}>
           <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
