@@ -4,6 +4,10 @@ import { Server } from "socket.io";
 import http from "http";
 import path from "path";
 import { Client } from "ssh2";
+import * as dotenv from "dotenv";
+
+// Load environment variables
+dotenv.config();
 
 // In-memory state
 let inventory = [
@@ -51,7 +55,10 @@ async function startServer() {
   const app = express();
   const server = http.createServer(app);
   const io = new Server(server);
-  const PORT = 3000;
+  const PORT = process.env.PORT || 3000;
+  const isProd = process.env.NODE_ENV === "production";
+
+  console.log(`Starting server on port ${PORT} (NODE_ENV=${process.env.NODE_ENV})`);
 
   app.use(express.json());
   
@@ -323,13 +330,15 @@ async function startServer() {
   });
 
   // Vite integration
-  if (process.env.NODE_ENV !== "production") {
+  if (!isProd) {
+    console.log("Running in development mode (Vite Middleware)");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
+    console.log("Running in production mode (Serving static files)");
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
@@ -337,8 +346,12 @@ async function startServer() {
     });
   }
 
-  server.listen(PORT, "0.0.0.0", () => {
-    console.log(`NETNODE Backend running on http://localhost:${PORT}`);
+  const listenPort = process.env.PORT || PORT;
+  server.listen(Number(listenPort), "0.0.0.0", () => {
+    console.log(`\n================================================`);
+    console.log(`NETNODE Backend running on http://0.0.0.0:${listenPort}`);
+    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`================================================\n`);
   });
 }
 

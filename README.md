@@ -32,9 +32,10 @@ Before installing, ensure your system has the following components:
    ```
 
 4. **Configuration**:
-   Copy the example environment file:
+   Copy the example environment file and edit it if necessary:
    ```bash
    cp .env.example .env
+   # Ensure PORT=3000 is set in .env
    ```
 
 5. **Build the Application**:
@@ -45,11 +46,15 @@ Before installing, ensure your system has the following components:
 6. **Start the Server**:
    For production with `pm2`:
    ```bash
-   # Using local tsx (installed via npm install)
-   pm2 start "npx tsx server.ts" --name netnode
-   
-   # Or directly with node (if using compiled version, but npx tsx is easiest for TS)
-   NODE_ENV=production npx tsx server.ts
+   # Start using the npm script defined in package.json
+   pm2 start "npm start" --name netnode
+   ```
+
+7. **Verify**:
+   Check if the process is running and see the logs:
+   ```bash
+   pm2 list
+   pm2 logs netnode
    ```
 
 ## 3. Cleanup
@@ -125,8 +130,13 @@ npm install
 npm run build
 ```
 
-**4. Command 'pm2' not found**
-Install PM2 globally:
-```bash
-sudo npm install -g pm2
-```
+**4. 502 Bad Gateway (Nginx)**
+If PM2 says "online" but Nginx shows 502:
+1. **Check PM2 Logs**: `pm2 logs netnode`
+2. **Verify .env exists**: Ensure you copied `.env.example` to `.env`.
+3. **Verify Port**: Ensure `PORT=3000` is in `.env`.
+4. **IPv6 Conflict**: In Nginx config, try changing `localhost:3000` to `127.0.0.1:3000`.
+5. **Direct Test**: Stop PM2 (`pm2 delete netnode`) and run manually: `npm start`. If it works there but not in PM2, check if PM2 has permission to access the folder.
+
+**5. Command 'pm2' not found**
+Install PM2 globally: `sudo npm install -g pm2`
