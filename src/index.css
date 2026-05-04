@@ -1,0 +1,93 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+:root {
+  --bg-main: #1a1b1e;
+  --bg-sidebar: #141517;
+  --bg-card: #25262b;
+  --bg-hover: #2c2e33;
+  --text-main: #c1c2c5;
+  --text-dim: #909296;
+  --accent: #228be6;
+  --accent-light: #4dabf7;
+  --success: #40c057;
+  --warning: #fab005;
+  --error: #fa5252;
+  --border: #373a40;
+}
+
+body {
+  background-color: var(--bg-main);
+  color: var(--text-main);
+  margin: 0;
+  font-family: var(--font-sans);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-main);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-dim);
+}
+
+/* Zabbix-like table styles */
+.z-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.z-table th {
+  background: var(--bg-sidebar);
+  color: var(--text-dim);
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.z-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.z-table tr:hover {
+  background: var(--bg-hover);
+}
+
+.z-badge {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.z-badge-success { background: rgba(64, 192, 87, 0.1); color: #40c057; border: 1px solid rgba(64, 192, 87, 0.3); }
+.z-badge-warning { background: rgba(250, 176, 5, 0.1); color: #fab005; border: 1px solid rgba(250, 176, 5, 0.3); }
+.z-badge-error { background: rgba(250, 82, 82, 0.1); color: #fa5252; border: 1px solid rgba(250, 82, 82, 0.3); }
+
+/* Terminal override */
+.xterm-container {
+  padding: 10px;
+  background: #000;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
