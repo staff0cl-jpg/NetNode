@@ -40,6 +40,11 @@ const Terminal: React.FC<TerminalProps> = ({ switches }) => {
 
     socket.current = io();
 
+    const handleResize = () => {
+      fitAddon.fit();
+    };
+    window.addEventListener('resize', handleResize);
+
     socket.current.on('terminal:output', (data: string) => {
       xterm.current?.write(data);
     });
@@ -63,6 +68,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches }) => {
     setIsConnected(true);
 
     return () => {
+      window.removeEventListener('resize', handleResize);
       xterm.current?.dispose();
       socket.current?.disconnect();
     };

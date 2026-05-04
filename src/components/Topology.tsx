@@ -8,11 +8,29 @@ interface TopologyProps {
 }
 
 const Topology: React.FC<TopologyProps> = ({ switches }) => {
+  const containerRef = React.useRef<HTMLDivElement>(null);
+  const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const [nodes, setNodes] = useState(switches.map((s, i) => ({
     ...s,
     x: 100 + (i % 3) * 250,
     y: 100 + Math.floor(i / 3) * 150
   })));
+
+  React.useEffect(() => {
+    if (!containerRef.current) return;
+
+    const observer = new ResizeObserver((entries) => {
+      for (let entry of entries) {
+        setDimensions({
+          width: entry.contentRect.width,
+          height: entry.contentRect.height,
+        });
+      }
+    });
+
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
+  }, []);
 
   const handleDragEnd = (id: string, e: any) => {
     setNodes(nodes.map(node => 
@@ -50,8 +68,8 @@ const Topology: React.FC<TopologyProps> = ({ switches }) => {
         </button>
       </header>
 
-      <div className="flex-1 bg-[#141517] relative cursor-crosshair overflow-hidden">
-        <Stage width={window.innerWidth - 256} height={window.innerHeight - 150}>
+      <div ref={containerRef} className="flex-1 bg-[#141517] relative cursor-crosshair overflow-hidden">
+        <Stage width={dimensions.width} height={dimensions.height}>
           <Layer>
             {/* Background Grid Pattern */}
             {[...Array(20)].map((_, i) => (

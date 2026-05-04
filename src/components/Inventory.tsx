@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
-import { Plus, Search, Filter, MoreVertical, Edit2, Trash2, Cpu } from 'lucide-react';
+import { Plus, Search, Filter, MoreVertical, Edit2, Trash2, Cpu, Download } from 'lucide-react';
 import { Switch, Vendor } from '../types';
 import { MODELS, VENDORS } from '../constants';
 import { cn } from '../lib/utils';
@@ -28,6 +28,18 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
     setNewSwitch({ vendor: 'HPE', status: 'online', uptime: '0d 0h' });
   };
 
+  const handleExport = () => {
+    const headers = ['Name', 'Vendor', 'Model', 'IP', 'City', 'Zone', 'Status', 'Uptime'];
+    const rows = switches.map(s => [s.name, s.vendor, s.model, s.ip, s.city, s.zone, s.status, s.uptime]);
+    const csvContent = [headers, ...rows].map(e => e.join(",")).join("\n");
+    const blob = new Blob([csvContent], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `switching_inventory_${new Date().toISOString().split('T')[0]}.csv`;
+    a.click();
+  };
+
   const filteredSwitches = switches.filter(s => 
     s.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
     s.city.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -41,13 +53,22 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
           <h2 className="text-2xl font-bold text-white mb-2 leading-tight">Switch Inventory</h2>
           <p className="text-sm text-[#909296]">Manage and monitor all network nodes across cities and zones.</p>
         </div>
-        <button 
-          onClick={() => setIsAdding(true)}
-          className="flex items-center gap-2 px-4 py-2 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-sm font-bold transition-all shadow-lg"
-        >
-          <Plus size={18} />
-          Register Switch
-        </button>
+        <div className="flex gap-3">
+          <button 
+            onClick={handleExport}
+            className="flex items-center gap-2 px-4 py-2 border border-[#373a40] text-[#c1c2c5] hover:text-white rounded text-sm font-bold transition-all"
+          >
+            <Download size={18} />
+            Export CSV
+          </button>
+          <button 
+            onClick={() => setIsAdding(true)}
+            className="flex items-center gap-2 px-4 py-2 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-sm font-bold transition-all shadow-lg"
+          >
+            <Plus size={18} />
+            Register Switch
+          </button>
+        </div>
       </header>
 
       <div className="bg-[#25262b] border border-[#373a40] rounded overflow-hidden">
