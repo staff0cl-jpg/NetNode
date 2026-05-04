@@ -6,8 +6,11 @@ This application is designed for deployment on local servers (Air-Gapped environ
 
 Before installing, ensure your system has the following components:
 
-- **Node.js**: v18.0 or higher
+- **Node.js**: **v18.0 or higher** (Required for Vite and modern ESM features)
 - **NPM**: v9.0 or higher
+
+> [!CAUTION]
+> If you see `SyntaxError: Unexpected reserved word` regarding `await import`, it means your Node.js version is too old. Upgrade to Node.js v18+.
 - **Nginx**: Used as a reverse proxy
 - **Process Manager**: (Optional) `pm2` is recommended for production persistence
 
@@ -78,3 +81,30 @@ Scale your deployment based on the number of managed devices:
 - **Privacy**: The application is fully self-contained. No external CDN or tracking calls are made.
 - **SSH/Terminal**: SSH sessions are handled via a secure tunnel between the server and the managed equipment.
 - **Audit Logs**: All sensitive actions are logged and visible to administrators.
+
+## 6. Troubleshooting
+
+**1. SyntaxError: Unexpected reserved word (await import)**
+This means your Node.js version is too old (< 18). 
+Update Node.js using NodeSource:
+```bash
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt-get install -y nodejs
+```
+
+**2. dpkg error (trying to overwrite ... libnode-dev)**
+If you see a conflict with `libnode-dev` during upgrade:
+```bash
+sudo apt-get remove -y libnode-dev
+sudo apt-get install -f
+sudo apt-get install -y nodejs
+```
+
+**3. Error: Cannot find native binding (Tailwind/Vite)**
+If you see an error about native bindings after upgrading Node.js:
+```bash
+# Force rebuild of dependencies for the new Node version
+rm -rf node_modules package-lock.json
+npm install
+npm run build
+```
