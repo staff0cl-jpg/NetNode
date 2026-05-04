@@ -126,6 +126,19 @@ const LanguageContext = createContext<LanguageContextType | undefined>(undefined
 export const LanguageProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [language, setLanguage] = useState<Language>('ru');
 
+  React.useEffect(() => {
+    fetch('/api/config/system')
+      .then(res => res.json())
+      .then(data => {
+        if (data.config && data.config.defaultLanguage) {
+          setLanguage(data.config.defaultLanguage as Language);
+        }
+      })
+      .catch(() => {
+        // Fallback or ignore
+      });
+  }, []);
+
   const t = (key: string) => {
     if (!translations[key]) return key;
     return translations[key][language];

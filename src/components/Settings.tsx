@@ -13,6 +13,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
   const isAdmin = role === 'admin';
   const isOperator = role === 'admin' || role === 'operator';
   const [discoveryConfig, setDiscoveryConfig] = React.useState({ subnets: '10.0.0.0/24, 192.168.1.0/24', username: 'admin', password: '' });
+  const [defaultLanguage, setDefaultLanguage] = React.useState('ru');
   const [snmpConfig, setSnmpConfig] = React.useState({ community: 'public', version: 'SNMP v2c' });
   const [trapConfig, setTrapConfig] = React.useState({ ip: '10.10.50.10', port: '162' });
 
@@ -26,7 +27,9 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
           }
         });
         const data = await response.json();
-        // Handle other system config if needed
+        if (data.config && data.config.defaultLanguage) {
+          setDefaultLanguage(data.config.defaultLanguage);
+        }
       } catch (err) {
         console.error('Failed to load system config');
       }
@@ -34,7 +37,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
     fetchConfig();
   }, [role, username]);
 
-  const saveSystemConfig = async () => {
+  const saveSystemConfig = async (lang: string) => {
     try {
       await fetch('/api/config/system', {
         method: 'POST',
@@ -44,7 +47,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
           'x-user-name': username || 'unknown'
         },
         body: JSON.stringify({
-          // Add fields to save if needed
+          defaultLanguage: lang
         }),
       });
     } catch (err) {
@@ -114,6 +117,31 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       </header>
 
       <div className="space-y-6">
+        {/* Language Section */}
+        <div className={cn("bg-[#25262b] border border-[#373a40] rounded overflow-hidden", !isAdmin && "opacity-50 pointer-events-none")}>
+          <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
+            <Database size={18} className="text-[#228be6]" />
+            <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('sysConfig')}</h3>
+          </div>
+          <div className="p-6">
+            <div className="max-w-xs space-y-2">
+              <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">Default Language (Default для всех)</label>
+              <select 
+                value={defaultLanguage}
+                onChange={(e) => {
+                  setDefaultLanguage(e.target.value);
+                  saveSystemConfig(e.target.value);
+                }}
+                className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none appearance-none cursor-pointer"
+              >
+                <option value="ru">Русский (Russian)</option>
+                <option value="en">English</option>
+              </select>
+              <p className="text-[9px] text-[#5c5f66] mt-1 font-medium">Этот параметр определяет язык системы для всех новых сессий и пользователей без локальных настроек.</p>
+            </div>
+          </div>
+        </div>
+
         {/* Auto-Discovery Section */}
         <div className={cn("bg-[#25262b] border border-[#373a40] rounded overflow-hidden", !isOperator && "opacity-50 pointer-events-none")}>
           <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">

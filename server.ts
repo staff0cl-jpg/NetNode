@@ -30,7 +30,7 @@ let auditLogs: AuditLog[] = [];
 
 // System Config State
 let systemConfig = {
-  // Config fields can be added here
+  defaultLanguage: 'ru'
 };
 
 const logAction = (user: string, action: string, details: string, category: AuditLog['category']) => {
