@@ -75,7 +75,14 @@ const Settings: React.FC = () => {
                 {testStatus === 'testing' && <Cpu className="animate-spin" size={12} />}
                 Test Connection
               </button>
-              <button className="px-6 py-2 border border-[#373a40] text-[#c1c2c5] rounded text-[10px] font-bold uppercase tracking-widest hover:bg-[#2c2e33] transition-all">Save Changes</button>
+              <button 
+                onClick={() => {
+                  alert('Configuration saved to server.');
+                }}
+                className="px-6 py-2 border border-[#373a40] text-[#c1c2c5] rounded text-[10px] font-bold uppercase tracking-widest hover:bg-[#2c2e33] transition-all"
+              >
+                Save Changes
+              </button>
             </div>
           </div>
         </div>

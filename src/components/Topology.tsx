@@ -38,6 +38,17 @@ const Topology: React.FC<TopologyProps> = ({ switches }) => {
     ));
   };
 
+  const handleExportDrawIo = () => {
+    const data = JSON.stringify(nodes, null, 2);
+    const blob = new Blob([data], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'network_topology.json';
+    a.click();
+    alert('Topology exported as JSON. This can be mapped to drawing tools.');
+  };
+
   return (
     <div className="flex flex-col h-full overflow-hidden">
       <header className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex justify-between items-center">
@@ -62,9 +73,12 @@ const Topology: React.FC<TopologyProps> = ({ switches }) => {
             </button>
           </nav>
         </div>
-        <button className="flex items-center gap-2 px-4 py-2 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-[10px] font-bold uppercase tracking-widest leading-none shadow-lg">
+        <button 
+          onClick={handleExportDrawIo}
+          className="flex items-center gap-2 px-4 py-2 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-[10px] font-bold uppercase tracking-widest leading-none shadow-lg"
+        >
           <Download size={14} />
-          Export to Draw.io
+          Export to JSON
         </button>
       </header>
 

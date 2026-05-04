@@ -13,6 +13,7 @@ interface InventoryProps {
 const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [isAdding, setIsAdding] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [newSwitch, setNewSwitch] = useState<Partial<Switch>>({
     vendor: 'HPE',
     status: 'online',
@@ -22,10 +23,28 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
   const handleAdd = () => {
     if (!newSwitch.name || !newSwitch.ip || !newSwitch.city) return;
     
-    const id = Date.now().toString();
-    setSwitches([...switches, { ...newSwitch, id } as Switch]);
+    if (editingId) {
+      setSwitches(switches.map(s => s.id === editingId ? { ...newSwitch, id: editingId } as Switch : s));
+    } else {
+      const id = Date.now().toString();
+      setSwitches([...switches, { ...newSwitch, id } as Switch]);
+    }
+    
     setIsAdding(false);
+    setEditingId(null);
     setNewSwitch({ vendor: 'HPE', status: 'online', uptime: '0d 0h' });
+  };
+
+  const handleDelete = (id: string) => {
+    if (confirm('Are you sure you want to remove this node from inventory?')) {
+      setSwitches(switches.filter(s => s.id !== id));
+    }
+  };
+
+  const handleEdit = (sw: Switch) => {
+    setNewSwitch(sw);
+    setEditingId(sw.id);
+    setIsAdding(true);
   };
 
   const handleExport = () => {
@@ -129,8 +148,20 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
                 <td className="text-xs text-[#909296] font-mono">{sw.uptime}</td>
                 <td className="text-right">
                   <div className="flex justify-end gap-2 text-[#5c5f66]">
-                    <button className="hover:text-white transition-colors"><Edit2 size={14} /></button>
-                    <button className="hover:text-red-500 transition-colors"><Trash2 size={14} /></button>
+                    <button 
+                      onClick={() => handleEdit(sw)}
+                      className="hover:text-white transition-colors"
+                      title="Edit Node"
+                    >
+                      <Edit2 size={14} />
+                    </button>
+                    <button 
+                      onClick={() => handleDelete(sw.id)}
+                      className="hover:text-red-500 transition-colors"
+                      title="Delete Node"
+                    >
+                      <Trash2 size={14} />
+                    </button>
                     <button className="hover:text-white transition-colors"><MoreVertical size={14} /></button>
                   </div>
                 </td>
@@ -149,7 +180,9 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
           >
             <div className="flex items-center gap-3 mb-8 border-b border-[#373a40] pb-4">
               <Cpu className="text-[#228be6]" size={24} />
-              <h3 className="text-xl font-bold text-white">Register New Network Node</h3>
+              <h3 className="text-xl font-bold text-white">
+                {editingId ? 'Edit Network Node' : 'Register New Network Node'}
+              </h3>
             </div>
             
             <div className="grid grid-cols-2 gap-6">
@@ -216,7 +249,11 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
 
             <div className="mt-10 flex justify-end gap-3">
               <button 
-                onClick={() => setIsAdding(false)}
+                onClick={() => {
+                  setIsAdding(false);
+                  setEditingId(null);
+                  setNewSwitch({ vendor: 'HPE', status: 'online', uptime: '0d 0h' });
+                }}
                 className="px-6 py-2.5 text-sm font-bold text-[#909296] hover:text-white transition-all uppercase tracking-widest"
               >
                 Cancel
@@ -225,7 +262,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
                 onClick={handleAdd}
                 className="px-8 py-2.5 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-sm font-bold shadow-lg uppercase tracking-widest transition-all"
               >
-                Complete Registration
+                {editingId ? 'Save Changes' : 'Complete Registration'}
               </button>
             </div>
           </motion.div>

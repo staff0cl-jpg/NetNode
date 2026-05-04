@@ -1,20 +1,52 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# NETNODE Infrastructure Management v2.4
 
-# Run and deploy your AI Studio app
+This application is designed for offline deployment on local servers (Air-Gapped environments).
 
-This contains everything you need to run your app locally.
+## Local Deployment Requirements
+- **Web Server:** Nginx or Apache
+- **Backend:** PHP 7.4+ or 8.x (for LDAP integration)
+- **Node.js:** v18+ (only for building the frontend)
 
-View your app in AI Studio: https://ai.studio/apps/f73dac48-6f4c-441a-80b7-a17b27f1cc4e
+## 1. Build the Frontend
+To build the application for production, run:
+```bash
+npm install
+npm run build
+```
+This will generate a `dist/` folder containing all static assets (HTML, JS, CSS, Icons). These files are self-contained and do **not** require internet access.
 
-## Run Locally
+## 2. Nginx Configuration
+Place the contents of `dist/` into your web root (e.g., `/var/www/netnode/public`).
 
-**Prerequisites:**  Node.js
+Example Nginx config:
+```nginx
+server {
+    listen 80;
+    server_name netnode.local;
+    root /var/www/netnode/public;
+    index index.html;
 
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+    # If using PHP for LDAP (optional backend)
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/var/run/php/php8.1-fpm.sock;
+    }
+}
+```
+
+## 3. Offline Assets
+The application uses:
+- **Tailwind CSS:** Bundled at build time.
+- **Lucide Icons:** Bundled as SVG components.
+- **Charts (Recharts):** Bundled JS.
+- **Topology (Konva):** Bundled JS.
+- **Terminal (Xterm):** Bundled JS.
+
+**Fonts:** The system defaults to standard system fonts (San Francisco, Segoe UI, Roboto) if Inter/JetBrains Mono are not found. To ensure specific branding offline, you can copy `.ttf` files into `public/fonts/` and update `index.css`.
+
+## 4. No External Dependencies
+Once built, the application makes **zero** requests to external CDNs or AI Studio APIs. ALL logic runs in the browser or via your local PHP/LDAP backend.
