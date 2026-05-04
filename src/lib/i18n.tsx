@@ -124,19 +124,25 @@ interface LanguageContextType {
 const LanguageContext = createContext<LanguageContextType | undefined>(undefined);
 
 export const LanguageProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [language, setLanguage] = useState<Language>('ru');
+  const [language, setLanguage] = useState<Language>(() => {
+    // Check local storage first on initialization
+    const saved = localStorage.getItem('netnode_lang');
+    return (saved as Language) || 'ru';
+  });
 
   React.useEffect(() => {
-    fetch('/api/config/system')
-      .then(res => res.json())
-      .then(data => {
-        if (data.config && data.config.defaultLanguage) {
-          setLanguage(data.config.defaultLanguage as Language);
-        }
-      })
-      .catch(() => {
-        // Fallback or ignore
-      });
+    // Only fetch server default if user hasn't set an explicit preference
+    const userPref = localStorage.getItem('netnode_lang');
+    if (!userPref) {
+      fetch('/api/config/system')
+        .then(res => res.json())
+        .then(data => {
+          if (data.config && data.config.defaultLanguage) {
+            setLanguage(data.config.defaultLanguage as Language);
+          }
+        })
+        .catch(() => {});
+    }
   }, []);
 
   const t = (key: string) => {
@@ -144,8 +150,13 @@ export const LanguageProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     return translations[key][language];
   };
 
+  const handleSetLanguage = (lang: Language) => {
+    setLanguage(lang);
+    localStorage.setItem('netnode_lang', lang);
+  };
+
   return (
-    <LanguageContext.Provider value={{ language, setLanguage, t }}>
+    <LanguageContext.Provider value={{ language, setLanguage: handleSetLanguage, t }}>
       {children}
     </LanguageContext.Provider>
   );
