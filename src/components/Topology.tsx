@@ -2,12 +2,14 @@ import React, { useState } from 'react';
 import { Stage, Layer, Rect, Text, Line, Circle } from 'react-konva';
 import { Share2, Download, MousePointer2, Plus, Box } from 'lucide-react';
 import { Switch } from '../types';
+import { useTranslation } from '../lib/i18n';
 
 interface TopologyProps {
   switches: Switch[];
 }
 
 const Topology: React.FC<TopologyProps> = ({ switches }) => {
+  const { t } = useTranslation();
   const containerRef = React.useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const [nodes, setNodes] = useState(switches.map((s, i) => ({
@@ -55,7 +57,7 @@ const Topology: React.FC<TopologyProps> = ({ switches }) => {
         <div className="flex items-center gap-4">
           <h2 className="text-sm font-bold text-white uppercase tracking-widest flex items-center gap-3">
             <Share2 size={18} className="text-[#228be6]" />
-            Network Topology Visualizer
+            {t('topologyVisualizer')}
           </h2>
           <div className="h-4 w-px bg-[#373a40]" />
           <nav className="flex gap-2">
@@ -78,7 +80,7 @@ const Topology: React.FC<TopologyProps> = ({ switches }) => {
           className="flex items-center gap-2 px-4 py-2 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-[10px] font-bold uppercase tracking-widest leading-none shadow-lg"
         >
           <Download size={14} />
-          Export to JSON
+          {t('exportJson')}
         </button>
       </header>
 

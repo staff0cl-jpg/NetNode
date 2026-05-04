@@ -2,23 +2,53 @@
 
 This application is designed for offline deployment on local servers (Air-Gapped environments).
 
-## Local Deployment Requirements
-- **Web Server:** Nginx or Apache
-- **Backend:** PHP 7.4+ or 8.x (for LDAP integration)
-- **Node.js:** v18+ (only for building the frontend)
+## 1. Operating System Deployment Guides
 
-## 1. Build the Frontend
-To build the application for production, run:
+### Ubuntu / Debian
+```bash
+# Update and install dependencies
+sudo apt update
+sudo apt install -y nginx php-fpm php-ldap php-curl php-mbstring php-xml
+
+# Start services
+sudo systemctl enable --now nginx php-fpm
+```
+
+### CentOS / RHEL / Fedora (using DNF)
+```bash
+# Update and install EPEL (for some packages)
+sudo dnf install -y epel-release
+sudo dnf update -y
+
+# Install Nginx and PHP
+sudo dnf install -y nginx php php-fpm php-ldap php-mbstring php-xml php-curl
+
+# Start and enable services
+sudo systemctl enable --now nginx
+sudo systemctl enable --now php-fpm
+```
+
+### CentOS 7 (Archived)
+```bash
+# Install EPEL
+sudo yum install epel-release
+sudo yum install nginx php php-fpm php-ldap php-mbstring php-xml php-curl
+sudo systemctl enable --now nginx
+sudo systemctl enable --now php-fpm
+```
+
+## 2. Build the Frontend
+To build the application for production, run on your workstation:
 ```bash
 npm install
 npm run build
 ```
-This will generate a `dist/` folder containing all static assets (HTML, JS, CSS, Icons). These files are self-contained and do **not** require internet access.
+This generates a `dist/` folder containing all static assets.
 
-## 2. Nginx Configuration
-Place the contents of `dist/` into your web root (e.g., `/var/www/netnode/public`).
+## 3. Nginx Configuration
+Place the contents of `dist/` into your web root (e.g. `/var/www/netnode/public`).
 
-Example Nginx config:
+Example Nginx host config:
 ```nginx
 server {
     listen 80;
@@ -32,21 +62,15 @@ server {
 
     # If using PHP for LDAP (optional backend)
     location ~ \.php$ {
-        include snippets/fastcgi-php.conf;
-        fastcgi_pass unix:/var/run/php/php8.1-fpm.sock;
+        include fastcgi_params;
+        # Change path based on PHP version and OS
+        fastcgi_pass unix:/var/run/php/php-fpm.sock;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
     }
 }
 ```
 
-## 3. Offline Assets
-The application uses:
-- **Tailwind CSS:** Bundled at build time.
-- **Lucide Icons:** Bundled as SVG components.
-- **Charts (Recharts):** Bundled JS.
-- **Topology (Konva):** Bundled JS.
-- **Terminal (Xterm):** Bundled JS.
-
-**Fonts:** The system defaults to standard system fonts (San Francisco, Segoe UI, Roboto) if Inter/JetBrains Mono are not found. To ensure specific branding offline, you can copy `.ttf` files into `public/fonts/` and update `index.css`.
-
-## 4. No External Dependencies
-Once built, the application makes **zero** requests to external CDNs or AI Studio APIs. ALL logic runs in the browser or via your local PHP/LDAP backend.
+## 4. Security Notes
+- **Local Account:** Default access is `admin` / `admin`. Change this in a production environment via User Management.
+- **Offline Mode:** The application is fully self-contained. No external CDN or API calls are made after the build process.
+- **Languages:** Supports Russian (default) and English.

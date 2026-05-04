@@ -5,12 +5,20 @@ import Inventory from './components/Inventory';
 import Topology from './components/Topology';
 import Terminal from './components/Terminal';
 import Settings from './components/Settings';
+import UserManagement from './components/UserManagement';
+import Login from './components/Login';
 import { INITIAL_SWITCHES } from './constants';
 import { Switch } from './types';
+import { LanguageProvider } from './lib/i18n';
 
-function App() {
+function AppContent() {
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [activeTab, setActiveTab] = useState('inventory');
   const [switches, setSwitches] = useState<Switch[]>(INITIAL_SWITCHES);
+
+  if (!isAuthenticated) {
+    return <Login onLogin={() => setIsAuthenticated(true)} />;
+  }
 
   const renderContent = () => {
     switch (activeTab) {
@@ -22,6 +30,8 @@ function App() {
         return <Topology switches={switches} />;
       case 'terminal':
         return <Terminal switches={switches} />;
+      case 'users':
+        return <UserManagement />;
       case 'settings':
         return <Settings />;
       default:
@@ -31,7 +41,11 @@ function App() {
 
   return (
     <div className="flex h-screen w-screen bg-[#1a1b1e] text-[#c1c2c5] overflow-hidden font-sans">
-      <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} />
+      <Sidebar 
+        activeTab={activeTab} 
+        setActiveTab={setActiveTab} 
+        onLogout={() => setIsAuthenticated(false)} 
+      />
       
       <main className="flex-1 flex flex-col min-w-0 overflow-y-auto">
         {/* Top Header Bar */}
@@ -58,4 +72,10 @@ function App() {
   );
 }
 
-export default App;
+export default function App() {
+  return (
+    <LanguageProvider>
+      <AppContent />
+    </LanguageProvider>
+  );
+}

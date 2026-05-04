@@ -4,6 +4,7 @@ import { Plus, Search, Filter, MoreVertical, Edit2, Trash2, Cpu, Download } from
 import { Switch, Vendor } from '../types';
 import { MODELS, VENDORS } from '../constants';
 import { cn } from '../lib/utils';
+import { useTranslation } from '../lib/i18n';
 
 interface InventoryProps {
   switches: Switch[];
@@ -11,6 +12,7 @@ interface InventoryProps {
 }
 
 const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
+  const { t } = useTranslation();
   const [searchTerm, setSearchTerm] = useState('');
   const [isAdding, setIsAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -69,8 +71,8 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
     <div className="p-8 space-y-6">
       <header className="flex justify-between items-end">
         <div>
-          <h2 className="text-2xl font-bold text-white mb-2 leading-tight">Switch Inventory</h2>
-          <p className="text-sm text-[#909296]">Manage and monitor all network nodes across cities and zones.</p>
+          <h2 className="text-2xl font-bold text-white mb-2 leading-tight">{t('switchInventory')}</h2>
+          <p className="text-sm text-[#909296]">{t('manageNodes')}</p>
         </div>
         <div className="flex gap-3">
           <button 
@@ -78,14 +80,14 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
             className="flex items-center gap-2 px-4 py-2 border border-[#373a40] text-[#c1c2c5] hover:text-white rounded text-sm font-bold transition-all"
           >
             <Download size={18} />
-            Export CSV
+            {t('exportCsv')}
           </button>
           <button 
             onClick={() => setIsAdding(true)}
             className="flex items-center gap-2 px-4 py-2 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-sm font-bold transition-all shadow-lg"
           >
             <Plus size={18} />
-            Register Switch
+            {t('registerSwitch')}
           </button>
         </div>
       </header>
@@ -96,7 +98,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-[#5c5f66]" size={16} />
             <input 
               type="text" 
-              placeholder="Filter by name, IP, or city..."
+              placeholder={t('filterPlaceholder')}
               className="w-full bg-[#141517] border border-[#373a40] pl-10 pr-4 py-2 rounded text-sm text-white focus:outline-none focus:border-[#228be6] transition-colors"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
@@ -110,13 +112,13 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
         <table className="z-table">
           <thead>
             <tr>
-              <th>Status</th>
-              <th>Name</th>
-              <th>Vendor / Model</th>
-              <th>IP Address</th>
-              <th>Location (City/Zone)</th>
-              <th>Uptime</th>
-              <th className="text-right">Actions</th>
+              <th>{t('status')}</th>
+              <th>{t('name')}</th>
+              <th>{t('vendorModel')}</th>
+              <th>{t('ipAddress')}</th>
+              <th>{t('location')}</th>
+              <th>{t('uptime')}</th>
+              <th className="text-right">{t('actions')}</th>
             </tr>
           </thead>
           <tbody>
@@ -151,7 +153,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
                     <button 
                       onClick={() => handleEdit(sw)}
                       className="hover:text-white transition-colors"
-                      title="Edit Node"
+                      title={t('editNode')}
                     >
                       <Edit2 size={14} />
                     </button>
@@ -181,13 +183,13 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
             <div className="flex items-center gap-3 mb-8 border-b border-[#373a40] pb-4">
               <Cpu className="text-[#228be6]" size={24} />
               <h3 className="text-xl font-bold text-white">
-                {editingId ? 'Edit Network Node' : 'Register New Network Node'}
+                {editingId ? t('editNode') : t('registerSwitch')}
               </h3>
             </div>
             
             <div className="grid grid-cols-2 gap-6">
               <div className="space-y-2">
-                <label className="text-[10px] font-bold text-[#909296] uppercase">Device Name</label>
+                <label className="text-[10px] font-bold text-[#909296] uppercase">{t('deviceName')}</label>
                 <input 
                   className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:outline-none focus:border-[#228be6]"
                   placeholder="e.g. CORE-SW-02"
@@ -196,7 +198,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
                 />
               </div>
               <div className="space-y-2">
-                <label className="text-[10px] font-bold text-[#909296] uppercase">Management IP</label>
+                <label className="text-[10px] font-bold text-[#909296] uppercase">{t('mgmntIp')}</label>
                 <input 
                   className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:outline-none focus:border-[#228be6]"
                   placeholder="10.x.x.x"
@@ -228,7 +230,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
                 </datalist>
               </div>
               <div className="space-y-2">
-                <label className="text-[10px] font-bold text-[#909296] uppercase">City</label>
+                <label className="text-[10px] font-bold text-[#909296] uppercase">{t('city')}</label>
                 <input 
                   className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:outline-none focus:border-[#228be6]"
                   placeholder="Moscow"
@@ -237,7 +239,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
                 />
               </div>
               <div className="space-y-2">
-                <label className="text-[10px] font-bold text-[#909296] uppercase">Zone / Data Center</label>
+                <label className="text-[10px] font-bold text-[#909296] uppercase">{t('zone')}</label>
                 <input 
                   className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:outline-none focus:border-[#228be6]"
                   placeholder="Server-Farm-A"
@@ -256,13 +258,13 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches }) => {
                 }}
                 className="px-6 py-2.5 text-sm font-bold text-[#909296] hover:text-white transition-all uppercase tracking-widest"
               >
-                Cancel
+                {t('cancel')}
               </button>
               <button 
                 onClick={handleAdd}
                 className="px-8 py-2.5 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-sm font-bold shadow-lg uppercase tracking-widest transition-all"
               >
-                {editingId ? 'Save Changes' : 'Complete Registration'}
+                {editingId ? t('save') : t('completeReg')}
               </button>
             </div>
           </motion.div>

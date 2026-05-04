@@ -5,12 +5,14 @@ import { io, Socket } from 'socket.io-client';
 import { Terminal as TerminalIcon, Power, Monitor, Shield, Database } from 'lucide-react';
 import { Switch } from '../types';
 import 'xterm/css/xterm.css';
+import { useTranslation } from '../lib/i18n';
 
 interface TerminalProps {
   switches: Switch[];
 }
 
 const Terminal: React.FC<TerminalProps> = ({ switches }) => {
+  const { t } = useTranslation();
   const terminalRef = useRef<HTMLDivElement>(null);
   const [activeSwitch, setActiveSwitch] = useState<Switch | null>(switches[0]);
   const [isConnected, setIsConnected] = useState(false);
@@ -90,7 +92,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches }) => {
               <Monitor size={16} />
               <div className="absolute -top-1 -right-1 w-2 h-2 bg-[#40c057] rounded-full animate-pulse" />
             </div>
-            Virtual Terminal / CLI
+            {t('terminal')}
           </div>
           
           <div className="h-4 w-px bg-[#373a40]" />
