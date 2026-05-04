@@ -89,6 +89,66 @@ const Settings: React.FC = () => {
           </div>
         </div>
 
+        {/* Auto-Discovery Section */}
+        <div className="bg-[#25262b] border border-[#373a40] rounded overflow-hidden">
+          <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
+            <Database className="text-[#228be6]" size={18} />
+            <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('autoDiscovery')}</h3>
+          </div>
+          <div className="p-6 space-y-6">
+            <div className="grid grid-cols-1 gap-6">
+              <div className="space-y-2">
+                <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('discoverySubnets')}</label>
+                <input className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" placeholder="10.0.0.0/24, 192.168.1.0/24" />
+              </div>
+            </div>
+            
+            <div className="grid grid-cols-2 gap-6">
+              <div className="space-y-2">
+                <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('username')}</label>
+                <input className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" placeholder="admin" />
+              </div>
+              <div className="space-y-2">
+                <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">Password</label>
+                <input type="password" className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" placeholder="••••••••" />
+              </div>
+            </div>
+
+            <div className="pt-4 border-t border-[#373a40] flex justify-between items-center">
+              <p className="text-[10px] text-[#5c5f66] uppercase">{t('sshCredentials')}</p>
+              <button 
+                onClick={() => alert('Discovery scan started on background.')}
+                className="px-6 py-2 bg-[#40c057] hover:bg-[#37b24d] text-white rounded text-[10px] font-bold uppercase tracking-widest transition-all shadow-lg"
+              >
+                {t('startDiscovery')}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* SNMP Configuration Section */}
+        <div className="bg-[#25262b] border border-[#373a40] rounded overflow-hidden">
+          <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
+            <Shield className="text-[#fab005]" size={18} />
+            <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('snmpConfig')}</h3>
+          </div>
+          <div className="p-6 space-y-6">
+            <div className="grid grid-cols-2 gap-6">
+              <div className="space-y-2">
+                <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('snmpCommunity')}</label>
+                <input className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" placeholder="public" />
+              </div>
+              <div className="space-y-2">
+                <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('snmpVersion')}</label>
+                <select className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors">
+                  <option>SNMP v2c</option>
+                  <option>SNMP v3 (AuthPriv)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </div>
+
         {/* Resource Planning Info */}
         <div className="bg-[#25262b] border border-[#373a40] rounded overflow-hidden">
           <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">

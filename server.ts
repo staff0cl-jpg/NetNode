@@ -1,51 +1,81 @@
 import express from "express";
-import { createServer } from "http";
-import { Server } from "socket.io";
 import { createServer as createViteServer } from "vite";
+import { Server } from "socket.io";
+import http from "http";
 import path from "path";
-import { fileURLToPath } from "url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { Client } from "ssh2";
 
 async function startServer() {
   const app = express();
-  const httpServer = createServer(app);
-  const io = new Server(httpServer);
+  const server = http.createServer(app);
+  const io = new Server(server);
   const PORT = 3000;
 
-  // Mock CLI Logic
-  io.on("connection", (socket) => {
-    let currentVendor = "HPE";
-    
-    socket.on("terminal:input", (data) => {
-      const input = data.trim();
-      let response = "";
+  app.use(express.json());
 
-      if (!input) {
-        response = `\r\n${currentVendor}-Switch# `;
-      } else if (input === "help" || input === "?") {
-        response = `\r\nAvailable commands:\r\n  show ip int brief\r\n  show version\r\n  conf t\r\n  exit\r\n  help\r\n${currentVendor}-Switch# `;
-      } else if (input.startsWith("show version")) {
-        response = `\r\n${currentVendor} Operating System Software\r\nVersion 16.10, Build 0001\r\nUptime is 2 weeks, 4 days\r\n${currentVendor}-Switch# `;
-      } else if (input.startsWith("show ip int brief")) {
-        response = `\r\nInterface  IP-Address  Status  Protocol\r\n1/1        10.0.0.1    up      up\r\n1/2        unassigned  up      up\r\n1/3        unassigned  down    down\r\n${currentVendor}-Switch# `;
-      } else {
-        response = `\r\n% Unknown command: ${input}\r\n${currentVendor}-Switch# `;
-      }
-      
-      socket.emit("terminal:output", response);
+  // API: Health Check
+  app.get("/api/health", (req, res) => {
+    res.json({ status: "online", version: "2.4.0-pro" });
+  });
+
+  // API: Auto-Discovery (Simulated for this environment)
+  app.post("/api/discovery/start", (req, res) => {
+    const { subnets, credentials } = req.body;
+    console.log(`Starting discovery on ${subnets.join(', ')}`);
+    
+    // In a real environment, we would use nmap or snmp-scan here
+    // For now, we return a mock task ID
+    res.json({ taskId: "discovery_" + Date.now(), message: "Discovery process initiated" });
+  });
+
+  // API: Get Topology Relationships (LLDP Data Simulation)
+  app.get("/api/topology/links", (req, res) => {
+    // This would normally query the database or poll switches via SNMP
+    const links = [
+      { source: "1", target: "2", portA: "Gig1/0/1", portB: "Gig0/1" },
+      { source: "2", target: "3", portA: "Gig0/24", portB: "Ten1/0/1" },
+      { source: "1", target: "3", portA: "Gig1/0/2", portB: "Ten1/0/2" },
+    ];
+    res.json(links);
+  });
+
+  // Socket.io for Terminal (SSH)
+  io.on("connection", (socket) => {
+    let sshClient: Client | null = null;
+
+    socket.on("ssh:connect", ({ host, username, password }) => {
+      sshClient = new Client();
+      sshClient
+        .on("ready", () => {
+          socket.emit("ssh:status", "connected");
+          sshClient?.shell((err, stream) => {
+            if (err) return socket.emit("ssh:data", `\r\n*** SSH Shell Error: ${err.message} ***\r\n`);
+            
+            stream.on("data", (data: Buffer) => {
+              socket.emit("ssh:data", data.toString());
+            });
+            
+            socket.on("ssh:input", (input: string) => {
+              stream.write(input);
+            });
+
+            stream.on("close", () => {
+              sshClient?.end();
+            });
+          });
+        })
+        .on("error", (err) => {
+          socket.emit("ssh:data", `\r\n*** SSH Error: ${err.message} ***\r\n`);
+        })
+        .connect({ host, port: 22, username, password });
     });
 
-    socket.emit("terminal:output", `\r\n*****************************************************************\r\n*                                                               *\r\n*  Welcome to NetNode Pro Secure Management Interface           *\r\n*  Unauthorized access is strictly prohibited.                  *\r\n*                                                               *\r\n*****************************************************************\r\n\r\n${currentVendor}-Switch# `);
+    socket.on("disconnect", () => {
+      sshClient?.end();
+    });
   });
 
-  // API Routes
-  app.get("/api/health", (req, res) => {
-    res.json({ status: "ok" });
-  });
-
-  // Vite middleware for development
+  // Vite integration
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -60,8 +90,8 @@ async function startServer() {
     });
   }
 
-  httpServer.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+  server.listen(PORT, "0.0.0.0", () => {
+    console.log(`NETNODE Backend running on http://localhost:${PORT}`);
   });
 }
 

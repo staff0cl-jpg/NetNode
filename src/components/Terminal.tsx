@@ -43,44 +43,59 @@ const Terminal: React.FC<TerminalProps> = ({ switches }) => {
     socket.current = io();
 
     const handleResize = () => {
-      fitAddon.fit();
+      if (terminalRef.current && xterm.current) {
+        fitAddon.fit();
+      }
     };
     window.addEventListener('resize', handleResize);
+    
+    // Initial fit with small delay to ensure container is mounted
+    setTimeout(() => {
+      if (terminalRef.current && xterm.current) {
+        fitAddon.fit();
+      }
+    }, 100);
 
-    socket.current.on('terminal:output', (data: string) => {
+    socket.current.on('ssh:data', (data: string) => {
       xterm.current?.write(data);
     });
 
-    let currentLine = '';
-    xterm.current.onData(data => {
-      if (data === '\r') {
-        socket.current?.emit('terminal:input', currentLine);
-        currentLine = '';
-      } else if (data === '\u007f') { // Backspace
-        if (currentLine.length > 0) {
-          currentLine = currentLine.slice(0, -1);
-          xterm.current?.write('\b \b');
-        }
-      } else {
-        currentLine += data;
-        xterm.current?.write(data);
+    socket.current.on('ssh:status', (status: string) => {
+      if (status === 'connected') {
+        setIsConnected(true);
       }
     });
 
-    setIsConnected(true);
+    xterm.current.onData((data) => {
+      if (isConnected) {
+        socket.current?.emit('ssh:input', data);
+      }
+    });
 
     return () => {
       window.removeEventListener('resize', handleResize);
       xterm.current?.dispose();
       socket.current?.disconnect();
     };
-  }, []);
+  }, [isConnected]);
 
   const handleConnect = (sw: Switch) => {
     setActiveSwitch(sw);
     xterm.current?.clear();
-    xterm.current?.write(`\r\nConnecting to [${sw.vendor}] ${sw.name} at ${sw.ip}...\r\n`);
-    socket.current?.emit('terminal:input', ''); // Trigger prompt
+    xterm.current?.write(`\r\n\x1b[34m[NETNODE]\x1b[0m Connecting to ${sw.name} at ${sw.ip}...\r\n`);
+    
+    socket.current?.emit('ssh:connect', {
+      host: sw.ip,
+      username: 'admin',
+      password: 'admin'
+    });
+  };
+
+  const handleDisconnect = () => {
+    socket.current?.disconnect();
+    socket.current = io(); // Reset socket
+    setIsConnected(false);
+    xterm.current?.writeln('\r\n\x1b[31m[DISCONNECTED]\x1b[0m SSH Session terminated.');
   };
 
   return (
@@ -98,11 +113,14 @@ const Terminal: React.FC<TerminalProps> = ({ switches }) => {
           <div className="h-4 w-px bg-[#373a40]" />
           
           <div className="flex items-center gap-3">
-            <label className="text-[10px] font-bold text-[#5c5f66] uppercase">Active Session:</label>
+            <label className="text-[10px] font-bold text-[#5c5f66] uppercase">{t('activeSession')}</label>
             <select 
               className="bg-[#141517] border border-[#373a40] px-3 py-1 rounded text-xs text-white focus:outline-none"
               value={activeSwitch?.id}
-              onChange={(e) => handleConnect(switches.find(s => s.id === e.target.value)!)}
+              onChange={(e) => {
+                const sw = switches.find(s => s.id === e.target.value);
+                if (sw) handleConnect(sw);
+              }}
             >
               {switches.map(sw => (
                 <option key={sw.id} value={sw.id}>{sw.name} ({sw.ip})</option>
@@ -112,43 +130,23 @@ const Terminal: React.FC<TerminalProps> = ({ switches }) => {
         </div>
 
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2 px-3 py-1.5 border border-amber-500/30 bg-amber-500/10 rounded text-[10px] font-bold text-amber-500">
+          <div className="flex items-center gap-2 px-3 py-1.5 border border-[#228be6]/30 bg-[#228be6]/10 rounded text-[10px] font-bold text-[#228be6]">
             <Shield size={12} />
-            SSH SECURE
+            SSH {isConnected ? 'ACTIVE' : 'READY'}
           </div>
-          <button className="flex items-center gap-2 px-3 py-1.5 bg-red-500/10 border border-red-500/30 rounded text-[10px] font-bold text-red-500 hover:bg-red-500/20 transition-all">
+          <button 
+            onClick={handleDisconnect}
+            className="flex items-center gap-2 px-3 py-1.5 bg-red-500/10 border border-red-500/30 rounded text-[10px] font-bold text-red-500 hover:bg-red-500/20 transition-all"
+          >
             <Power size={12} />
-            DISCONNECT
+            {t('disconnect')}
           </button>
         </div>
       </header>
 
       <div className="flex-1 flex overflow-hidden">
-        <div className="w-1/4 p-4 border-r border-[#373a40] bg-[#141517] overflow-y-auto hidden lg:block">
-          <h4 className="text-[10px] font-bold text-[#5c5f66] uppercase tracking-widest mb-4 flex items-center gap-2">
-            <Database size={12} />
-            Recent Connections
-          </h4>
-          <div className="space-y-1">
-            {switches.map(sw => (
-              <button
-                key={sw.id}
-                onClick={() => handleConnect(sw)}
-                className={`w-full text-left px-3 py-2 rounded text-xs transition-colors ${activeSwitch?.id === sw.id ? 'bg-[#228be6] text-white' : 'text-[#909296] hover:bg-[#2c2e33]'}`}
-              >
-                <div className="font-bold mb-0.5">{sw.name}</div>
-                <div className="opacity-60 font-mono text-[9px] uppercase">{sw.vendor} / {sw.ip}</div>
-              </button>
-            ))}
-          </div>
-        </div>
-        
-        <div className="flex-1 p-0 flex flex-col bg-black">
-          <div ref={terminalRef} className="flex-1 overflow-hidden" />
-          <div className="p-2 border-t border-[#373a40] bg-[#1c1d21] text-[10px] font-mono text-[#5c5f66] flex justify-between">
-            <span>BAUD RATE: 9600 | DATA BITS: 8 | PARITY: NONE | STOP BITS: 1</span>
-            <span>TERMINAL TYPE: XTERM-COLOR</span>
-          </div>
+        <div className="flex-1 overflow-hidden p-2">
+            <div ref={terminalRef} className="h-full w-full" />
         </div>
       </div>
     </div>

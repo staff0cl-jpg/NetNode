@@ -11,7 +11,7 @@ interface TopologyProps {
 const Topology: React.FC<TopologyProps> = ({ switches }) => {
   const { t } = useTranslation();
   const containerRef = React.useRef<HTMLDivElement>(null);
-  const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
+  const [canvasSize, setCanvasSize] = useState({ width: 800, height: 600 });
   const [nodes, setNodes] = useState(switches.map((s, i) => ({
     ...s,
     x: 100 + (i % 3) * 250,
@@ -21,9 +21,22 @@ const Topology: React.FC<TopologyProps> = ({ switches }) => {
   React.useEffect(() => {
     if (!containerRef.current) return;
 
+    const updateDimensions = () => {
+      if (containerRef.current) {
+        setCanvasSize({
+          width: containerRef.current.offsetWidth || 800,
+          height: containerRef.current.offsetHeight || 600,
+        });
+      }
+    };
+
+    updateDimensions();
+
     const observer = new ResizeObserver((entries) => {
-      for (let entry of entries) {
-        setDimensions({
+      if (!entries || !entries.length) return;
+      const entry = entries[0];
+      if (entry.contentRect) {
+        setCanvasSize({
           width: entry.contentRect.width,
           height: entry.contentRect.height,
         });
@@ -31,7 +44,12 @@ const Topology: React.FC<TopologyProps> = ({ switches }) => {
     });
 
     observer.observe(containerRef.current);
-    return () => observer.disconnect();
+    window.addEventListener('resize', updateDimensions);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', updateDimensions);
+    };
   }, []);
 
   const handleDragEnd = (id: string, e: any) => {
@@ -61,17 +79,18 @@ const Topology: React.FC<TopologyProps> = ({ switches }) => {
           </h2>
           <div className="h-4 w-px bg-[#373a40]" />
           <nav className="flex gap-2">
-            <button className="flex items-center gap-2 px-3 py-1.5 bg-[#2c2e33] rounded text-[10px] font-bold text-[#c1c2c5] hover:text-white transition-all border border-[#373a40]">
-              <MousePointer2 size={12} />
-              SELECT
+            <button 
+              onClick={() => {
+                alert('Pulling LLDP data from switches and re-calculating topology links...');
+              }}
+              className="flex items-center gap-2 px-3 py-1.5 bg-[#2c2e33] text-[#c1c2c5] hover:text-white rounded text-[10px] font-bold uppercase transition-all border border-[#373a40]"
+            >
+              <Box size={14} />
+              {t('autoLayout')}
             </button>
-            <button className="flex items-center gap-2 px-3 py-1.5 bg-[#141517] rounded text-[10px] font-bold text-[#909296] hover:text-white transition-all">
-              <Box size={12} />
-              SHAPES
-            </button>
-            <button className="flex items-center gap-2 px-3 py-1.5 bg-[#141517] rounded text-[10px] font-bold text-[#909296] hover:text-white transition-all">
-              <Plus size={12} />
-              ZONE
+            <button className="flex items-center gap-2 px-3 py-1.5 bg-[#228be6] text-white rounded text-[10px] font-bold uppercase transition-all shadow-sm">
+              <MousePointer2 size={14} />
+              {t('manualMode')}
             </button>
           </nav>
         </div>
@@ -85,7 +104,7 @@ const Topology: React.FC<TopologyProps> = ({ switches }) => {
       </header>
 
       <div ref={containerRef} className="flex-1 bg-[#141517] relative cursor-crosshair overflow-hidden">
-        <Stage width={dimensions.width} height={dimensions.height}>
+        <Stage width={canvasSize.width} height={canvasSize.height}>
           <Layer>
             {/* Background Grid Pattern */}
             {[...Array(20)].map((_, i) => (
