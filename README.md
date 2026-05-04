@@ -19,28 +19,44 @@ Before installing, ensure your system has the following components:
 1. **Extract Source Code**:
    Upload the project files to your server (e.g., `/var/www/netnode`).
 
-2. **Install Dependencies**:
+2. **Setup Global Tools**:
+   ```bash
+   # Install PM2 for process management
+   sudo npm install -g pm2
+   ```
+
+3. **Install Dependencies**:
    ```bash
    cd /var/www/netnode
    npm install
    ```
 
-3. **Build the Application**:
+4. **Configuration**:
+   Copy the example environment file:
+   ```bash
+   cp .env.example .env
+   ```
+
+5. **Build the Application**:
    ```bash
    npm run build
    ```
 
-4. **Start the Server**:
-   For production, it is recommended to use `pm2`:
+6. **Start the Server**:
+   For production with `pm2`:
    ```bash
-   # Start using pm2
-   pm2 start server.ts --name netnode --interpreter npx -- tsx
+   # Using local tsx (installed via npm install)
+   pm2 start "npx tsx server.ts" --name netnode
    
-   # Or using standard node (if server.ts is compiled or using tsx directly)
+   # Or directly with node (if using compiled version, but npx tsx is easiest for TS)
    NODE_ENV=production npx tsx server.ts
    ```
 
-## 3. Nginx Configuration
+## 3. Cleanup
+
+Files like `metadata.json` are specific to the development environment and can be safely removed or ignored in your production deployment.
+
+## 4. Nginx Configuration
 
 Configure Nginx to proxy traffic to the Node.js application (default port 3000).
 
@@ -107,4 +123,10 @@ If you see an error about native bindings after upgrading Node.js:
 rm -rf node_modules package-lock.json
 npm install
 npm run build
+```
+
+**4. Command 'pm2' not found**
+Install PM2 globally:
+```bash
+sudo npm install -g pm2
 ```
