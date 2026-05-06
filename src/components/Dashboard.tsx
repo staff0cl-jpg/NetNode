@@ -7,39 +7,89 @@ import { useTranslation } from '../lib/i18n';
 
 interface DashboardProps {
   switches: Switch[];
+  role?: string;
+  username?: string;
 }
 
-const Dashboard: React.FC<DashboardProps> = ({ switches }) => {
+const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
   const { t } = useTranslation();
   const [isMounted, setIsMounted] = React.useState(false);
+  const [dashboardMetrics, setDashboardMetrics] = React.useState<any>(null);
+  const [dashboardUi, setDashboardUi] = React.useState({
+    trunkThroughputTitle: '',
+    trunkLoadTitle: '',
+    trunkMonitorTitle: '',
+    showTrunkMonitor: true,
+  });
 
   React.useEffect(() => {
     setIsMounted(true);
   }, []);
 
+  React.useEffect(() => {
+    const loadUi = async () => {
+      try {
+        const r = await fetch('/api/config/system', {
+          headers: {
+            'x-user-role': role || 'viewer',
+            'x-user-name': username || 'unknown'
+          }
+        });
+        if (!r.ok) return;
+        const data = await r.json();
+        const ui = data?.config?.dashboardUi;
+        if (ui) {
+          setDashboardUi({
+            trunkThroughputTitle: ui.trunkThroughputTitle || '',
+            trunkLoadTitle: ui.trunkLoadTitle || '',
+            trunkMonitorTitle: ui.trunkMonitorTitle || '',
+            showTrunkMonitor: ui.showTrunkMonitor !== false,
+          });
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+    loadUi();
+  }, [role, username]);
+
+  React.useEffect(() => {
+    const load = async () => {
+      try {
+        const r = await fetch('/api/metrics/dashboard');
+        const data = await r.json();
+        setDashboardMetrics(data);
+      } catch {
+        setDashboardMetrics(null);
+      }
+    };
+    load();
+    const i = setInterval(load, 15000);
+    return () => clearInterval(i);
+  }, []);
+
   const onlineSwitches = switches.filter(s => s.status === 'online');
   const onlineCount = onlineSwitches.length;
-  const avgLoadValue = onlineCount > 0 ? Math.floor(20 + Math.random() * 30) : 0;
+  const avgLoadValue = switches.length > 0 ? Math.round((onlineCount / switches.length) * 100) : 0;
   
   const dynamicData = React.useMemo(() => {
-    const hours = ['00:00', '04:00', '08:00', '12:00', '16:00', '20:00'];
-    return hours.map(h => {
-      const isWorkHours = h === '08:00' || h === '12:00' || h === '16:00';
-      const baseTraffic = onlineCount * (isWorkHours ? 150 : 20);
-      const baseLoad = onlineCount > 0 ? (isWorkHours ? 60 : 25) : 0;
-      
-      return {
-        name: h,
-        load: onlineCount > 0 ? Math.max(5, baseLoad + Math.floor(Math.random() * 15)) : 0,
-        traffic: onlineCount > 0 ? Math.max(10, baseTraffic + Math.floor(Math.random() * 50)) : 0
-      };
-    });
-  }, [onlineCount]);
+    const top = dashboardMetrics?.trunkSummary?.topByTraffic || [];
+    if (!top.length) {
+      return [{ name: 'N/A', load: 0, traffic: 0 }];
+    }
+    return top.slice(0, 8).map((p: any) => ({
+      name: `${p.deviceName}:${p.ifName}`.slice(0, 18),
+      load: Math.round(((p.inBps + p.outBps) / 1_000_000) * 100) / 100,
+      traffic: Math.round((p.inBps + p.outBps) / 1_000_000),
+    }));
+  }, [dashboardMetrics]);
+
+  const trunkDown = dashboardMetrics?.trunkSummary?.down || 0;
 
   const stats = [
     { label: t('totalSwitches'), value: switches.length, icon: Server, color: '#228be6' },
     { label: t('onlineNodes'), value: onlineCount, icon: ShieldCheck, color: '#40c057' },
-    { label: t('activeAlerts'), value: switches.filter(s => s.status !== 'online').length, icon: AlertTriangle, color: '#fa5252' },
+    { label: t('activeAlerts'), value: switches.filter(s => s.status !== 'online').length + trunkDown, icon: AlertTriangle, color: '#fa5252' },
     { label: t('avgLoad'), value: `${avgLoadValue}%`, icon: Activity, color: '#fab005' },
   ];
 
@@ -69,7 +119,7 @@ const Dashboard: React.FC<DashboardProps> = ({ switches }) => {
               </div>
             </div>
             <div className="mt-4 flex items-center gap-2 text-[10px] font-mono text-[#40c057]">
-              <span>{onlineCount > 0 ? '+2.4% vs last week' : 'No active traffic'}</span>
+              <span>{onlineCount > 0 ? t('trendPlaceholder') : t('noActiveTraffic')}</span>
             </div>
           </motion.div>
         ))}
@@ -77,7 +127,7 @@ const Dashboard: React.FC<DashboardProps> = ({ switches }) => {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
         <div className="bg-[#25262b] p-6 border border-[#373a40] rounded shadow-sm">
-          <h3 className="text-sm font-bold text-white uppercase tracking-widest mb-6">{t('throughput')} (Mbps)</h3>
+          <h3 className="text-sm font-bold text-white uppercase tracking-widest mb-6">{dashboardUi.trunkThroughputTitle || t('trunkThroughputTitle')}</h3>
           <div className="h-64 outline-none">
             {isMounted && (
               <ResponsiveContainer width="100%" height="100%">
@@ -99,7 +149,7 @@ const Dashboard: React.FC<DashboardProps> = ({ switches }) => {
                   <Tooltip 
                     contentStyle={{ backgroundColor: '#1a1b1e', borderColor: '#373a40', color: '#c1c2c5' }}
                   />
-                  <Line type="monotone" dataKey="traffic" stroke="#228be6" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="traffic" stroke="#228be6" strokeWidth={2} dot />
                 </LineChart>
               </ResponsiveContainer>
             )}
@@ -107,7 +157,7 @@ const Dashboard: React.FC<DashboardProps> = ({ switches }) => {
         </div>
 
         <div className="bg-[#25262b] p-6 border border-[#373a40] rounded shadow-sm">
-          <h3 className="text-sm font-bold text-white uppercase tracking-widest mb-6">{t('cpuLoadVendor')} (%)</h3>
+          <h3 className="text-sm font-bold text-white uppercase tracking-widest mb-6">{dashboardUi.trunkLoadTitle || t('trunkLoadTitle')}</h3>
           <div className="h-64 outline-none">
             {isMounted && (
               <ResponsiveContainer width="100%" height="100%">
@@ -136,6 +186,26 @@ const Dashboard: React.FC<DashboardProps> = ({ switches }) => {
           </div>
         </div>
       </div>
+
+      {dashboardUi.showTrunkMonitor && (
+      <div className="bg-[#25262b] p-6 border border-[#373a40] rounded shadow-sm">
+        <h3 className="text-sm font-bold text-white uppercase tracking-widest mb-4">{dashboardUi.trunkMonitorTitle || t('trunkMonitorTitle')}</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+          {(dashboardMetrics?.trunkSummary?.topByTraffic || []).slice(0, 6).map((p: any) => (
+            <div key={`${p.deviceId}-${p.ifIndex}`} className="border border-[#373a40] rounded p-3">
+              <div className="flex justify-between">
+                <span className="text-white font-semibold">{p.deviceName}</span>
+                <span className={p.operStatus === 1 ? 'text-[#40c057]' : 'text-[#fa5252]'}>
+                  {p.operStatus === 1 ? t('trunkStateUp') : t('trunkStateDown')}
+                </span>
+              </div>
+              <div className="text-[#909296] mt-1">{p.ifName} :: {p.description}</div>
+              <div className="text-[#228be6] mt-1">IN {Math.round(p.inBps / 1_000_000)} Mbps / OUT {Math.round(p.outBps / 1_000_000)} Mbps</div>
+            </div>
+          ))}
+        </div>
+      </div>
+      )}
     </div>
   );
 };

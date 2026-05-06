@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
-import { Plus, Search, Filter, MoreVertical, Edit2, Trash2, Cpu, Download, ChevronUp, ChevronDown, RefreshCw, Play, Square, CheckSquare, Terminal as TerminalIcon } from 'lucide-react';
+import { Plus, Search, MoreVertical, Edit2, Trash2, Cpu, Download, ChevronUp, ChevronDown, RefreshCw, Terminal as TerminalIcon } from 'lucide-react';
 
 const SortIcon = ({ active, direction }: { active: boolean, direction?: 'asc' | 'desc' }) => {
   if (!active) return <div className="w-3" />;
@@ -34,13 +34,66 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
   const [newSwitch, setNewSwitch] = useState<Partial<Switch>>({
     vendor: 'HPE',
     status: 'online',
-    uptime: '0d 0h'
+    uptime: '0d 0h',
+    category: 'Switch',
+    branch: 'HQ'
   });
+  const [meta, setMeta] = useState<{ categories: string[]; branches: string[] }>({ categories: ['Switch'], branches: ['HQ'] });
+  const [newCategoryName, setNewCategoryName] = useState('');
+  const [newBranchName, setNewBranchName] = useState('');
+  const [snmpTemplates, setSnmpTemplates] = useState<Array<{ id: string; name: string }>>([]);
+  const [customOidsText, setCustomOidsText] = useState('');
+
+  const localizeCategory = (value?: string) => {
+    const v = (value || '').toLowerCase();
+    if (v === 'switch') return 'Коммутатор';
+    if (v === 'router') return 'Маршрутизатор';
+    if (v === 'ups') return 'ИБП';
+    if (v === 'firewall') return 'Межсетевой экран';
+    if (v === 'other') return 'Прочее';
+    return value || 'Коммутатор';
+  };
+
+  React.useEffect(() => {
+    fetch('/api/inventory/meta', {
+      headers: {
+        'x-user-role': role || 'viewer',
+        'x-user-name': username || 'unknown'
+      }
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.categories && data.branches) {
+          setMeta(data);
+        }
+      })
+      .catch(() => {});
+    fetch('/api/snmp/templates', {
+      headers: {
+        'x-user-role': role || 'viewer',
+        'x-user-name': username || 'unknown'
+      }
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data.templates)) {
+          setSnmpTemplates(data.templates.map((t: any) => ({ id: t.id, name: t.name })));
+        }
+      })
+      .catch(() => {});
+  }, [role, username]);
 
   const handleAdd = async () => {
     if (!newSwitch.name || !newSwitch.ip || !newSwitch.city) return;
     
     try {
+      const payload = {
+        ...newSwitch,
+        customOids: customOidsText
+          .split('\n')
+          .map((v) => v.trim())
+          .filter(Boolean)
+      };
       if (editingId) {
         const response = await fetch(`/api/inventory/${editingId}`, {
           method: 'PATCH',
@@ -49,7 +102,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
             'x-user-role': role || 'viewer',
             'x-user-name': username || 'unknown'
           },
-          body: JSON.stringify(newSwitch),
+          body: JSON.stringify(payload),
         });
         if (!response.ok) throw new Error('Update failed');
       } else {
@@ -60,7 +113,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
             'x-user-role': role || 'viewer',
             'x-user-name': username || 'unknown'
           },
-          body: JSON.stringify(newSwitch),
+          body: JSON.stringify(payload),
         });
         if (!response.ok) throw new Error('Creation failed');
       }
@@ -70,7 +123,8 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
       // or we just close the modal. For better UX, let's just close and wait for poll.
       setIsAdding(false);
       setEditingId(null);
-      setNewSwitch({ vendor: 'HPE', status: 'online', uptime: '0d 0h' });
+      setNewSwitch({ vendor: 'HPE', status: 'online', uptime: '0d 0h', category: 'Switch', branch: 'HQ' });
+      setCustomOidsText('');
     } catch (error) {
       alert('Error saving device configuration');
     }
@@ -94,13 +148,14 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
 
   const handleEdit = (sw: Switch) => {
     setNewSwitch(sw);
+    setCustomOidsText((sw.customOids || []).join('\n'));
     setEditingId(sw.id);
     setIsAdding(true);
   };
 
   const handleExport = () => {
-    const headers = ['Name', 'Vendor', 'Model', 'IP', 'City', 'Zone', 'Status', 'Uptime'];
-    const rows = switches.map(s => [s.name, s.vendor, s.model, s.ip, s.city, s.zone, s.status, s.uptime]);
+    const headers = ['Name', 'Vendor', 'Model', 'Category', 'Branch', 'IP', 'City', 'Zone', 'Status', 'Uptime'];
+    const rows = switches.map(s => [s.name, s.vendor, s.model, s.category || 'Switch', s.branch || 'HQ', s.ip, s.city, s.zone, s.status, s.uptime]);
     const csvContent = [headers, ...rows].map(e => e.join(",")).join("\n");
     const blob = new Blob([csvContent], { type: 'text/csv' });
     const url = window.URL.createObjectURL(blob);
@@ -252,22 +307,6 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
           >
             <span className="text-[10px] font-bold text-[#228be6] uppercase mr-2">{selectedIds.length} Selected</span>
             <button 
-              onClick={() => handleBulkAction('status', 'online')}
-              disabled={isBulkProcessing || !isOperator}
-              className="p-1.5 hover:bg-[#141517] rounded text-[#40c057] transition-colors"
-              title="Bulk Set Online"
-            >
-              <Play size={16} />
-            </button>
-            <button 
-              onClick={() => handleBulkAction('status', 'offline')}
-              disabled={isBulkProcessing || !isOperator}
-              className="p-1.5 hover:bg-[#141517] rounded text-[#fa5252] transition-colors"
-              title="Bulk Set Offline"
-            >
-              <Square size={16} />
-            </button>
-            <button 
               onClick={() => handleBulkAction('reboot')}
               disabled={isBulkProcessing || !isOperator}
               className="p-1.5 hover:bg-[#141517] rounded text-[#fab005] transition-colors"
@@ -275,6 +314,20 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
             >
               <RefreshCw size={16} className={cn(isBulkProcessing && "animate-spin")} />
             </button>
+            {isAdmin && (
+              <button
+                onClick={() => {
+                  if (confirm(`Delete ${selectedIds.length} selected devices?`)) {
+                    handleBulkAction('delete');
+                  }
+                }}
+                disabled={isBulkProcessing}
+                className="p-1.5 hover:bg-[#141517] rounded text-[#fa5252] transition-colors"
+                title="Bulk Delete"
+              >
+                <Trash2 size={16} />
+              </button>
+            )}
           </motion.div>
         </div>
 
@@ -307,6 +360,8 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                   <SortIcon active={sortConfig?.key === 'vendorModel'} direction={sortConfig?.direction} />
                 </div>
               </th>
+              <th>{t('categoryLabel')}</th>
+              <th>{t('branchLabel')}</th>
               <th onClick={() => handleSort('ip')} className="cursor-pointer hover:text-white transition-colors">
                 <div className="flex items-center gap-2">
                   {t('ipAddress')}
@@ -355,6 +410,8 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                     <span className="text-[10px] text-[#909296]">{sw.model}</span>
                   </div>
                 </td>
+                <td className="text-xs">{localizeCategory(sw.category || 'Switch')}</td>
+                <td className="text-xs">{sw.branch || 'HQ'}</td>
                 <td className="font-mono text-xs text-[#228be6]">{sw.ip}</td>
                 <td>
                   <div className="flex flex-col">
@@ -456,6 +513,108 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                 </datalist>
               </div>
               <div className="space-y-2">
+                <label className="text-[10px] font-bold text-[#909296] uppercase">{t('categoryLabel')}</label>
+                <select
+                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:outline-none focus:border-[#228be6]"
+                  value={newSwitch.category || 'Switch'}
+                  onChange={e => setNewSwitch({ ...newSwitch, category: e.target.value })}
+                >
+                  {meta.categories.map(c => <option key={c} value={c}>{localizeCategory(c)}</option>)}
+                </select>
+                <div className="flex gap-2">
+                  <input
+                    className="flex-1 bg-[#141517] border border-[#373a40] p-2 rounded text-xs text-white"
+                    placeholder={t('categoryLabel')}
+                    value={newCategoryName}
+                    onChange={(e) => setNewCategoryName(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    className="px-3 text-xs bg-[#2c2e33] rounded"
+                    onClick={async () => {
+                      const next = newCategoryName.trim();
+                      if (!next) return;
+                      const categories = [...new Set([...meta.categories, next])];
+                      await fetch('/api/inventory/meta', {
+                        method: 'POST',
+                        headers: {
+                          'Content-Type': 'application/json',
+                          'x-user-role': role || 'viewer',
+                          'x-user-name': username || 'unknown'
+                        },
+                        body: JSON.stringify({ categories, branches: meta.branches }),
+                      });
+                      setMeta({ ...meta, categories });
+                      setNewSwitch({ ...newSwitch, category: next });
+                      setNewCategoryName('');
+                    }}
+                  >
+                    {t('addLabel')}
+                  </button>
+                </div>
+              </div>
+              <div className="space-y-2">
+                <label className="text-[10px] font-bold text-[#909296] uppercase">{t('branchLabel')}</label>
+                <select
+                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:outline-none focus:border-[#228be6]"
+                  value={newSwitch.branch || 'HQ'}
+                  onChange={e => setNewSwitch({ ...newSwitch, branch: e.target.value })}
+                >
+                  {meta.branches.map(b => <option key={b} value={b}>{b}</option>)}
+                </select>
+                <div className="flex gap-2">
+                  <input
+                    className="flex-1 bg-[#141517] border border-[#373a40] p-2 rounded text-xs text-white"
+                    placeholder={t('branchLabel')}
+                    value={newBranchName}
+                    onChange={(e) => setNewBranchName(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    className="px-3 text-xs bg-[#2c2e33] rounded"
+                    onClick={async () => {
+                      const next = newBranchName.trim();
+                      if (!next) return;
+                      const branches = [...new Set([...meta.branches, next])];
+                      await fetch('/api/inventory/meta', {
+                        method: 'POST',
+                        headers: {
+                          'Content-Type': 'application/json',
+                          'x-user-role': role || 'viewer',
+                          'x-user-name': username || 'unknown'
+                        },
+                        body: JSON.stringify({ categories: meta.categories, branches }),
+                      });
+                      setMeta({ ...meta, branches });
+                      setNewSwitch({ ...newSwitch, branch: next });
+                      setNewBranchName('');
+                    }}
+                  >
+                    {t('addLabel')}
+                  </button>
+                </div>
+              </div>
+              <div className="space-y-2 col-span-2">
+                <label className="text-[10px] font-bold text-[#909296] uppercase">SNMP Template</label>
+                <select
+                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:outline-none focus:border-[#228be6]"
+                  value={newSwitch.snmpTemplateId || ''}
+                  onChange={e => setNewSwitch({ ...newSwitch, snmpTemplateId: e.target.value })}
+                >
+                  <option value="">Auto</option>
+                  {snmpTemplates.map((tpl) => <option key={tpl.id} value={tpl.id}>{tpl.name}</option>)}
+                </select>
+              </div>
+              <div className="space-y-2 col-span-2">
+                <label className="text-[10px] font-bold text-[#909296] uppercase">Custom SNMP OIDs (one per line)</label>
+                <textarea
+                  className="w-full min-h-[90px] bg-[#141517] border border-[#373a40] p-2.5 rounded text-xs text-white focus:outline-none focus:border-[#228be6] font-mono"
+                  value={customOidsText}
+                  onChange={(e) => setCustomOidsText(e.target.value)}
+                  placeholder={"1.3.6.1.2.1.1.3.0\n1.3.6.1.4.1.x.x.x"}
+                />
+              </div>
+              <div className="space-y-2">
                 <label className="text-[10px] font-bold text-[#909296] uppercase">{t('city')}</label>
                 <input 
                   className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:outline-none focus:border-[#228be6]"
@@ -480,7 +639,8 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                 onClick={() => {
                   setIsAdding(false);
                   setEditingId(null);
-                  setNewSwitch({ vendor: 'HPE', status: 'online', uptime: '0d 0h' });
+                  setNewSwitch({ vendor: 'HPE', status: 'online', uptime: '0d 0h', category: 'Switch', branch: 'HQ' });
+                  setCustomOidsText('');
                 }}
                 className="px-6 py-2.5 text-sm font-bold text-[#909296] hover:text-white transition-all uppercase tracking-widest"
               >

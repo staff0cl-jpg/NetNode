@@ -13,10 +13,12 @@ import { LanguageProvider } from './lib/i18n';
 
 function AppContent() {
   const [user, setUser] = useState<{ id: string, username: string, role: string } | null>(null);
+  const [authBootstrapping, setAuthBootstrapping] = useState(true);
   const [activeTab, setActiveTab] = useState('inventory');
   const [switches, setSwitches] = useState<Switch[]>([]);
   const [loading, setLoading] = useState(true);
   const [sshTarget, setSshTarget] = useState<Switch | null>(null);
+  const [banner, setBanner] = useState({ siteLabel: 'UNSET', appUptime: '0d 0h 0m' });
 
   const fetchInventory = async () => {
     try {
@@ -26,6 +28,11 @@ function AppContent() {
           'x-user-name': user?.username || 'unknown'
         }
       });
+      if (response.status === 401 || response.status === 403) {
+        setUser(null);
+        setSwitches([]);
+        return;
+      }
       const data = await response.json();
       setSwitches(data);
     } catch (error) {
@@ -36,6 +43,29 @@ function AppContent() {
   };
 
   React.useEffect(() => {
+    const restoreSession = async () => {
+      try {
+        const response = await fetch('/api/auth/session', { credentials: 'include' });
+        if (!response.ok) {
+          setUser(null);
+          return;
+        }
+        const data = await response.json();
+        if (data?.success && data?.user) {
+          setUser(data.user);
+        } else {
+          setUser(null);
+        }
+      } catch {
+        setUser(null);
+      } finally {
+        setAuthBootstrapping(false);
+      }
+    };
+    restoreSession();
+  }, []);
+
+  React.useEffect(() => {
     if (user) {
       fetchInventory();
       // Poll every 5 seconds to catch discovery results
@@ -43,6 +73,55 @@ function AppContent() {
       return () => clearInterval(interval);
     }
   }, [user]);
+
+  React.useEffect(() => {
+    if (!user) return;
+    const fetchBanner = async () => {
+      try {
+        const response = await fetch('/api/system/banner', {
+          headers: {
+            'x-user-role': user?.role || 'viewer',
+            'x-user-name': user?.username || 'unknown'
+          }
+        });
+        if (response.status === 401 || response.status === 403) {
+          setUser(null);
+          return;
+        }
+        const data = await response.json();
+        setBanner({
+          siteLabel: data.siteLabel || 'UNSET',
+          appUptime: data.appUptime || '0d 0h 0m'
+        });
+      } catch {
+        /* ignore */
+      }
+    };
+    fetchBanner();
+    const timer = setInterval(fetchBanner, 10000);
+    return () => clearInterval(timer);
+  }, [user]);
+
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+    } catch {
+      /* ignore */
+    } finally {
+      setUser(null);
+      setSwitches([]);
+      setSshTarget(null);
+      setActiveTab('inventory');
+    }
+  };
+
+  if (authBootstrapping) {
+    return (
+      <div className="min-h-screen w-full bg-[#1a1b1e] flex items-center justify-center text-[#909296] text-sm font-mono">
+        Restoring session...
+      </div>
+    );
+  }
 
   if (!user) {
     return <Login onLogin={(userData) => setUser(userData)} />;
@@ -54,7 +133,7 @@ function AppContent() {
   const renderContent = () => {
     switch (activeTab) {
       case 'dashboard':
-        return <Dashboard switches={switches} />;
+        return <Dashboard switches={switches} role={user.role} username={user.username} />;
       case 'inventory':
         return (
           <Inventory 
@@ -80,13 +159,13 @@ function AppContent() {
           />
         );
       case 'users':
-        return isAdmin ? <UserManagement role={user.role} username={user.username} /> : <Dashboard switches={switches} />;
+        return isAdmin ? <UserManagement role={user.role} username={user.username} /> : <Dashboard switches={switches} role={user.role} username={user.username} />;
       case 'audit':
-        return isAdmin ? <AuditLogs role={user.role} username={user.username} /> : <Dashboard switches={switches} />;
+        return isAdmin ? <AuditLogs role={user.role} username={user.username} /> : <Dashboard switches={switches} role={user.role} username={user.username} />;
       case 'settings':
         return <Settings role={user.role} username={user.username} />;
       default:
-        return <Dashboard switches={switches} />;
+        return <Dashboard switches={switches} role={user.role} username={user.username} />;
     }
   };
 
@@ -95,7 +174,7 @@ function AppContent() {
       <Sidebar 
         activeTab={activeTab} 
         setActiveTab={setActiveTab} 
-        onLogout={() => setUser(null)} 
+        onLogout={handleLogout} 
         user={user}
       />
       
@@ -111,8 +190,8 @@ function AppContent() {
             <span className="text-[10px] font-mono text-[#5c5f66] uppercase tracking-wider">Session: Secure (AES-256)</span>
           </div>
           <div className="flex items-center gap-4 text-[10px] font-mono text-[#909296]">
-            <span>DC-EAST :: MOSCOW</span>
-            <span>UPTIME: 14:24:51</span>
+            <span>{banner.siteLabel}</span>
+            <span>UPTIME: {banner.appUptime}</span>
           </div>
         </header>
 

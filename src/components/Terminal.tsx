@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Terminal as XTerm } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import { io, Socket } from 'socket.io-client';
@@ -21,6 +21,7 @@ interface TerminalSession {
   name: string;
   host: string;
   username: string;
+  password?: string;
   connected: boolean;
   autoReconnect: boolean;
 }
@@ -34,70 +35,52 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [isConfigOpen, setIsConfigOpen] = useState(false);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
-  const [newSession, setNewSession] = useState({ name: '', host: '', username: 'admin', autoReconnect: true });
+  const [newSession, setNewSession] = useState({ name: '', host: '', username: 'admin', password: '', autoReconnect: true });
+  const [passwordPrompt, setPasswordPrompt] = useState<{ session: TerminalSession } | null>(null);
+  const [promptPassword, setPromptPassword] = useState('');
+  const [savePasswordToSession, setSavePasswordToSession] = useState(true);
   
   const xterms = useRef<Map<string, { xterm: XTerm, fitAddon: FitAddon }>>(new Map());
   const socket = useRef<Socket | null>(null);
   const terminalContainers = useRef<Map<string, HTMLDivElement>>(new Map());
   const reconnectTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
-
-  // Handle target device from external navigation
-  useEffect(() => {
-    if (targetDevice) {
-      setSessions(prev => {
-        const existing = prev.find(s => s.host === targetDevice.ip);
-        if (existing) {
-          setActiveSessionId(existing.id);
-          if (!existing.connected) {
-            setTimeout(() => handleConnect(existing), 50);
-          }
-          return prev;
-        }
-
-        const newId = `session-${targetDevice.id}-${Date.now()}`;
-        const session: TerminalSession = {
-          id: newId,
-          name: `${targetDevice.name} (Direct)`,
-          host: targetDevice.ip,
-          username: 'admin',
-          connected: false,
-          autoReconnect: true
-        };
-        
-        const updated = [session, ...prev];
-        localStorage.setItem('netnode_ssh_sessions', JSON.stringify(updated));
-        setActiveSessionId(newId);
-        setTimeout(() => handleConnect(session), 100);
-        return updated;
-      });
-      onClearTarget?.();
-    }
-  }, [targetDevice]);
+  const handleConnectRef = useRef<(s: TerminalSession, pwd?: string) => void>(() => {});
+  const sessionsRef = useRef<TerminalSession[]>([]);
 
   // Load saved sessions from localStorage
   useEffect(() => {
     const saved = localStorage.getItem('netnode_ssh_sessions');
     if (saved) {
-      setSessions(JSON.parse(saved).map((s: any) => ({ ...s, connected: false, autoReconnect: s.autoReconnect ?? true })));
-    } else {
-      // Default sessions from inventory
-      const defaults = switches.slice(0, 2).map(sw => ({
-        id: sw.id,
-        name: sw.name,
-        host: sw.ip,
-        username: 'admin',
+      setSessions(JSON.parse(saved).map((s: any) => ({
+        ...s,
+        password: s.password ?? '',
         connected: false,
-        autoReconnect: true
-      }));
-      setSessions(defaults);
+        autoReconnect: s.autoReconnect ?? true
+      })));
+    } else {
+      setSessions([]);
     }
   }, []); // Only on mount
 
-  const handleConnect = (session: TerminalSession) => {
+  const emitSshConnect = (session: TerminalSession, password: string) => {
+    socket.current?.emit('ssh:connect', {
+      sessionId: session.id,
+      host: session.host,
+      username: session.username,
+      password,
+    });
+  };
+
+  const handleConnect = useCallback((session: TerminalSession, overridePassword?: string) => {
+    const effectivePassword = overridePassword ?? session.password ?? '';
+    if (!effectivePassword.trim()) {
+      setPasswordPrompt({ session });
+      return;
+    }
+
     setActiveSessionId(session.id);
     const te = xterms.current.get(session.id);
-    
-    // Clear any pending reconnect
+
     if (reconnectTimers.current.has(session.id)) {
       clearTimeout(reconnectTimers.current.get(session.id));
       reconnectTimers.current.delete(session.id);
@@ -107,14 +90,47 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
       te.xterm.clear();
       te.xterm.write(`\r\n\x1b[34m[NETNODE]\x1b[0m Connecting to ${session.name} at ${session.host}...\r\n`);
     }
-    
-    socket.current?.emit('ssh:connect', {
-      sessionId: session.id,
-      host: session.host,
-      username: session.username,
-      password: 'admin' // In real app, prompt for this
+
+    emitSshConnect(session, effectivePassword);
+  }, []);
+
+  handleConnectRef.current = handleConnect;
+
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
+
+  useEffect(() => {
+    if (!targetDevice) return;
+    setSessions(prev => {
+      const existing = prev.find(s => s.host === targetDevice.ip);
+      if (existing) {
+        setActiveSessionId(existing.id);
+        if (!existing.connected) {
+          setTimeout(() => handleConnectRef.current(existing), 50);
+        }
+        return prev;
+      }
+
+      const newId = `session-${targetDevice.id}-${Date.now()}`;
+      const session: TerminalSession = {
+        id: newId,
+        name: `${targetDevice.name} (Direct)`,
+        host: targetDevice.ip,
+        username: 'admin',
+        password: '',
+        connected: false,
+        autoReconnect: true
+      };
+
+      const updated = [session, ...prev];
+      localStorage.setItem('netnode_ssh_sessions', JSON.stringify(updated));
+      setActiveSessionId(newId);
+      setTimeout(() => handleConnectRef.current(session), 100);
+      return updated;
     });
-  };
+    onClearTarget?.();
+  }, [targetDevice, onClearTarget]);
 
   useEffect(() => {
     socket.current = io();
@@ -137,7 +153,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
           xtermEntry?.xterm.writeln(`\r\n\x1b[33m[RECONNECTING]\x1b[0m Connection lost. Retrying in 5s...\r\n`);
           
           const timer = setTimeout(() => {
-            handleConnect(session);
+            handleConnectRef.current(session);
           }, 5000);
           reconnectTimers.current.set(sessionId, timer);
         }
@@ -180,7 +196,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
     fitAddon.fit();
 
     term.onData((data) => {
-      const session = sessions.find(s => s.id === sessionId);
+      const session = sessionsRef.current.find(s => s.id === sessionId);
       if (session?.connected) {
         socket.current?.emit('ssh:input', { sessionId, input: data });
       }
@@ -213,11 +229,13 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
     if (!newSession.host) return;
     
     if (editingSessionId) {
+      const prev = sessions.find(s => s.id === editingSessionId);
       const updated = sessions.map(s => s.id === editingSessionId ? {
         ...s,
         name: newSession.name || newSession.host,
         host: newSession.host,
         username: newSession.username,
+        password: newSession.password.trim() ? newSession.password : (prev?.password ?? ''),
         autoReconnect: newSession.autoReconnect
       } : s);
       setSessions(updated);
@@ -228,6 +246,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
         name: newSession.name || newSession.host,
         host: newSession.host,
         username: newSession.username,
+        password: newSession.password,
         connected: false,
         autoReconnect: newSession.autoReconnect
       };
@@ -238,7 +257,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
     
     setIsConfigOpen(false);
     setEditingSessionId(null);
-    setNewSession({ name: '', host: '', username: 'admin', autoReconnect: true });
+    setNewSession({ name: '', host: '', username: 'admin', password: '', autoReconnect: true });
   };
 
   const handleEditSession = (e: React.MouseEvent, session: TerminalSession) => {
@@ -247,6 +266,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
       name: session.name,
       host: session.host,
       username: session.username,
+      password: '',
       autoReconnect: session.autoReconnect
     });
     setEditingSessionId(session.id);
@@ -484,6 +504,18 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
                   </div>
                 </div>
               </div>
+              <div className="space-y-2">
+                <label className="text-[10px] font-bold text-[#5c5f66] uppercase">{t('sshSessionPassword')}</label>
+                <input 
+                  type="password"
+                  className="w-full bg-[#141517] border border-[#373a40] p-3 rounded text-sm text-white focus:border-[#228be6] outline-none"
+                  placeholder={editingSessionId ? t('sshPasswordEditHint') : t('sshPasswordPlaceholder')}
+                  value={newSession.password}
+                  onChange={e => setNewSession({ ...newSession, password: e.target.value })}
+                  autoComplete="new-password"
+                />
+                <p className="text-[9px] text-[#5c5f66]">{t('sshPasswordStoredHint')}</p>
+              </div>
             </div>
 
             <div className="mt-10 flex gap-4">
@@ -491,7 +523,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
                 onClick={() => {
                   setIsConfigOpen(false);
                   setEditingSessionId(null);
-                  setNewSession({ name: '', host: '', username: 'admin', autoReconnect: true });
+                  setNewSession({ name: '', host: '', username: 'admin', password: '', autoReconnect: true });
                 }}
                 className="flex-1 py-3 border border-[#373a40] text-[#909296] rounded text-[10px] font-bold uppercase tracking-widest hover:bg-white/5 transition-all"
               >
@@ -505,6 +537,96 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
                 )}
               >
                 {editingSessionId ? 'Save Configuration' : 'Create Session'}
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {passwordPrompt && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[60] flex items-center justify-center p-6">
+          <motion.div
+            initial={{ scale: 0.95, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            className="bg-[#1c1d21] border border-[#373a40] p-8 rounded-lg shadow-2xl w-full max-w-md"
+          >
+            <h3 className="text-lg font-bold text-white uppercase tracking-widest mb-2">{t('sshPasswordModalTitle')}</h3>
+            <p className="text-xs text-[#909296] mb-6">
+              {passwordPrompt.session.name} ({passwordPrompt.session.host}) — {passwordPrompt.session.username}
+            </p>
+            <div className="space-y-4">
+              <input
+                type="password"
+                className="w-full bg-[#141517] border border-[#373a40] p-3 rounded text-sm text-white focus:border-[#228be6] outline-none"
+                placeholder={t('sshPasswordPlaceholder')}
+                value={promptPassword}
+                onChange={(e) => setPromptPassword(e.target.value)}
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && promptPassword.trim()) {
+                    e.preventDefault();
+                    const pwd = promptPassword.trim();
+                    if (savePasswordToSession) {
+                      setSessions((prev) => {
+                        const next = prev.map((s) =>
+                          s.id === passwordPrompt.session.id ? { ...s, password: pwd } : s
+                        );
+                        localStorage.setItem('netnode_ssh_sessions', JSON.stringify(next));
+                        return next;
+                      });
+                      handleConnectRef.current({ ...passwordPrompt.session, password: pwd });
+                    } else {
+                      handleConnectRef.current(passwordPrompt.session, pwd);
+                    }
+                    setPasswordPrompt(null);
+                    setPromptPassword('');
+                  }
+                }}
+              />
+              <label className="flex items-center gap-2 text-xs text-[#909296] cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="w-4 h-4 rounded border-[#373a40] bg-[#141517] text-[#228be6]"
+                  checked={savePasswordToSession}
+                  onChange={(e) => setSavePasswordToSession(e.target.checked)}
+                />
+                {t('sshSavePasswordInSession')}
+              </label>
+            </div>
+            <div className="mt-8 flex gap-4">
+              <button
+                type="button"
+                onClick={() => {
+                  setPasswordPrompt(null);
+                  setPromptPassword('');
+                }}
+                className="flex-1 py-3 border border-[#373a40] text-[#909296] rounded text-[10px] font-bold uppercase tracking-widest hover:bg-white/5 transition-all"
+              >
+                {t('cancel')}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const pwd = promptPassword.trim();
+                  if (!pwd) return;
+                  if (savePasswordToSession) {
+                    setSessions((prev) => {
+                      const next = prev.map((s) =>
+                        s.id === passwordPrompt.session.id ? { ...s, password: pwd } : s
+                      );
+                      localStorage.setItem('netnode_ssh_sessions', JSON.stringify(next));
+                      return next;
+                    });
+                    handleConnectRef.current({ ...passwordPrompt.session, password: pwd });
+                  } else {
+                    handleConnectRef.current(passwordPrompt.session, pwd);
+                  }
+                  setPasswordPrompt(null);
+                  setPromptPassword('');
+                }}
+                className="flex-[2] py-3 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-[10px] font-bold uppercase tracking-widest transition-all"
+              >
+                {t('sshConnectBtn')}
               </button>
             </div>
           </motion.div>

@@ -1,10 +1,14 @@
-export type Vendor = 'HPE' | 'Aruba' | 'Cisco' | 'Juniper' | 'MikroTik' | 'Huawei' | 'Arista';
+export type Vendor = 'HPE' | 'Aruba' | 'Cisco' | 'Juniper' | 'MikroTik' | 'Huawei' | 'Arista' | 'Unknown';
 
 export interface Switch {
   id: string;
   name: string;
   vendor: Vendor;
   model: string;
+  category?: string;
+  branch?: string;
+  snmpTemplateId?: string;
+  customOids?: string[];
   city: string;
   zone: string;
   ip: string;
