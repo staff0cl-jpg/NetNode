@@ -96,6 +96,7 @@ const Topology: React.FC<TopologyProps> = ({ switches }) => {
   const [links, setLinks] = useState<TopoLink[]>([]);
   const [nodes, setNodes] = useState<NodeWithPos[]>([]);
   const [savedLayout, setSavedLayout] = useState<Record<string, { x: number; y: number }>>({});
+  const [manualLink, setManualLink] = useState({ source: '', target: '', portA: '', portB: '' });
 
   useEffect(() => {
     let cancelled = false;
@@ -203,6 +204,40 @@ const Topology: React.FC<TopologyProps> = ({ switches }) => {
     return { x: node.x + 80, y: node.y + 40 };
   };
 
+  const handleAddLink = async () => {
+    if (!manualLink.source || !manualLink.target || manualLink.source === manualLink.target) return;
+    try {
+      const res = await fetch('/api/topology/links', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(manualLink),
+      });
+      const data = await res.json();
+      if (res.ok && Array.isArray(data.links)) {
+        setLinks(data.links);
+        setManualLink({ source: '', target: '', portA: '', portB: '' });
+      }
+    } catch (error) {
+      console.error('Failed to add link:', error);
+    }
+  };
+
+  const handleDeleteLink = async (link: TopoLink) => {
+    try {
+      const res = await fetch('/api/topology/links', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(link),
+      });
+      const data = await res.json();
+      if (res.ok && Array.isArray(data.links)) {
+        setLinks(data.links);
+      }
+    } catch (error) {
+      console.error('Failed to delete link:', error);
+    }
+  };
+
   return (
     <div className="flex flex-col h-full overflow-hidden">
       <header className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex justify-between items-center">
@@ -222,6 +257,19 @@ const Topology: React.FC<TopologyProps> = ({ switches }) => {
               {t('autoLayout')}
             </button>
           </nav>
+        </div>
+        <div className="flex items-center gap-2 text-xs">
+          <select value={manualLink.source} onChange={(e) => setManualLink({ ...manualLink, source: e.target.value })} className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-white">
+            <option value="">Source</option>
+            {switches.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+          <input value={manualLink.portA} onChange={(e) => setManualLink({ ...manualLink, portA: e.target.value })} placeholder="Port A" className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-white w-20" />
+          <select value={manualLink.target} onChange={(e) => setManualLink({ ...manualLink, target: e.target.value })} className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-white">
+            <option value="">Target</option>
+            {switches.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+          <input value={manualLink.portB} onChange={(e) => setManualLink({ ...manualLink, portB: e.target.value })} placeholder="Port B" className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-white w-20" />
+          <button onClick={handleAddLink} className="px-3 py-1 bg-[#228be6] text-white rounded">Link</button>
         </div>
       </header>
 
@@ -281,6 +329,17 @@ const Topology: React.FC<TopologyProps> = ({ switches }) => {
 
         <div className="absolute bottom-6 right-6 p-4 bg-[#25262b] border border-[#373a40] rounded text-[10px] font-mono text-[#909296] pointer-events-none z-10">
           {t('topologyCanvasHint')}
+        </div>
+        <div className="absolute top-4 right-4 p-3 bg-[#25262b] border border-[#373a40] rounded text-[10px] text-[#909296] z-10 max-w-xs">
+          <div className="font-bold mb-2 text-white">Manual links</div>
+          <div className="space-y-1 max-h-40 overflow-auto">
+            {links.map((l, i) => (
+              <div key={`${l.source}-${l.target}-${i}`} className="flex items-center justify-between gap-2">
+                <span>{l.portA} - {l.portB}</span>
+                <button onClick={() => handleDeleteLink(l)} className="text-red-400">x</button>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     </div>

@@ -19,6 +19,7 @@ type InventoryItem = {
   vendor: string;
   model: string;
   category?: string;
+  subcategory?: string;
   branch?: string;
   snmpTemplateId?: string;
   customOids?: string[];
@@ -82,7 +83,20 @@ let snmpConfig = {
 
 let inventoryMeta = {
   categories: ["Switch", "Router", "UPS", "Firewall", "Other"],
+  subcategories: ["Core", "Distribution", "Access"],
   branches: ["HQ"],
+  cities: ["Moscow"],
+  zones: ["DC-East"],
+  vendors: ["Cisco", "Juniper", "HPE", "MikroTik", "Huawei", "Arista", "Unknown"],
+  models: {
+    Cisco: ["Catalyst 9300", "Catalyst 9200", "Nexus 93180YC", "ASR 1001-X"],
+    Juniper: ["EX4300", "EX2300", "MX204", "QFX5120"],
+    HPE: ["Aruba 2930F", "Aruba 5406R", "FlexFabric 5940", "Aruba 6300M"],
+    MikroTik: ["CCR2004", "CRS326", "RB5009", "CCR2116"],
+    Huawei: ["CloudEngine S5735", "S6730", "NetEngine AR6121"],
+    Arista: ["7050SX3", "7280SR3", "7010T"],
+    Unknown: ["Discovered (SNMP/SSH)", "Generic L2"],
+  } as Record<string, string[]>,
 };
 
 type SnmpOidDef = {
@@ -770,12 +784,39 @@ async function startServer() {
   });
 
   app.post("/api/inventory/meta", checkRole(['admin', 'operator']), (req, res) => {
-    const body = req.body as { categories?: string[]; branches?: string[] };
+    const body = req.body as {
+      categories?: string[];
+      subcategories?: string[];
+      branches?: string[];
+      cities?: string[];
+      zones?: string[];
+      vendors?: string[];
+      models?: Record<string, string[]>;
+    };
     if (Array.isArray(body.categories)) {
       inventoryMeta.categories = [...new Set(body.categories.map((v) => String(v).trim()).filter(Boolean))];
     }
+    if (Array.isArray(body.subcategories)) {
+      inventoryMeta.subcategories = [...new Set(body.subcategories.map((v) => String(v).trim()).filter(Boolean))];
+    }
     if (Array.isArray(body.branches)) {
       inventoryMeta.branches = [...new Set(body.branches.map((v) => String(v).trim()).filter(Boolean))];
+    }
+    if (Array.isArray(body.cities)) {
+      inventoryMeta.cities = [...new Set(body.cities.map((v) => String(v).trim()).filter(Boolean))];
+    }
+    if (Array.isArray(body.zones)) {
+      inventoryMeta.zones = [...new Set(body.zones.map((v) => String(v).trim()).filter(Boolean))];
+    }
+    if (Array.isArray(body.vendors)) {
+      inventoryMeta.vendors = [...new Set(body.vendors.map((v) => String(v).trim()).filter(Boolean))];
+    }
+    if (body.models && typeof body.models === "object") {
+      const next: Record<string, string[]> = {};
+      for (const [vendor, list] of Object.entries(body.models)) {
+        next[vendor] = [...new Set((list || []).map((v) => String(v).trim()).filter(Boolean))];
+      }
+      inventoryMeta.models = next;
     }
     res.json({ success: true, meta: inventoryMeta });
   });
@@ -1007,7 +1048,7 @@ async function startServer() {
 
   // API: Auto-Discovery — SNMP-first with SSH fallback
   app.post("/api/discovery/start", checkRole(["admin", "operator"]), async (req, res) => {
-    const { subnets } = req.body as { subnets?: string; username?: string; password?: string };
+    const { subnets, protocol } = req.body as { subnets?: string; username?: string; password?: string; protocol?: string };
     const actor = (req.headers["x-user-name"] as string) || "unknown";
     if (!subnets || typeof subnets !== "string") {
       return res.status(400).json({ error: "Укажите подсети, например 192.168.1.0/24" });
@@ -1024,7 +1065,10 @@ async function startServer() {
         return res.status(400).json({ error: "Не удалось разобрать подсети. Формат: 10.0.0.0/24 или 192.168.1.5" });
       }
 
-      logAction(actor, "Start Discovery", `Сканирование ${ips.length} адресов (SNMP first, SSH fallback)`, "inventory");
+      const mode = (protocol || "snmp+ssh").toLowerCase();
+      const snmpEnabled = mode === "snmp" || mode === "snmp+ssh";
+      const sshEnabled = mode === "ssh" || mode === "snmp+ssh";
+      logAction(actor, "Start Discovery", `Сканирование ${ips.length} адресов (mode: ${mode})`, "inventory");
       const existingIps = new Set(inventory.map((s) => s.ip));
       const toScan = ips.filter((ip) => !existingIps.has(ip));
       const foundIps: string[] = [];
@@ -1036,8 +1080,8 @@ async function startServer() {
           const current = idx++;
           const ip = toScan[current];
           const [probe, hasSsh] = await Promise.all([
-            getSnmpProbe(ip, snmpConfig.timeoutMs || 900),
-            checkTcpPort(ip, SSH_PORT, TIMEOUT_MS),
+            snmpEnabled ? getSnmpProbe(ip, snmpConfig.timeoutMs || 900) : Promise.resolve({ ok: false } as any),
+            sshEnabled ? checkTcpPort(ip, SSH_PORT, TIMEOUT_MS) : Promise.resolve(false),
           ]);
           if (hasSsh) sshOpen++;
           if (!probe.ok && !hasSsh) continue;
@@ -1074,6 +1118,7 @@ async function startServer() {
       );
       return res.json({
         success: true,
+        protocol: mode,
         scanned: ips.length,
         sshOpen,
         added,
@@ -1088,6 +1133,45 @@ async function startServer() {
 
   app.get("/api/topology/links", (_req, res) => {
     res.json({ links: topologyLinks, layout: topologyLayout });
+  });
+
+  app.post("/api/topology/links", checkRole(["admin", "operator"]), (req, res) => {
+    const body = req.body as { source?: string; target?: string; portA?: string; portB?: string };
+    const source = String(body.source || "").trim();
+    const target = String(body.target || "").trim();
+    const portA = String(body.portA || "").trim();
+    const portB = String(body.portB || "").trim();
+    if (!source || !target || source === target) {
+      return res.status(400).json({ error: "Invalid link endpoints" });
+    }
+    const exists = topologyLinks.some(
+      (l) =>
+        (l.source === source && l.target === target && l.portA === portA && l.portB === portB) ||
+        (l.source === target && l.target === source && l.portA === portB && l.portB === portA)
+    );
+    if (!exists) {
+      topologyLinks.push({ source, target, portA: portA || "N/A", portB: portB || "N/A" });
+    }
+    res.json({ success: true, links: topologyLinks });
+  });
+
+  app.delete("/api/topology/links", checkRole(["admin", "operator"]), (req, res) => {
+    const body = req.body as { source?: string; target?: string; portA?: string; portB?: string };
+    const source = String(body.source || "").trim();
+    const target = String(body.target || "").trim();
+    const portA = String(body.portA || "").trim();
+    const portB = String(body.portB || "").trim();
+    const before = topologyLinks.length;
+    topologyLinks = topologyLinks.filter(
+      (l) =>
+        !(
+          l.source === source &&
+          l.target === target &&
+          l.portA === portA &&
+          l.portB === portB
+        )
+    );
+    res.json({ success: true, removed: before - topologyLinks.length, links: topologyLinks });
   });
 
   app.post("/api/topology/layout", checkRole(["admin", "operator"]), (req, res) => {
