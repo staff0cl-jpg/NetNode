@@ -46,7 +46,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
   const { t } = useTranslation();
   const isAdmin = role === 'admin';
   const isOperator = role === 'admin' || role === 'operator';
-  const [discoveryConfig, setDiscoveryConfig] = React.useState({ subnets: '10.0.0.0/24, 192.168.1.0/24', username: 'admin', password: '' });
+  const [discoveryConfig, setDiscoveryConfig] = React.useState({ subnets: '10.0.0.0/24, 192.168.1.0/24', username: 'admin', password: '', protocol: 'snmp+ssh' });
   const [defaultLanguage, setDefaultLanguage] = React.useState('ru');
   const [siteLabel, setSiteLabel] = React.useState('UNSET');
   const [snmpConfig, setSnmpConfig] = React.useState({
@@ -58,6 +58,15 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
     port: 161
   });
   const [trapConfig, setTrapConfig] = React.useState({ ip: '10.10.50.10', port: '162' });
+  const [inventoryMetaEditor, setInventoryMetaEditor] = React.useState({
+    categories: '',
+    subcategories: '',
+    branches: '',
+    cities: '',
+    zones: '',
+    vendors: '',
+    modelsJson: '{}'
+  });
   const [snmpTemplates, setSnmpTemplates] = React.useState<SnmpTemplate[]>([]);
   const [dashboardUi, setDashboardUi] = React.useState({
     trunkThroughputTitle: '',
@@ -132,6 +141,24 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
           if (Array.isArray(templateData.templates)) {
             setSnmpTemplates(templateData.templates);
           }
+        }
+        const invMetaResp = await fetch('/api/inventory/meta', {
+          headers: {
+            'x-user-role': role || 'viewer',
+            'x-user-name': username || 'unknown'
+          }
+        });
+        if (invMetaResp.ok) {
+          const inv = await invMetaResp.json();
+          setInventoryMetaEditor({
+            categories: (inv.categories || []).join(', '),
+            subcategories: (inv.subcategories || []).join(', '),
+            branches: (inv.branches || []).join(', '),
+            cities: (inv.cities || []).join(', '),
+            zones: (inv.zones || []).join(', '),
+            vendors: (inv.vendors || []).join(', '),
+            modelsJson: JSON.stringify(inv.models || {}, null, 2)
+          });
         }
       } catch (err) {
         console.error('Failed to load system config');
@@ -325,6 +352,43 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
   const handleSaveDashboardUi = async () => {
     await saveSystemConfig({ dashboardUi });
     alert('Dashboard UI saved');
+  };
+
+  const parseList = (src: string) =>
+    src
+      .split(',')
+      .map((v) => v.trim())
+      .filter(Boolean);
+
+  const handleSaveInventoryMeta = async () => {
+    try {
+      const models = JSON.parse(inventoryMetaEditor.modelsJson || '{}');
+      const response = await fetch('/api/inventory/meta', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-user-role': role || 'viewer',
+          'x-user-name': username || 'unknown'
+        },
+        body: JSON.stringify({
+          categories: parseList(inventoryMetaEditor.categories),
+          subcategories: parseList(inventoryMetaEditor.subcategories),
+          branches: parseList(inventoryMetaEditor.branches),
+          cities: parseList(inventoryMetaEditor.cities),
+          zones: parseList(inventoryMetaEditor.zones),
+          vendors: parseList(inventoryMetaEditor.vendors),
+          models
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        alert(data.error || 'Inventory dictionaries save failed');
+        return;
+      }
+      alert('Inventory dictionaries saved');
+    } catch {
+      alert('Inventory dictionaries save failed: check models JSON');
+    }
   };
 
   const loadTemplateToEditor = (tpl: SnmpTemplate) => {
@@ -629,6 +693,18 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                 />
               </div>
             </div>
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">Discovery Protocol</label>
+              <select
+                className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none"
+                value={discoveryConfig.protocol}
+                onChange={(e) => setDiscoveryConfig({ ...discoveryConfig, protocol: e.target.value })}
+              >
+                <option value="snmp+ssh">SNMP + SSH (hybrid)</option>
+                <option value="snmp">SNMP only</option>
+                <option value="ssh">SSH only</option>
+              </select>
+            </div>
 
             <div className="pt-4 border-t border-[#373a40] flex justify-between items-center">
               <p className="text-[10px] text-[#5c5f66] uppercase">{t('sshCredentials')}</p>
@@ -637,6 +713,35 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                 className="px-6 py-2 bg-[#40c057] hover:bg-[#37b24d] text-white rounded text-[10px] font-bold uppercase tracking-widest transition-all shadow-lg"
               >
                 {t('startDiscovery')}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Inventory dictionaries */}
+        <div className={cn("bg-[#25262b] border border-[#373a40] rounded overflow-hidden", !isAdmin && "opacity-50 pointer-events-none")}>
+          <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
+            <Database className="text-[#228be6]" size={18} />
+            <h3 className="text-sm font-bold text-white uppercase tracking-widest">Inventory Dictionaries</h3>
+          </div>
+          <div className="p-6 space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.categories} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, categories: e.target.value })} placeholder="Categories (comma separated)" />
+              <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.subcategories} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, subcategories: e.target.value })} placeholder="Subcategories (comma separated)" />
+              <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.branches} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, branches: e.target.value })} placeholder="Branches (comma separated)" />
+              <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.cities} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, cities: e.target.value })} placeholder="Cities (comma separated)" />
+              <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.zones} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, zones: e.target.value })} placeholder="Zones (comma separated)" />
+              <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.vendors} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, vendors: e.target.value })} placeholder="Vendors (comma separated)" />
+              <textarea
+                className="md:col-span-2 min-h-[140px] bg-[#141517] border border-[#373a40] p-2.5 rounded text-xs text-white font-mono"
+                value={inventoryMetaEditor.modelsJson}
+                onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, modelsJson: e.target.value })}
+                placeholder='{"Cisco":["Catalyst 9300"],"HPE":["Aruba 2930F"]}'
+              />
+            </div>
+            <div className="flex justify-end">
+              <button onClick={handleSaveInventoryMeta} className="px-6 py-2 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-[10px] font-bold uppercase tracking-widest transition-all shadow-lg">
+                {t('saveChanges')}
               </button>
             </div>
           </div>

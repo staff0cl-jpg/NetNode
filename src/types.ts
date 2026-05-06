@@ -6,6 +6,7 @@ export interface Switch {
   vendor: Vendor;
   model: string;
   category?: string;
+  subcategory?: string;
   branch?: string;
   snmpTemplateId?: string;
   customOids?: string[];

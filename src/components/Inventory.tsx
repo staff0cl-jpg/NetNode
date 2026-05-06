@@ -7,7 +7,7 @@ const SortIcon = ({ active, direction }: { active: boolean, direction?: 'asc' | 
   return direction === 'asc' ? <ChevronUp size={12} className="text-[#228be6]" /> : <ChevronDown size={12} className="text-[#228be6]" />;
 };
 import { Switch, Vendor } from '../types';
-import { MODELS, VENDORS } from '../constants';
+import { VENDORS } from '../constants';
 import { cn } from '../lib/utils';
 import { useTranslation } from '../lib/i18n';
 
@@ -26,6 +26,8 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
   
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [zoneFilter, setZoneFilter] = useState<string>('all');
+  const [subcategoryFilter, setSubcategoryFilter] = useState<string>('all');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [isBulkProcessing, setIsBulkProcessing] = useState(false);
   const [sortConfig, setSortConfig] = useState<{ key: keyof Switch | 'vendorModel' | 'location'; direction: 'asc' | 'desc' } | null>(null);
@@ -36,11 +38,26 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
     status: 'online',
     uptime: '0d 0h',
     category: 'Switch',
+    subcategory: 'Core',
     branch: 'HQ'
   });
-  const [meta, setMeta] = useState<{ categories: string[]; branches: string[] }>({ categories: ['Switch'], branches: ['HQ'] });
-  const [newCategoryName, setNewCategoryName] = useState('');
-  const [newBranchName, setNewBranchName] = useState('');
+  const [meta, setMeta] = useState<{
+    categories: string[];
+    subcategories: string[];
+    branches: string[];
+    cities: string[];
+    zones: string[];
+    vendors: string[];
+    models: Record<string, string[]>;
+  }>({
+    categories: ['Switch'],
+    subcategories: ['Core'],
+    branches: ['HQ'],
+    cities: ['Moscow'],
+    zones: ['DC-East'],
+    vendors: ['Cisco', 'Juniper', 'HPE'],
+    models: { HPE: ['Aruba 2930F'] }
+  });
   const [snmpTemplates, setSnmpTemplates] = useState<Array<{ id: string; name: string }>>([]);
   const [customOidsText, setCustomOidsText] = useState('');
 
@@ -63,7 +80,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
     })
       .then((r) => r.json())
       .then((data) => {
-        if (data.categories && data.branches) {
+        if (data.categories && data.branches && data.models) {
           setMeta(data);
         }
       })
@@ -123,7 +140,16 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
       // or we just close the modal. For better UX, let's just close and wait for poll.
       setIsAdding(false);
       setEditingId(null);
-      setNewSwitch({ vendor: 'HPE', status: 'online', uptime: '0d 0h', category: 'Switch', branch: 'HQ' });
+      setNewSwitch({
+        vendor: 'HPE',
+        status: 'online',
+        uptime: '0d 0h',
+        category: meta.categories[0] || 'Switch',
+        subcategory: meta.subcategories[0] || 'Core',
+        branch: meta.branches[0] || 'HQ',
+        city: meta.cities[0] || 'Moscow',
+        zone: meta.zones[0] || 'DC-East'
+      });
       setCustomOidsText('');
     } catch (error) {
       alert('Error saving device configuration');
@@ -220,8 +246,10 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
         s.ip.includes(searchTerm);
       
       const matchesStatus = statusFilter === 'all' || s.status === statusFilter;
-      
-      return matchesSearch && matchesStatus;
+      const matchesZone = zoneFilter === 'all' || s.zone === zoneFilter;
+      const matchesSubcategory = subcategoryFilter === 'all' || (s.subcategory || '') === subcategoryFilter;
+
+      return matchesSearch && matchesStatus && matchesZone && matchesSubcategory;
     })
     .sort((a, b) => {
       if (!sortConfig) return 0;
@@ -295,6 +323,22 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
               <option value="offline">Offline</option>
               <option value="warning">Warning</option>
             </select>
+            <select
+              value={zoneFilter}
+              onChange={(e) => setZoneFilter(e.target.value)}
+              className="px-4 py-2 bg-[#141517] border border-[#373a40] rounded text-sm text-white focus:outline-none focus:border-[#228be6] appearance-none"
+            >
+              <option value="all">All Zones</option>
+              {meta.zones.map((z) => <option key={z} value={z}>{z}</option>)}
+            </select>
+            <select
+              value={subcategoryFilter}
+              onChange={(e) => setSubcategoryFilter(e.target.value)}
+              className="px-4 py-2 bg-[#141517] border border-[#373a40] rounded text-sm text-white focus:outline-none focus:border-[#228be6] appearance-none"
+            >
+              <option value="all">All Subcategories</option>
+              {meta.subcategories.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
           </div>
 
           <motion.div 
@@ -361,6 +405,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                 </div>
               </th>
               <th>{t('categoryLabel')}</th>
+              <th>Subcategory</th>
               <th>{t('branchLabel')}</th>
               <th onClick={() => handleSort('ip')} className="cursor-pointer hover:text-white transition-colors">
                 <div className="flex items-center gap-2">
@@ -411,6 +456,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                   </div>
                 </td>
                 <td className="text-xs">{localizeCategory(sw.category || 'Switch')}</td>
+                <td className="text-xs">{sw.subcategory || 'Core'}</td>
                 <td className="text-xs">{sw.branch || 'HQ'}</td>
                 <td className="font-mono text-xs text-[#228be6]">{sw.ip}</td>
                 <td>
@@ -494,9 +540,9 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                 <select 
                   className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:outline-none focus:border-[#228be6]"
                   value={newSwitch.vendor}
-                  onChange={e => setNewSwitch({...newSwitch, vendor: e.target.value as Vendor, model: MODELS[e.target.value][0]})}
+                  onChange={e => setNewSwitch({...newSwitch, vendor: e.target.value as Vendor, model: (meta.models[e.target.value] || ['Unknown'])[0]})}
                 >
-                  {VENDORS.map(v => <option key={v} value={v}>{v}</option>)}
+                  {(meta.vendors?.length ? meta.vendors : VENDORS).map(v => <option key={v} value={v}>{v}</option>)}
                 </select>
               </div>
               <div className="space-y-2">
@@ -509,7 +555,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                   onChange={e => setNewSwitch({...newSwitch, model: e.target.value})}
                 />
                 <datalist id="models">
-                  {newSwitch.vendor && MODELS[newSwitch.vendor].map(m => <option key={m} value={m} />)}
+                  {newSwitch.vendor && (meta.models[newSwitch.vendor] || []).map(m => <option key={m} value={m} />)}
                 </datalist>
               </div>
               <div className="space-y-2">
@@ -521,37 +567,17 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                 >
                   {meta.categories.map(c => <option key={c} value={c}>{localizeCategory(c)}</option>)}
                 </select>
-                <div className="flex gap-2">
-                  <input
-                    className="flex-1 bg-[#141517] border border-[#373a40] p-2 rounded text-xs text-white"
-                    placeholder={t('categoryLabel')}
-                    value={newCategoryName}
-                    onChange={(e) => setNewCategoryName(e.target.value)}
-                  />
-                  <button
-                    type="button"
-                    className="px-3 text-xs bg-[#2c2e33] rounded"
-                    onClick={async () => {
-                      const next = newCategoryName.trim();
-                      if (!next) return;
-                      const categories = [...new Set([...meta.categories, next])];
-                      await fetch('/api/inventory/meta', {
-                        method: 'POST',
-                        headers: {
-                          'Content-Type': 'application/json',
-                          'x-user-role': role || 'viewer',
-                          'x-user-name': username || 'unknown'
-                        },
-                        body: JSON.stringify({ categories, branches: meta.branches }),
-                      });
-                      setMeta({ ...meta, categories });
-                      setNewSwitch({ ...newSwitch, category: next });
-                      setNewCategoryName('');
-                    }}
-                  >
-                    {t('addLabel')}
-                  </button>
-                </div>
+                <p className="text-[10px] text-[#909296]">Manage categories in Settings.</p>
+              </div>
+              <div className="space-y-2">
+                <label className="text-[10px] font-bold text-[#909296] uppercase">Subcategory</label>
+                <select
+                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:outline-none focus:border-[#228be6]"
+                  value={newSwitch.subcategory || 'Core'}
+                  onChange={e => setNewSwitch({ ...newSwitch, subcategory: e.target.value })}
+                >
+                  {meta.subcategories.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
               </div>
               <div className="space-y-2">
                 <label className="text-[10px] font-bold text-[#909296] uppercase">{t('branchLabel')}</label>
@@ -562,37 +588,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                 >
                   {meta.branches.map(b => <option key={b} value={b}>{b}</option>)}
                 </select>
-                <div className="flex gap-2">
-                  <input
-                    className="flex-1 bg-[#141517] border border-[#373a40] p-2 rounded text-xs text-white"
-                    placeholder={t('branchLabel')}
-                    value={newBranchName}
-                    onChange={(e) => setNewBranchName(e.target.value)}
-                  />
-                  <button
-                    type="button"
-                    className="px-3 text-xs bg-[#2c2e33] rounded"
-                    onClick={async () => {
-                      const next = newBranchName.trim();
-                      if (!next) return;
-                      const branches = [...new Set([...meta.branches, next])];
-                      await fetch('/api/inventory/meta', {
-                        method: 'POST',
-                        headers: {
-                          'Content-Type': 'application/json',
-                          'x-user-role': role || 'viewer',
-                          'x-user-name': username || 'unknown'
-                        },
-                        body: JSON.stringify({ categories: meta.categories, branches }),
-                      });
-                      setMeta({ ...meta, branches });
-                      setNewSwitch({ ...newSwitch, branch: next });
-                      setNewBranchName('');
-                    }}
-                  >
-                    {t('addLabel')}
-                  </button>
-                </div>
+                <p className="text-[10px] text-[#909296]">Manage branches in Settings.</p>
               </div>
               <div className="space-y-2 col-span-2">
                 <label className="text-[10px] font-bold text-[#909296] uppercase">SNMP Template</label>
@@ -616,21 +612,23 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
               </div>
               <div className="space-y-2">
                 <label className="text-[10px] font-bold text-[#909296] uppercase">{t('city')}</label>
-                <input 
+                <select
                   className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:outline-none focus:border-[#228be6]"
-                  placeholder="Moscow"
                   value={newSwitch.city || ''}
                   onChange={e => setNewSwitch({...newSwitch, city: e.target.value})}
-                />
+                >
+                  {meta.cities.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
               </div>
               <div className="space-y-2">
                 <label className="text-[10px] font-bold text-[#909296] uppercase">{t('zone')}</label>
-                <input 
+                <select
                   className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:outline-none focus:border-[#228be6]"
-                  placeholder="Server-Farm-A"
                   value={newSwitch.zone || ''}
                   onChange={e => setNewSwitch({...newSwitch, zone: e.target.value})}
-                />
+                >
+                  {meta.zones.map(z => <option key={z} value={z}>{z}</option>)}
+                </select>
               </div>
             </div>
 
@@ -639,7 +637,16 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                 onClick={() => {
                   setIsAdding(false);
                   setEditingId(null);
-                  setNewSwitch({ vendor: 'HPE', status: 'online', uptime: '0d 0h', category: 'Switch', branch: 'HQ' });
+                  setNewSwitch({
+                    vendor: 'HPE',
+                    status: 'online',
+                    uptime: '0d 0h',
+                    category: meta.categories[0] || 'Switch',
+                    subcategory: meta.subcategories[0] || 'Core',
+                    branch: meta.branches[0] || 'HQ',
+                    city: meta.cities[0] || 'Moscow',
+                    zone: meta.zones[0] || 'DC-East'
+                  });
                   setCustomOidsText('');
                 }}
                 className="px-6 py-2.5 text-sm font-bold text-[#909296] hover:text-white transition-all uppercase tracking-widest"
