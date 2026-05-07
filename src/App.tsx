@@ -11,9 +11,8 @@ import AuditLogs from './components/AuditLogs';
 import Login from './components/Login';
 import { Switch } from './types';
 import { LanguageProvider, useTranslation } from './lib/i18n';
+import { APP_VERSION } from './lib/version';
 import { Menu } from 'lucide-react';
-
-const APP_VERSION = '1.02';
 
 function AppContent() {
   const { t } = useTranslation();
