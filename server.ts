@@ -114,11 +114,32 @@ type SshReadonlyProfile = {
 let sshReadonlyProfile: SshReadonlyProfile | null = null;
 
 const LEGACY_SSH_ALGORITHMS = {
-  // Required by older HP/HPE 1910/1810 firmware and similar legacy stacks.
-  kex: ["diffie-hellman-group14-sha1", "diffie-hellman-group1-sha1"],
-  serverHostKey: ["ssh-rsa", "ssh-dss"],
-  cipher: ["aes128-cbc", "3des-cbc", "aes192-cbc", "aes256-cbc"],
-  hmac: ["hmac-sha1", "hmac-md5"],
+  // Prefer modern algorithms but keep legacy fallbacks for old HP/HPE 1910/1810 stacks.
+  kex: [
+    "curve25519-sha256",
+    "curve25519-sha256@libssh.org",
+    "ecdh-sha2-nistp256",
+    "ecdh-sha2-nistp384",
+    "ecdh-sha2-nistp521",
+    "diffie-hellman-group-exchange-sha256",
+    "diffie-hellman-group14-sha256",
+    "diffie-hellman-group14-sha1",
+    "diffie-hellman-group1-sha1",
+  ],
+  serverHostKey: ["rsa-sha2-512", "rsa-sha2-256", "ssh-ed25519", "ecdsa-sha2-nistp256", "ssh-rsa", "ssh-dss"],
+  cipher: [
+    "aes128-gcm",
+    "aes256-gcm",
+    "aes128-ctr",
+    "aes192-ctr",
+    "aes256-ctr",
+    "chacha20-poly1305@openssh.com",
+    "aes128-cbc",
+    "aes192-cbc",
+    "aes256-cbc",
+    "3des-cbc",
+  ],
+  hmac: ["hmac-sha2-256", "hmac-sha2-512", "hmac-sha1", "hmac-md5"],
 };
 
 function legacySshConnectOptions() {
