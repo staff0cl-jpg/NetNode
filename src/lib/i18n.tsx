@@ -25,6 +25,11 @@ export const translations: Translations = {
   totalSwitches: { ru: 'Всего коммутаторов', en: 'Total Switches' },
   onlineNodes: { ru: 'В сети', en: 'Online Nodes' },
   activeAlerts: { ru: 'Активные алерты', en: 'Active Alerts' },
+  viewAlerts: { ru: 'Показать алерты', en: 'View alerts' },
+  activeAlertsDetails: { ru: 'Детали активных алертов', en: 'Active alerts details' },
+  deviceAlerts: { ru: 'Алерты устройств', en: 'Device alerts' },
+  trunkAlerts: { ru: 'Алерты trunk-портов', en: 'Trunk alerts' },
+  noActiveAlerts: { ru: 'Активных алертов нет', en: 'No active alerts' },
   avgLoad: { ru: 'Средняя нагрузка', en: 'Avg Network Load' },
   throughput: { ru: 'Пропускная способность сети (Гбит/с)', en: 'Aggregate Network Throughput (Gbps)' },
   cpuLoadVendor: { ru: 'Загрузка ЦП по вендорам (%)', en: 'CPU Load by Vendor (%)' },
@@ -192,8 +197,11 @@ export const translations: Translations = {
   allBranches: { ru: 'Все филиалы', en: 'All branches' },
   inventoryTabSwitches: { ru: 'Коммутаторы', en: 'Switches' },
   inventoryTabRouters: { ru: 'Маршрутизаторы', en: 'Routers' },
+  inventoryTabFc: { ru: 'FC коммутаторы', en: 'FC switches' },
   inventoryTabUps: { ru: 'ИБП', en: 'UPS' },
   inventoryTabAllWithoutOther: { ru: 'Все (кроме Прочее)', en: 'All (without Other)' },
+  topologyModeIp: { ru: 'L2/L3', en: 'L2/L3' },
+  topologyModeFc: { ru: 'FC', en: 'FC' },
 
   // Terminal
   sessions: { ru: 'Сессии', en: 'Sessions' },

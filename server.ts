@@ -156,7 +156,7 @@ let snmpConfig = {
 };
 
 let inventoryMeta = {
-  categories: ["Switch", "Router", "UPS", "Firewall", "Other"],
+  categories: ["Switch", "Router", "FC Switch", "UPS", "Firewall", "Other"],
   subcategories: ["Core", "Distribution", "Access"],
   branches: ["ULN", "NCH", "VRN", "VLG", "VLD", "SMR", "KRD"],
   cities: ["Ульяновск", "Набережные Челны", "Краснодар", "Воронеж", "Волгоград", "Владимир", "Самара"],
@@ -165,7 +165,7 @@ let inventoryMeta = {
   models: {
     Cisco: ["Catalyst 9300", "Catalyst 9200", "Nexus 93180YC", "ASR 1001-X"],
     Juniper: ["EX4300", "EX2300", "MX204", "QFX5120"],
-    HPE: ["HP 1910", "HP 1810", "Aruba 2530", "Aruba CX6000", "Aruba 2930F", "Aruba 5406R", "FlexFabric 5940", "Aruba 6300M"],
+    HPE: ["HP 1910", "HP 1810", "HP SN3600B", "Aruba 2530", "Aruba CX6000", "Aruba 2930F", "Aruba 5406R", "FlexFabric 5940", "Aruba 6300M"],
     Aruba: ["Aruba 2530", "Aruba CX6000", "Aruba 2930F", "Aruba 5406R", "Aruba 6300M"],
     MikroTik: ["CCR2004", "CRS326", "RB5009", "CCR2116"],
     APC: ["Smart-UPS", "Easy UPS", "Symmetra"],
@@ -266,6 +266,15 @@ let snmpTemplates: SnmpTemplate[] = [
     vendorHint: "UPS",
     metrics: [
       { key: "ups_uptime", oid: "1.3.6.1.2.1.1.3.0", scale: 0.01, unit: "s" },
+    ],
+  },
+  {
+    id: "zbx-fc-sn3600b",
+    name: "FC Switch SN3600B",
+    vendorHint: "HPE",
+    metrics: [
+      { key: "fc_uptime", oid: "1.3.6.1.2.1.1.3.0", scale: 0.01, unit: "s" },
+      { key: "fc_ports_total", oid: "1.3.6.1.2.1.2.1.0", scale: 1, unit: "count" },
     ],
   },
 ];
@@ -536,7 +545,7 @@ async function runDiscoveryScan(input: DiscoveryScanInput): Promise<DiscoverySca
       foundIps.push(ip);
       const vendor = probe.sysDescr ? detectVendorFromSnmp(probe.sysDescr, probe.sysObjectId || "") : "Unknown";
       const model = detectModelFromSnmp(probe.sysDescr || "", probe.sysObjectId || "", probe.sysName || "");
-      const category = detectCategoryFromSnmp(probe.sysDescr || "", probe.sysObjectId || "");
+      const category = detectCategoryFromSnmp(probe.sysDescr || "", probe.sysObjectId || "", probe.sysName || "");
       const trunkCount = await getTrunkPortCountFromSnmp(ip);
       const subcategory = trunkCount >= 2 ? "Core" : trunkCount === 1 ? "Distribution" : "Access";
       const uptimeSeconds = probe.uptimeSeconds ?? 0;
@@ -636,6 +645,7 @@ function detectVendorFromDescr(descr: string): string {
   if (d.includes("routeros") || d.includes("routerboard")) return "MikroTik";
   if (d.includes("huawei")) return "Huawei";
   if (d.includes("arista")) return "Arista";
+  if (d.includes("brocade") || d.includes("fibre channel") || d.includes("fiber channel") || d.includes("fabric os")) return "HPE";
   return "Unknown";
 }
 
@@ -658,6 +668,10 @@ function detectModelFromSnmp(sysDescr: string, sysObjectId = "", sysName = ""): 
     return "MikroTik Device";
   }
   if (!d.trim()) return "Unknown";
+  if (d.includes("sn3600b") || n.includes("sn3600b")) return "HP SN3600B";
+  if (d.includes("brocade") && (d.includes("6510") || d.includes("6520"))) {
+    return d.includes("6520") ? "HP SN3600B" : "HP SN3600B";
+  }
   if (/\b1910\b/.test(d) || d.includes("v1910") || d.includes("jg538a")) return "HP 1910";
   if (/\b1810\b/.test(d) || d.includes("j9450a") || d.includes("j9660a")) return "HP 1810";
   if (/\b2530\b/.test(d) || d.includes("j9772a") || d.includes("j9773a") || d.includes("j9780a")) return "Aruba 2530";
@@ -701,16 +715,25 @@ const uptimeOidProfiles: Array<{ oid: string; multiplier: number }> = [
   { oid: "1.3.6.1.2.1.25.1.1.0", multiplier: 0.01 },
 ];
 
-function detectCategoryFromSnmp(sysDescr: string, sysObjectId: string): string {
+function detectCategoryFromSnmp(sysDescr: string, sysObjectId: string, sysName = ""): string {
   const d = (sysDescr || "").toLowerCase();
   const oid = (sysObjectId || "").toLowerCase();
-  const model = detectModelFromSnmp(sysDescr, sysObjectId).toLowerCase();
+  const model = detectModelFromSnmp(sysDescr, sysObjectId, sysName).toLowerCase();
   if (d.includes("ups") || d.includes("apc") || d.includes("eaton") || oid.startsWith("1.3.6.1.4.1.318")) {
     return "UPS";
   }
   if (oid.startsWith("1.3.6.1.4.1.14988")) {
     if (model.startsWith("crs") || model.startsWith("css")) return "Switch";
     return "Router";
+  }
+  if (
+    model.includes("sn3600b") ||
+    d.includes("fibre channel") ||
+    d.includes("fiber channel") ||
+    d.includes("fabric os") ||
+    oid.startsWith("1.3.6.1.4.1.1588")
+  ) {
+    return "FC Switch";
   }
   if (d.includes("router")) return "Router";
   if (d.includes("firewall") || d.includes("fortigate") || d.includes("palo alto")) return "Firewall";
@@ -766,6 +789,11 @@ function getSnmpProbe(host: string, timeout = snmpConfig.timeoutMs): Promise<Snm
 function pickTemplate(item: InventoryItem): SnmpTemplate | undefined {
   if (item.snmpTemplateId) {
     return snmpTemplates.find((t) => t.id === item.snmpTemplateId);
+  }
+  const category = (item.category || "").toLowerCase();
+  const model = (item.model || "").toLowerCase();
+  if (category === "fc switch" || model.includes("sn3600b")) {
+    return snmpTemplates.find((t) => t.id === "zbx-fc-sn3600b");
   }
   if ((item.category || "").toLowerCase() === "ups") {
     return snmpTemplates.find((t) => t.id === "zbx-ups-basic");
@@ -1522,7 +1550,7 @@ async function startServer() {
         const nextVendor = probe.sysDescr ? detectVendorFromSnmp(probe.sysDescr, probe.sysObjectId || "") : item.vendor;
         const nextModel = detectModelFromSnmp(probe.sysDescr || "", probe.sysObjectId || "", probe.sysName || "") || item.model;
         const nextName = probe.sysName?.trim() ? probe.sysName.trim() : item.name;
-        const nextCategory = detectCategoryFromSnmp(probe.sysDescr || "", probe.sysObjectId || "");
+        const nextCategory = detectCategoryFromSnmp(probe.sysDescr || "", probe.sysObjectId || "", probe.sysName || "");
         const uptimeSeconds = probe.uptimeSeconds ?? item.uptimeSeconds ?? 0;
         return {
           ...item,

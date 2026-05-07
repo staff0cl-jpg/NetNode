@@ -51,6 +51,7 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
   const [panels, setPanels] = React.useState<DashboardPanel[]>(defaultPanels(t));
   const [editingPanel, setEditingPanel] = React.useState<DashboardPanel | null>(null);
   const [isSavingPanels, setIsSavingPanels] = React.useState(false);
+  const [isAlertsOpen, setIsAlertsOpen] = React.useState(false);
 
   React.useEffect(() => {
     setIsMounted(true);
@@ -118,6 +119,23 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
   }, [devicesWithMetrics]);
 
   const trunkDown = dashboardMetrics?.trunkSummary?.down || 0;
+  const deviceAlerts = React.useMemo(
+    () => switches.filter((s) => s.status !== 'online'),
+    [switches]
+  );
+  const trunkAlerts = React.useMemo(() => {
+    const devices = (dashboardMetrics?.devices || []) as Array<any>;
+    return devices.flatMap((d: any) =>
+      (d.trunks || [])
+        .filter((t: any) => Number(t.operStatus) !== 1)
+        .map((t: any) => ({
+          deviceName: d.name,
+          deviceIp: d.ip,
+          ifName: t.ifName || `if#${t.ifIndex || '-'}`,
+          description: t.description || '',
+        }))
+    );
+  }, [dashboardMetrics]);
 
   const stats = [
     { label: t('totalSwitches'), value: switches.length, icon: Server, color: '#228be6' },
@@ -261,6 +279,14 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
                     <div className="mt-4 flex items-center gap-2 text-[10px] font-mono text-[#40c057]">
                       <span>{onlineCount > 0 ? t('trendPlaceholder') : t('noActiveTraffic')}</span>
                     </div>
+                    {stat.label === t('activeAlerts') && (
+                      <button
+                        onClick={() => setIsAlertsOpen(true)}
+                        className="mt-3 text-[10px] uppercase font-bold tracking-widest text-[#228be6] hover:text-white"
+                      >
+                        {t('viewAlerts')}
+                      </button>
+                    )}
                   </motion.div>
                 ))}
               </div>
@@ -429,6 +455,55 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
                   {t('save')}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isAlertsOpen && (
+        <div className="fixed inset-0 z-[120] bg-black/60 flex items-center justify-center">
+          <div className="w-full max-w-3xl bg-[#25262b] border border-[#373a40] rounded p-5 max-h-[80vh] overflow-auto">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('activeAlertsDetails')}</h3>
+              <button onClick={() => setIsAlertsOpen(false)} className="text-[#909296] hover:text-white">x</button>
+            </div>
+
+            <div className="mb-5">
+              <h4 className="text-xs uppercase font-bold text-[#fa5252] mb-2">
+                {t('deviceAlerts')} ({deviceAlerts.length})
+              </h4>
+              {deviceAlerts.length === 0 ? (
+                <div className="text-xs text-[#909296]">{t('noActiveAlerts')}</div>
+              ) : (
+                <div className="space-y-2">
+                  {deviceAlerts.map((d) => (
+                    <div key={`dev-alert-${d.id}`} className="border border-[#373a40] rounded p-2 text-xs">
+                      <div className="text-white font-semibold">{d.name}</div>
+                      <div className="text-[#909296]">{d.ip} · {d.branch || '-'}</div>
+                      <div className="text-[#fa5252] uppercase">{d.status}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div>
+              <h4 className="text-xs uppercase font-bold text-[#fa5252] mb-2">
+                {t('trunkAlerts')} ({trunkAlerts.length})
+              </h4>
+              {trunkAlerts.length === 0 ? (
+                <div className="text-xs text-[#909296]">{t('noActiveAlerts')}</div>
+              ) : (
+                <div className="space-y-2">
+                  {trunkAlerts.map((a, idx) => (
+                    <div key={`trunk-alert-${a.deviceIp}-${a.ifName}-${idx}`} className="border border-[#373a40] rounded p-2 text-xs">
+                      <div className="text-white font-semibold">{a.deviceName} ({a.deviceIp})</div>
+                      <div className="text-[#909296]">{a.ifName}{a.description ? ` · ${a.description}` : ''}</div>
+                      <div className="text-[#fa5252] uppercase">{t('trunkStateDown')}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>

@@ -62,18 +62,18 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
     vendors: string[];
     models: Record<string, string[]>;
   }>({
-    categories: ['Switch'],
+    categories: ['Switch', 'Router', 'FC Switch', 'UPS'],
     subcategories: ['Core'],
     branches: ['ULN', 'NCH', 'VRN', 'VLG', 'VLD', 'SMR', 'KRD'],
     cities: ['Ульяновск', 'Набережные Челны', 'Краснодар', 'Воронеж', 'Волгоград', 'Владимир', 'Самара'],
     zones: ['Core', 'Distribution', 'Access'],
     vendors: ['Cisco', 'Juniper', 'HPE', 'Aruba'],
-    models: { HPE: ['Aruba 2930F'] }
+    models: { HPE: ['Aruba 2930F', 'HP SN3600B'] }
   });
   const [snmpTemplates, setSnmpTemplates] = useState<Array<{ id: string; name: string }>>([]);
   const [customOidsText, setCustomOidsText] = useState('');
   const [activeBranchTab, setActiveBranchTab] = useState<string>('all');
-  const [activeCategoryTab, setActiveCategoryTab] = useState<'switch' | 'router' | 'ups' | 'all'>('switch');
+  const [activeCategoryTab, setActiveCategoryTab] = useState<'switch' | 'router' | 'fc' | 'ups' | 'all'>('switch');
   const [openRowMenuId, setOpenRowMenuId] = useState<string | null>(null);
   const rowMenuRef = React.useRef<HTMLDivElement | null>(null);
   const makeDefaultSwitch = React.useCallback(
@@ -95,6 +95,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
     const v = (value || '').toLowerCase();
     if (v === 'switch') return 'Коммутатор';
     if (v === 'router') return 'Маршрутизатор';
+    if (v === 'fc switch' || v === 'fibre channel switch' || v === 'fiber channel switch') return 'FC коммутатор';
     if (v === 'ups') return 'ИБП';
     if (v === 'firewall') return 'Межсетевой экран';
     if (v === 'other') return 'Прочее';
@@ -113,10 +114,11 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
     [switches]
   );
 
-  const categoryKey = (category?: string): 'switch' | 'router' | 'ups' | 'other' => {
+  const categoryKey = (category?: string): 'switch' | 'router' | 'fc' | 'ups' | 'other' => {
     const v = (category || '').toLowerCase();
     if (v === 'switch' || v === 'коммутатор') return 'switch';
     if (v === 'router' || v === 'маршрутизатор') return 'router';
+    if (v === 'fc switch' || v === 'fibre channel switch' || v === 'fiber channel switch' || v === 'fc коммутатор') return 'fc';
     if (v === 'ups' || v === 'ибп') return 'ups';
     return 'other';
   };
@@ -440,6 +442,18 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
           )}
         >
           {t('inventoryTabRouters')}
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveCategoryTab('fc')}
+          className={cn(
+            "px-3 py-1 rounded text-[10px] font-bold uppercase border",
+            activeCategoryTab === 'fc'
+              ? "bg-[#228be6] border-[#228be6] text-white"
+              : "bg-[#2c2e33] border-[#373a40] text-[#c1c2c5]"
+          )}
+        >
+          {t('inventoryTabFc')}
         </button>
         <button
           type="button"

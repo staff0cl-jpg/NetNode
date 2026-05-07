@@ -1,142 +1,151 @@
 # NETNODE Infrastructure Management
 
-This application is designed for deployment on local servers (Air-Gapped environments) using a Node.js runtime.
+NETNODE is an on-premise network operations application for inventory, discovery, topology visualization, dashboarding, and remote diagnostics in isolated or enterprise environments.
 
-## 1. Prerequisites
+## What NETNODE Currently Does
 
-Before installing, ensure your system has the following components:
+### Core Modules
 
-- **Node.js**: **v18.0 or higher** (Required for Vite and modern ESM features)
-- **NPM**: v9.0 or higher
+- **Dashboard**
+  - Infrastructure KPI cards (total, online, active alerts, average load)
+  - Trunk throughput/load charts
+  - Trunk monitor list
+  - Clickable active-alert details modal (device alerts + trunk-down alerts)
+  - Customizable dashboard panels with presets and panel settings
 
-> [!CAUTION]
-> If you see `SyntaxError: Unexpected reserved word` regarding `await import`, it means your Node.js version is too old. Upgrade to Node.js v18+.
-- **Nginx**: Used as a reverse proxy
-- **Process Manager**: (Optional) `pm2` is recommended for production persistence
+- **Inventory**
+  - Device registry with branch/city/zone/vendor/model/category/subcategory
+  - Region tabs + category tabs (Switches, Routers, FC switches, UPS, All except Other)
+  - Sorting for visible columns (including numeric IPv4 and numeric uptime sort)
+  - Row actions menu (copy IP, open HTTPS UI, quick device info)
+  - Bulk actions and CSV export
+  - SNMP template binding + custom OIDs per device
 
-## 2. Installation
+- **Topology**
+  - Link graph with manual drag and saved node layout
+  - Auto-layout and link rebuild flow
+  - Manual link add/delete
+  - Interactive link label rename directly on map
+  - Protection of manual links and manually renamed link labels during rebuild
+  - Right-click pan on empty canvas area (no mode switch button required)
+  - Separate topology views:
+    - `L2/L3` (regular IP network devices)
+    - `FC` (fibre channel switches)
 
-1. **Extract Source Code**:
-   Upload the project files to your server (e.g., `/var/www/netnode`).
+- **Discovery and Monitoring**
+  - SNMP-based discovery (no SSH-based autodiscovery in watch flow)
+  - LLDP/trunk-aware topology inference and trunk metric collection
+  - Discovery watch scheduler with profile intervals and status endpoint
+  - Automatic subcategory classification by trunk count:
+    - `>= 2`: Core
+    - `= 1`: Distribution
+    - `= 0`: Access
+  - Offline detection in inventory on failed SNMP probe
 
-2. **Setup Global Tools**:
-   ```bash
-   # Install PM2 for process management
-   sudo npm install -g pm2
-   ```
+- **Remote Access and Ops**
+  - Browser SSH terminal
+  - Legacy SSH algorithm support for old hardware (e.g., HP 1910/1810 compatibility)
+  - Audit logging for security-sensitive actions
+  - Role-based access (`admin`, `operator`, `viewer`)
 
-3. **Install Dependencies**:
-   ```bash
-   cd /var/www/netnode
-   npm install
-   ```
+### Device/Vendor Coverage (Current Heuristics)
 
-4. **Configuration**:
-   Copy the example environment file and edit it if necessary:
-   ```bash
-   cp .env.example .env
-   # Ensure PORT=3000 is set in .env
-   ```
+- **Network vendors:** Cisco, MikroTik, HPE/Aruba, Juniper, Huawei, Arista
+- **Power vendors:** APC, Eaton, Vertiv, Riello
+- **FC support:** FC category detection and separate FC topology mode
+- **MikroTik detection:** improved model/vendor identification via `sysObjectId`, `sysDescr`, and `sysName`
+- **FC model support:** includes `HP SN3600B` detection path and FC SNMP template
 
-5. **Build the Application**:
-   ```bash
-   npm run build
-   ```
+> Detection is heuristic-based and may need tuning per environment, firmware, and MIB exposure.
 
-6. **Start the Server**:
-   For production with `pm2`:
-   ```bash
-   # Start using the npm script defined in package.json
-   pm2 start "npm start" --name netnode
-   ```
+## Prerequisites
 
-7. **Verify**:
-   Check if the process is running and see the logs:
-   ```bash
-   pm2 list
-   pm2 logs netnode
-   ```
+- **Node.js**: `18+`
+- **npm**: `9+`
+- Optional for production:
+  - **Nginx** as reverse proxy
+  - **pm2** for process management
 
-## 3. Cleanup
+## Local Development
 
-Files like `metadata.json` are specific to the development environment and can be safely removed or ignored in your production deployment.
+```bash
+npm install
+npm run dev
+```
 
-## 4. Nginx Configuration
+## Production Build and Run
 
-Configure Nginx to proxy traffic to the Node.js application (default port 3000).
+```bash
+npm install
+npm run build
+npm start
+```
 
-Example configuration (`/etc/nginx/sites-available/netnode`):
+With `pm2`:
+
+```bash
+pm2 start "npm start" --name netnode
+pm2 list
+pm2 logs netnode
+```
+
+## Environment and Deployment Notes
+
+- Copy `.env.example` to `.env` and set `PORT` as needed.
+- Default service port is `3000`.
+- The app is designed to run fully on-premise without cloud dependency.
+
+## Nginx Reverse Proxy Example
+
 ```nginx
 server {
     listen 80;
     server_name netnode.local;
 
     location / {
-        proxy_pass http://localhost:3000;
+        proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection 'upgrade';
         proxy_set_header Host $host;
         proxy_cache_bypass $http_upgrade;
-        
-        # Increase timeouts for long SSH sessions if needed
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
     }
 }
 ```
 
-## 4. System Sizing Recommendations
-
-Scale your deployment based on the number of managed devices:
+## Recommended Sizing
 
 | Scale | Devices | CPU | RAM | Storage |
-|-------|---------|-----|-----|---------|
-| **Small** | < 100 | 2 vCPU | 4 GB | 20 GB |
-| **Medium** | 100 - 500 | 4 vCPU | 8 GB | 100 GB |
-| **Large** | 500 - 1000+ | 8 vCPU | 16 GB | 250 GB+ |
+|---|---:|---:|---:|---:|
+| Small | <100 | 2 vCPU | 4 GB | 20 GB |
+| Medium | 100-500 | 4 vCPU | 8 GB | 100 GB |
+| Large | 500-1000+ | 8 vCPU | 16 GB | 250 GB+ |
 
-## 5. Security Notes
+## Security Notes
 
-- **Local Account**: Default access is `admin` / `admin`. Change this immediately via the user management settings.
-- **Privacy**: The application is fully self-contained. No external CDN or tracking calls are made.
-- **SSH/Terminal**: SSH sessions are handled via a secure tunnel between the server and the managed equipment.
-- **Audit Logs**: All sensitive actions are logged and visible to administrators.
+- Change default credentials immediately after first login.
+- Keep SNMP communities and SSH credentials restricted and rotated.
+- Use role-based access and audit logs for operational accountability.
 
-## 6. Troubleshooting
+## Known Constraints
 
-**1. SyntaxError: Unexpected reserved word (await import)**
-This means your Node.js version is too old (< 18). 
-Update Node.js using NodeSource:
-```bash
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt-get install -y nodejs
-```
+- Data is currently in-memory; restart can reset runtime state if external persistence is not added.
+- Discovery/metrics accuracy depends on SNMP reachability and device MIB support.
+- Some vendor/model mappings are heuristic and can require additional tuning for edge device families.
 
-**2. dpkg error (trying to overwrite ... libnode-dev)**
-If you see a conflict with `libnode-dev` during upgrade:
-```bash
-sudo apt-get remove -y libnode-dev
-sudo apt-get install -f
-sudo apt-get install -y nodejs
-```
+## Troubleshooting Quick List
 
-**3. Error: Cannot find native binding (Tailwind/Vite)**
-If you see an error about native bindings after upgrading Node.js:
-```bash
-# Force rebuild of dependencies for the new Node version
-rm -rf node_modules package-lock.json
-npm install
-npm run build
-```
-
-**4. 502 Bad Gateway (Nginx)**
-If PM2 says "online" but Nginx shows 502:
-1. **Check PM2 Logs**: `pm2 logs netnode`
-2. **Verify .env exists**: Ensure you copied `.env.example` to `.env`.
-3. **Verify Port**: Ensure `PORT=3000` is in `.env`.
-4. **IPv6 Conflict**: In Nginx config, try changing `localhost:3000` to `127.0.0.1:3000`.
-5. **Direct Test**: Stop PM2 (`pm2 delete netnode`) and run manually: `npm start`. If it works there but not in PM2, check if PM2 has permission to access the folder.
-
-**5. Command 'pm2' not found**
-Install PM2 globally: `sudo npm install -g pm2`
+- **Node syntax/runtime errors**: verify Node.js `18+`.
+- **Build issues after Node upgrade**:
+  ```bash
+  rm -rf node_modules package-lock.json
+  npm install
+  npm run build
+  ```
+- **502 via Nginx**: verify app is reachable on local port first, then validate proxy target.
+- **pm2 not found**:
+  ```bash
+  sudo npm install -g pm2
+  ```

@@ -208,15 +208,20 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   const [isRightPanning, setIsRightPanning] = useState(false);
   const [isNodeDragging, setIsNodeDragging] = useState(false);
   const panLastPointRef = useRef<{ x: number; y: number } | null>(null);
+  const [topologyMode, setTopologyMode] = useState<'ip' | 'fc'>('ip');
   const [selectedRegion, setSelectedRegion] = useState<string>('');
   const [newRegion, setNewRegion] = useState('');
   const [regionEditor, setRegionEditor] = useState({ from: '', to: '' });
   const [editingLinkId, setEditingLinkId] = useState<string | null>(null);
   const [editingLinkValue, setEditingLinkValue] = useState<{ portA: string; portB: string }>({ portA: '', portB: '' });
   const topologySwitches = React.useMemo(() => {
-    const allowed = new Set(['switch', 'router', 'коммутатор', 'маршрутизатор']);
-    return switches.filter((s) => allowed.has(String(s.category || '').trim().toLowerCase()));
-  }, [switches]);
+    const ipAllowed = new Set(['switch', 'router', 'коммутатор', 'маршрутизатор']);
+    const fcAllowed = new Set(['fc switch', 'fibre channel switch', 'fiber channel switch', 'fc коммутатор']);
+    return switches.filter((s) => {
+      const category = String(s.category || '').trim().toLowerCase();
+      return topologyMode === 'fc' ? fcAllowed.has(category) : ipAllowed.has(category);
+    });
+  }, [switches, topologyMode]);
   const regions = React.useMemo(() => {
     const set = new Set<string>();
     topologySwitches.forEach((s) => {
@@ -302,18 +307,20 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       setSavedLayout(data.layout || {});
 
       // After rebuilding topology for this tab, classify inventory subcategories by trunk count (SNMP).
-      try {
-        await fetch('/api/topology/classify-subcategories', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-user-role': role || 'viewer',
-            'x-user-name': username || 'unknown'
-          },
-          body: JSON.stringify({ branch: selectedRegion })
-        });
-      } catch {
-        // ignore classification errors
+      if (topologyMode !== 'fc') {
+        try {
+          await fetch('/api/topology/classify-subcategories', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-user-role': role || 'viewer',
+              'x-user-name': username || 'unknown'
+            },
+            body: JSON.stringify({ branch: selectedRegion })
+          });
+        } catch {
+          // ignore classification errors
+        }
       }
       const w = containerRef.current?.offsetWidth || canvasSize.width;
       const h = containerRef.current?.offsetHeight || canvasSize.height;
@@ -595,6 +602,21 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       </header>
       <div className="px-4 py-2 border-b border-[#373a40] bg-[#1a1b1e] flex items-center justify-between">
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setTopologyMode('ip')}
+            className={`px-3 py-1 rounded text-[10px] font-bold uppercase border ${topologyMode === 'ip' ? 'bg-[#228be6] border-[#228be6] text-white' : 'bg-[#2c2e33] border-[#373a40] text-[#c1c2c5]'}`}
+          >
+            {t('topologyModeIp')}
+          </button>
+          <button
+            type="button"
+            onClick={() => setTopologyMode('fc')}
+            className={`px-3 py-1 rounded text-[10px] font-bold uppercase border ${topologyMode === 'fc' ? 'bg-[#228be6] border-[#228be6] text-white' : 'bg-[#2c2e33] border-[#373a40] text-[#c1c2c5]'}`}
+          >
+            {t('topologyModeFc')}
+          </button>
+          <div className="h-4 w-px bg-[#373a40] mx-1" />
           {regions.map((r) => (
             <button
               key={r}
