@@ -232,6 +232,25 @@ function parseCiscoIfIndexFromSuffix(suffix: string): string {
   return parts[parts.length - 1] || "";
 }
 
+function buildInterfaceIndexSet(
+  maps: Array<Record<string, string> | undefined>,
+  extraIndexes: Iterable<string> = []
+): Set<string> {
+  const out = new Set<string>();
+  for (const map of maps) {
+    if (!map) continue;
+    Object.keys(map).forEach((k) => {
+      const idx = String(k || "").trim();
+      if (idx) out.add(idx);
+    });
+  }
+  for (const raw of extraIndexes) {
+    const idx = String(raw || "").trim();
+    if (idx) out.add(idx);
+  }
+  return out;
+}
+
 async function getCiscoTrunkPortHints(host: string): Promise<Set<string>> {
   try {
     // CISCO-VTP-MIB trunk-related tables.
@@ -268,7 +287,7 @@ async function getTrunkPortCountFromSnmp(host: string): Promise<number> {
       snmpWalk(host, "1.3.6.1.2.1.2.2.1.3"),
       getCiscoTrunkPortHints(host),
     ]);
-    const indexes = new Set([...Object.keys(ifNames), ...Object.keys(ifAlias), ...Object.keys(ifDescr)]);
+    const indexes = buildInterfaceIndexSet([ifNames, ifAlias, ifDescr], ciscoHints);
     let count = 0;
     for (const ifIndex of indexes) {
       const ifName = String(ifNames[ifIndex] || `if${ifIndex}`).trim();
@@ -1016,12 +1035,13 @@ function snmpWalk(host: string, baseOid: string, timeout = snmpConfig.timeoutMs)
 }
 
 async function collectTrunkMetrics(host: string): Promise<TrunkMetric[]> {
-  const [ifNames, ifAlias, ifDescr, ifType, ifOper, ifSpeed, hcInOctets, hcOutOctets, inOctets32, outOctets32, ciscoHints] = await Promise.all([
+  const [ifNames, ifAlias, ifDescr, ifType, ifOper, ifAdmin, ifSpeed, hcInOctets, hcOutOctets, inOctets32, outOctets32, ciscoHints] = await Promise.all([
     snmpWalk(host, "1.3.6.1.2.1.31.1.1.1.1"),
     snmpWalk(host, "1.3.6.1.2.1.31.1.1.1.18"),
     snmpWalk(host, "1.3.6.1.2.1.2.2.1.2"),
     snmpWalk(host, "1.3.6.1.2.1.2.2.1.3"),
     snmpWalk(host, "1.3.6.1.2.1.2.2.1.8"),
+    snmpWalk(host, "1.3.6.1.2.1.2.2.1.7"),
     snmpWalk(host, "1.3.6.1.2.1.2.2.1.5"),
     snmpWalk(host, "1.3.6.1.2.1.31.1.1.1.6"),
     snmpWalk(host, "1.3.6.1.2.1.31.1.1.1.10"),
@@ -1030,15 +1050,7 @@ async function collectTrunkMetrics(host: string): Promise<TrunkMetric[]> {
     getCiscoTrunkPortHints(host),
   ]);
   const now = Date.now();
-  const indexes = Array.from(
-    new Set([
-      ...Object.keys(ifAlias),
-      ...Object.keys(ifDescr),
-      ...Object.keys(ifNames),
-      ...Object.keys(hcInOctets),
-      ...Object.keys(inOctets32),
-    ])
-  );
+  const indexes = Array.from(buildInterfaceIndexSet([ifAlias, ifDescr, ifNames, hcInOctets, inOctets32, ifOper, ifAdmin], ciscoHints));
   const trunks: TrunkMetric[] = [];
   const parseCounter = (value: unknown): bigint | null => {
     if (value === undefined || value === null) return null;
@@ -1088,11 +1100,18 @@ async function collectTrunkMetrics(host: string): Promise<TrunkMetric[]> {
       }
     }
     trunkCounterCache.set(key, { inOctets: inNow, outOctets: outNow, ts: now, bits });
+    let operStatus = Number(ifOper[idx] || 0);
+    if (!Number.isFinite(operStatus) || operStatus <= 0) {
+      const adminStatus = Number(ifAdmin[idx] || 0);
+      // Some Cisco Port-Channel indexes are visible in VTP/counters but occasionally miss ifOperStatus.
+      // Treat admin-up trunks with valid counters as up to avoid false down alerts.
+      operStatus = adminStatus === 1 ? 1 : 2;
+    }
     trunks.push({
       ifIndex: idx,
       ifName,
       description: desc,
-      operStatus: Number(ifOper[idx] || 2),
+      operStatus,
       inBps,
       outBps,
     });
@@ -1257,7 +1276,7 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
         snmpWalk(dev.ip, "1.3.6.1.2.1.2.2.1.3"), // ifType
         getCiscoTrunkPortHints(dev.ip),
       ]);
-      const indexes = new Set([...Object.keys(ifAliasMap), ...Object.keys(ifDescrMap)]);
+      const indexes = buildInterfaceIndexSet([ifAliasMap, ifDescrMap, ifNameMap], ciscoHints);
       for (const ifIndex of indexes) {
         const alias = String(ifAliasMap[ifIndex] || "").trim();
         const descr = String(ifDescrMap[ifIndex] || "").trim();
@@ -1289,7 +1308,7 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
       ]);
 
       const trunkIfIndexes = new Set<string>();
-      const allIf = new Set([...Object.keys(ifNameMap), ...Object.keys(ifAliasMap), ...Object.keys(ifDescrMap)]);
+      const allIf = buildInterfaceIndexSet([ifNameMap, ifAliasMap, ifDescrMap], ciscoHints);
       for (const ifIndex of allIf) {
         const ifName = String(ifNameMap[ifIndex] || `if${ifIndex}`).trim();
         const alias = String(ifAliasMap[ifIndex] || "").trim();

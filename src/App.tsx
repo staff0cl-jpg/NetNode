@@ -10,6 +10,7 @@ import AuditLogs from './components/AuditLogs';
 import Login from './components/Login';
 import { Switch } from './types';
 import { LanguageProvider } from './lib/i18n';
+import { Menu } from 'lucide-react';
 
 function AppContent() {
   const [user, setUser] = useState<{ id: string, username: string, role: string } | null>(null);
@@ -19,6 +20,7 @@ function AppContent() {
   const [loading, setLoading] = useState(true);
   const [sshTarget, setSshTarget] = useState<Switch | null>(null);
   const [banner, setBanner] = useState({ siteLabel: 'UNSET', appUptime: '0d 0h 0m' });
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   const fetchInventory = async () => {
     try {
@@ -115,6 +117,10 @@ function AppContent() {
     }
   };
 
+  React.useEffect(() => {
+    setMobileSidebarOpen(false);
+  }, [activeTab]);
+
   if (authBootstrapping) {
     return (
       <div className="min-h-screen w-full bg-[#1a1b1e] flex items-center justify-center text-[#909296] text-sm font-mono">
@@ -181,27 +187,54 @@ function AppContent() {
 
   return (
     <div className="flex h-screen w-screen bg-[#1a1b1e] text-[#c1c2c5] overflow-hidden font-sans">
-      <Sidebar 
-        activeTab={activeTab} 
-        setActiveTab={setActiveTab} 
-        onLogout={handleLogout} 
-        user={user}
-      />
+      <div className="hidden md:block">
+        <Sidebar
+          activeTab={activeTab}
+          setActiveTab={setActiveTab}
+          onLogout={handleLogout}
+          user={user}
+        />
+      </div>
+      <div className="md:hidden">
+        <Sidebar
+          activeTab={activeTab}
+          setActiveTab={setActiveTab}
+          onLogout={handleLogout}
+          user={user}
+          isMobile
+          isOpen={mobileSidebarOpen}
+          onClose={() => setMobileSidebarOpen(false)}
+        />
+        {mobileSidebarOpen && (
+          <button
+            className="fixed inset-0 z-[110] bg-black/50"
+            aria-label="Close menu overlay"
+            onClick={() => setMobileSidebarOpen(false)}
+          />
+        )}
+      </div>
       
       <main className="flex-1 flex flex-col min-w-0 overflow-y-auto">
         {/* Top Header Bar */}
-        <header className="h-10 border-b border-[#373a40] bg-[#1a1b1e] shrink-0 flex items-center px-8 justify-between">
-          <div className="flex items-center gap-4">
+        <header className="h-10 border-b border-[#373a40] bg-[#1a1b1e] shrink-0 flex items-center px-3 md:px-8 justify-between gap-2">
+          <div className="flex items-center gap-2 md:gap-4 min-w-0">
+            <button
+              className="md:hidden p-1.5 text-[#909296] hover:text-white"
+              onClick={() => setMobileSidebarOpen(true)}
+              aria-label="Open menu"
+            >
+              <Menu size={16} />
+            </button>
             <div className="flex items-center gap-2">
               <div className="w-1.5 h-1.5 bg-[#40c057] rounded-full" />
-              <span className="text-[10px] font-mono text-[#909296] uppercase tracking-wider">Sync Status: Real-time</span>
+              <span className="text-[10px] font-mono text-[#909296] uppercase tracking-wider whitespace-nowrap">Sync Status: Real-time</span>
             </div>
-            <div className="h-3 w-px bg-[#373a40]" />
-            <span className="text-[10px] font-mono text-[#5c5f66] uppercase tracking-wider">Session: Secure (AES-256)</span>
+            <div className="h-3 w-px bg-[#373a40] hidden sm:block" />
+            <span className="text-[10px] font-mono text-[#5c5f66] uppercase tracking-wider hidden lg:block">Session: Secure (AES-256)</span>
           </div>
-          <div className="flex items-center gap-4 text-[10px] font-mono text-[#909296]">
-            <span>{banner.siteLabel}</span>
-            <span>UPTIME: {banner.appUptime}</span>
+          <div className="flex items-center gap-2 md:gap-4 text-[10px] font-mono text-[#909296] min-w-0">
+            <span className="truncate max-w-[120px] sm:max-w-[180px]">{banner.siteLabel}</span>
+            <span className="whitespace-nowrap">UPTIME: {banner.appUptime}</span>
           </div>
         </header>
 

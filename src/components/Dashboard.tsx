@@ -228,9 +228,9 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
   };
 
   return (
-    <div className="p-8 space-y-8 animate-in fade-in duration-500">
-      <header className="flex items-center justify-between">
-        <div>
+    <div className="p-4 md:p-8 space-y-6 md:space-y-8 animate-in fade-in duration-500">
+      <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div className="min-w-0">
           <h2 className="text-2xl font-bold text-white mb-2 leading-tight">{t('infraOverview')}</h2>
           <p className="text-sm text-[#909296]">{t('realtimeStatus')}</p>
         </div>
@@ -242,7 +242,7 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
           {t('addPanel')}
         </button>
       </header>
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2">
         <button onClick={() => applyPreset('noc')} className="px-3 py-1.5 text-[10px] uppercase font-bold bg-[#25262b] border border-[#373a40] rounded text-[#c1c2c5] hover:text-white">{t('presetNoc')}</button>
         <button onClick={() => applyPreset('traffic')} className="px-3 py-1.5 text-[10px] uppercase font-bold bg-[#25262b] border border-[#373a40] rounded text-[#c1c2c5] hover:text-white">{t('presetTraffic')}</button>
         <button onClick={() => applyPreset('capacity')} className="px-3 py-1.5 text-[10px] uppercase font-bold bg-[#25262b] border border-[#373a40] rounded text-[#c1c2c5] hover:text-white">{t('presetCapacity')}</button>
@@ -258,19 +258,19 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
                   <Settings size={14} />
                 </button>
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 md:gap-6">
                 {stats.map((stat, i) => (
                   <motion.div
                     key={stat.label}
                     initial={{ opacity: 0, y: 20 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: i * 0.1 }}
-                    className="bg-[#25262b] p-6 border border-[#373a40] rounded shadow-sm hover:border-[#228be6] transition-colors group"
+                    className="bg-[#25262b] p-4 md:p-6 border border-[#373a40] rounded shadow-sm hover:border-[#228be6] transition-colors group"
                   >
                     <div className="flex justify-between items-start">
                       <div>
                         <p className="text-xs font-bold text-[#909296] uppercase tracking-widest mb-1">{stat.label}</p>
-                        <h3 className="text-3xl font-bold text-white tracking-tight">{stat.value}</h3>
+                        <h3 className="text-2xl md:text-3xl font-bold text-white tracking-tight break-words">{stat.value}</h3>
                       </div>
                       <div className="p-3 rounded bg-[#2c2e33] text-white group-hover:bg-[#228be6] transition-colors" style={{ color: stat.color }}>
                         <stat.icon size={20} />
@@ -298,14 +298,14 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
           const isLine = panel.kind === 'traffic';
           const data = panel.kind === 'metric' ? customMetricData(panel) : dynamicData;
           return (
-            <div key={panel.id} className="bg-[#25262b] p-6 border border-[#373a40] rounded shadow-sm">
+            <div key={panel.id} className="bg-[#25262b] p-4 md:p-6 border border-[#373a40] rounded shadow-sm">
               <div className="flex justify-between items-center mb-4">
                 <h3 className="text-sm font-bold text-white uppercase tracking-widest">{panel.title}</h3>
                 <button onClick={() => setEditingPanel(panel)} className="text-[#909296] hover:text-white">
                   <Settings size={14} />
                 </button>
               </div>
-              <div className="h-64 outline-none">
+              <div className="h-56 sm:h-64 outline-none">
                 {isMounted && (
                   <ResponsiveContainer width="100%" height="100%">
                     {isLine ? (
@@ -333,7 +333,7 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
         }
 
         return (
-          <div key={panel.id} className="bg-[#25262b] p-6 border border-[#373a40] rounded shadow-sm">
+          <div key={panel.id} className="bg-[#25262b] p-4 md:p-6 border border-[#373a40] rounded shadow-sm">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-sm font-bold text-white uppercase tracking-widest">{panel.title || t('trunkMonitorTitle')}</h3>
               <button onClick={() => setEditingPanel(panel)} className="text-[#909296] hover:text-white">
@@ -342,14 +342,14 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
               {(dashboardMetrics?.trunkSummary?.topByTraffic || []).slice(0, 6).map((p: any) => (
-                <div key={`${p.deviceId}-${p.ifIndex}`} className="border border-[#373a40] rounded p-3">
+                <div key={`${p.deviceId}-${p.ifIndex}`} className="border border-[#373a40] rounded p-3 min-w-0">
                   <div className="flex justify-between">
                     <span className="text-white font-semibold">{p.deviceName}</span>
                     <span className={p.operStatus === 1 ? 'text-[#40c057]' : 'text-[#fa5252]'}>
                       {p.operStatus === 1 ? t('trunkStateUp') : t('trunkStateDown')}
                     </span>
                   </div>
-                  <div className="text-[#909296] mt-1">{p.ifName} :: {p.description}</div>
+                  <div className="text-[#909296] mt-1 break-words">{p.ifName} :: {p.description}</div>
                   <div className="text-[#228be6] mt-1">IN {Math.round(p.inBps / 1_000_000)} Mbps / OUT {Math.round(p.outBps / 1_000_000)} Mbps</div>
                 </div>
               ))}
@@ -359,8 +359,8 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
       })}
 
       {editingPanel && (
-        <div className="fixed inset-0 z-[120] bg-black/60 flex items-center justify-center">
-          <div className="w-full max-w-lg bg-[#25262b] border border-[#373a40] rounded p-5">
+        <div className="fixed inset-0 z-[120] bg-black/60 flex items-center justify-center p-3 sm:p-4">
+          <div className="w-full max-w-lg bg-[#25262b] border border-[#373a40] rounded p-4 sm:p-5 max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('panelSettings')}</h3>
               <button onClick={() => setEditingPanel(null)} className="text-[#909296] hover:text-white">x</button>
@@ -424,7 +424,7 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
                 {t('panelEnabled')}
               </label>
             </div>
-            <div className="mt-5 flex items-center justify-between">
+            <div className="mt-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
               <button
                 onClick={() => removePanel(editingPanel.id)}
                 className="flex items-center gap-2 px-3 py-2 text-xs text-[#fa5252] border border-[#fa5252]/40 rounded hover:bg-[#fa5252]/10"
@@ -432,7 +432,7 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
                 <Trash2 size={14} />
                 {t('deletePanel')}
               </button>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 self-end">
                 <button
                   onClick={() => movePanel(editingPanel.id, 'up')}
                   className="p-2 border border-[#373a40] rounded text-[#c1c2c5] hover:text-white"
@@ -461,8 +461,8 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
       )}
 
       {isAlertsOpen && (
-        <div className="fixed inset-0 z-[120] bg-black/60 flex items-center justify-center">
-          <div className="w-full max-w-3xl bg-[#25262b] border border-[#373a40] rounded p-5 max-h-[80vh] overflow-auto">
+        <div className="fixed inset-0 z-[120] bg-black/60 flex items-center justify-center p-3 sm:p-4">
+          <div className="w-full max-w-3xl bg-[#25262b] border border-[#373a40] rounded p-4 sm:p-5 max-h-[90vh] overflow-auto">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('activeAlertsDetails')}</h3>
               <button onClick={() => setIsAlertsOpen(false)} className="text-[#909296] hover:text-white">x</button>

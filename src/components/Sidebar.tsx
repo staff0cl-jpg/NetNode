@@ -1,5 +1,5 @@
 import React from 'react';
-import { LayoutDashboard, Database, Share2, Terminal as TerminalIcon, Settings, Network, Users, Languages, History } from 'lucide-react';
+import { LayoutDashboard, Database, Share2, Terminal as TerminalIcon, Settings, Network, Users, Languages, History, X } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useTranslation } from '../lib/i18n';
 
@@ -8,9 +8,12 @@ interface SidebarProps {
   setActiveTab: (tab: string) => void;
   onLogout: () => void;
   user: { username: string, role: string } | null;
+  isMobile?: boolean;
+  isOpen?: boolean;
+  onClose?: () => void;
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, onLogout, user }) => {
+const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, onLogout, user, isMobile = false, isOpen = true, onClose }) => {
   const { t, language, setLanguage } = useTranslation();
   
   const menuItems = [
@@ -26,14 +29,27 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, onLogout, us
   const visibleMenuItems = menuItems.filter(item => !item.adminOnly || user?.role === 'admin');
 
   return (
-    <aside className="w-64 bg-[#141517] border-r border-[#373a40] flex flex-col h-full overflow-hidden">
+    <aside className={cn(
+      "w-64 bg-[#141517] border-r border-[#373a40] flex flex-col h-full overflow-hidden",
+      isMobile && "fixed inset-y-0 left-0 z-[120] shadow-2xl transition-transform duration-200",
+      isMobile && !isOpen && "-translate-x-full"
+    )}>
       <div className="p-6 flex items-center gap-3 border-b border-[#373a40]">
         <div className="w-10 h-10 bg-[#228be6] rounded flex items-center justify-center text-white shadow-lg">
           <Network size={24} strokeWidth={2.5} />
         </div>
-        <div>
+        <div className="flex-1">
           <h1 className="font-bold text-white tracking-tight text-lg">NETNODE</h1>
         </div>
+        {isMobile && (
+          <button
+            onClick={onClose}
+            className="p-1 text-[#909296] hover:text-white"
+            aria-label="Close menu"
+          >
+            <X size={18} />
+          </button>
+        )}
       </div>
       
       <nav className="flex-1 p-4 space-y-1">
@@ -41,7 +57,10 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, onLogout, us
         {visibleMenuItems.map((item) => (
           <button
             key={item.id}
-            onClick={() => setActiveTab(item.id)}
+            onClick={() => {
+              setActiveTab(item.id);
+              if (isMobile) onClose?.();
+            }}
             className={cn(
               "w-full flex items-center gap-3 px-3 py-2.5 rounded transition-all text-sm font-medium",
               activeTab === item.id 
@@ -78,7 +97,10 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, onLogout, us
             </div>
           </div>
           <button 
-            onClick={onLogout}
+            onClick={() => {
+              onLogout();
+              if (isMobile) onClose?.();
+            }}
             className="text-[#909296] hover:text-red-500 transition-colors"
             title={t('logout')}
           >

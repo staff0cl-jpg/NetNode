@@ -350,13 +350,13 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
     });
 
   return (
-    <div className="p-8 space-y-6">
-      <header className="flex justify-between items-end">
-        <div>
+    <div className="p-4 md:p-8 space-y-6">
+      <header className="flex flex-col sm:flex-row sm:justify-between sm:items-end gap-3">
+        <div className="min-w-0">
           <h2 className="text-2xl font-bold text-white mb-2 leading-tight">{t('switchInventory')}</h2>
           <p className="text-sm text-[#909296]">{t('manageNodes')}</p>
         </div>
-        <div className="flex gap-3">
+        <div className="flex flex-wrap gap-2 sm:gap-3">
           <button 
             onClick={handleExport}
             className="flex items-center gap-2 px-4 py-2 border border-[#373a40] text-[#c1c2c5] hover:text-white rounded text-sm font-bold transition-all"
@@ -413,7 +413,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
       </div>
 
       {/* Category tabs */}
-      <div className="flex gap-2 mb-4">
+      <div className="flex flex-wrap gap-2 mb-4">
         <button
           type="button"
           onClick={() => setActiveCategoryTab('switch')}
@@ -477,9 +477,9 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
       </div>
 
       <div className="bg-[#25262b] border border-[#373a40] rounded overflow-hidden">
-        <div className="flex items-center justify-between bg-[#25262b] p-4 border border-[#373a40] rounded shadow-sm">
-          <div className="flex items-center gap-4 flex-1">
-            <div className="relative flex-1 max-w-md">
+        <div className="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-3 bg-[#25262b] p-3 md:p-4 border border-[#373a40] rounded shadow-sm">
+          <div className="flex flex-col md:flex-row md:items-center gap-3 md:gap-4 flex-1 min-w-0">
+            <div className="relative w-full md:flex-1 md:max-w-md">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-[#5c5f66]" size={18} />
               <input 
                 type="text" 
@@ -489,10 +489,10 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                 onChange={(e) => setSearchTerm(e.target.value)}
               />
             </div>
-            <select 
+            <select
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value)}
-              className="px-4 py-2 bg-[#141517] border border-[#373a40] rounded text-sm text-white focus:outline-none focus:border-[#228be6] appearance-none"
+              className="w-full md:w-auto px-4 py-2 bg-[#141517] border border-[#373a40] rounded text-sm text-white focus:outline-none focus:border-[#228be6] appearance-none"
             >
               <option value="all">All Status</option>
               <option value="online">Online</option>
@@ -502,7 +502,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
             <select
               value={subcategoryFilter}
               onChange={(e) => setSubcategoryFilter(e.target.value)}
-              className="px-4 py-2 bg-[#141517] border border-[#373a40] rounded text-sm text-white focus:outline-none focus:border-[#228be6] appearance-none"
+              className="w-full md:w-auto px-4 py-2 bg-[#141517] border border-[#373a40] rounded text-sm text-white focus:outline-none focus:border-[#228be6] appearance-none"
             >
               <option value="all">{t('allSubcategories')}</option>
               {meta.subcategories.map((s) => <option key={s} value={s}>{s}</option>)}
@@ -513,7 +513,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: selectedIds.length > 0 ? 1 : 0, x: selectedIds.length > 0 ? 0 : 20 }}
             className={cn(
-              "flex items-center gap-2 border-l border-[#373a40] pl-4 ml-4 transition-opacity",
+              "flex items-center gap-2 xl:border-l border-[#373a40] xl:pl-4 xl:ml-4 transition-opacity",
               selectedIds.length === 0 && "opacity-0 pointer-events-none"
             )}
           >
@@ -543,7 +543,8 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
           </motion.div>
         </div>
 
-        <table className="z-table">
+        <div className="overflow-x-auto">
+        <table className="z-table min-w-[1024px]">
           <thead>
             <tr>
               <th className="w-10">
@@ -636,7 +637,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                 <td className="text-xs">{sw.branch || 'ULN'}</td>
                 <td className="font-mono text-xs text-[#228be6]">{sw.ip}</td>
                 <td>
-                  <span className="text-xs">{sw.city}</span>
+                    <span className="text-xs whitespace-nowrap">{sw.city}</span>
                 </td>
                 <td className="text-xs text-[#909296] font-mono">{sw.uptime}</td>
                 <td className="text-right">
@@ -723,14 +724,15 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
             ))}
           </tbody>
         </table>
+        </div>
       </div>
 
       {isAdding && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[100] backdrop-blur-sm">
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[100] backdrop-blur-sm p-3 sm:p-4">
           <motion.div 
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
-            className="bg-[#25262b] border border-[#373a40] p-8 rounded-lg shadow-2xl w-full max-w-xl"
+            className="bg-[#25262b] border border-[#373a40] p-4 sm:p-8 rounded-lg shadow-2xl w-full max-w-xl max-h-[90vh] overflow-y-auto"
           >
             <div className="flex items-center gap-3 mb-8 border-b border-[#373a40] pb-4">
               <Cpu className="text-[#228be6]" size={24} />
@@ -739,7 +741,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
               </h3>
             </div>
             
-            <div className="grid grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6">
               <div className="space-y-2">
                 <label className="text-[10px] font-bold text-[#909296] uppercase">{t('deviceName')}</label>
                 <input 
@@ -813,7 +815,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                 </select>
                 <p className="text-[10px] text-[#909296]">{t('manageBranchesInSettings')}</p>
               </div>
-              <div className="space-y-2 col-span-2">
+              <div className="space-y-2 sm:col-span-2">
                 <label className="text-[10px] font-bold text-[#909296] uppercase">SNMP Template</label>
                 <select
                   className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:outline-none focus:border-[#228be6]"
@@ -824,7 +826,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                   {snmpTemplates.map((tpl) => <option key={tpl.id} value={tpl.id}>{tpl.name}</option>)}
                 </select>
               </div>
-              <div className="space-y-2 col-span-2">
+              <div className="space-y-2 sm:col-span-2">
                 <label className="text-[10px] font-bold text-[#909296] uppercase">Custom SNMP OIDs (one per line)</label>
                 <textarea
                   className="w-full min-h-[90px] bg-[#141517] border border-[#373a40] p-2.5 rounded text-xs text-white focus:outline-none focus:border-[#228be6] font-mono"

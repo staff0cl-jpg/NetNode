@@ -656,14 +656,14 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
-      <header className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex justify-between items-center">
-        <div className="flex items-center gap-4">
+      <header className="p-3 md:p-4 border-b border-[#373a40] bg-[#1c1d21] flex flex-col xl:flex-row xl:justify-between xl:items-center gap-3">
+        <div className="flex items-center gap-2 md:gap-4 min-w-0 flex-wrap">
           <h2 className="text-sm font-bold text-white uppercase tracking-widest flex items-center gap-3">
             <Share2 size={18} className="text-[#228be6]" />
             {t('topologyVisualizer')}
           </h2>
           <div className="h-4 w-px bg-[#373a40]" />
-          <nav className="flex gap-2">
+          <nav className="flex gap-2 flex-wrap">
             <button
               type="button"
               onClick={handleAutoLayout}
@@ -701,22 +701,22 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
             </button>
           </nav>
         </div>
-        <div className="flex items-center gap-2 text-xs">
-          <select value={manualLink.source} onChange={(e) => setManualLink({ ...manualLink, source: e.target.value })} className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-white">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:flex xl:items-center gap-2 text-xs w-full xl:w-auto">
+          <select value={manualLink.source} onChange={(e) => setManualLink({ ...manualLink, source: e.target.value })} className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-white min-w-0">
             <option value="">Source</option>
             {regionSwitches.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
-          <input value={manualLink.portA} onChange={(e) => setManualLink({ ...manualLink, portA: e.target.value })} placeholder="Port A" className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-white w-20" />
-          <select value={manualLink.target} onChange={(e) => setManualLink({ ...manualLink, target: e.target.value })} className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-white">
+          <input value={manualLink.portA} onChange={(e) => setManualLink({ ...manualLink, portA: e.target.value })} placeholder="Port A" className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-white w-full sm:w-20" />
+          <select value={manualLink.target} onChange={(e) => setManualLink({ ...manualLink, target: e.target.value })} className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-white min-w-0">
             <option value="">Target</option>
             {regionSwitches.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
-          <input value={manualLink.portB} onChange={(e) => setManualLink({ ...manualLink, portB: e.target.value })} placeholder="Port B" className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-white w-20" />
+          <input value={manualLink.portB} onChange={(e) => setManualLink({ ...manualLink, portB: e.target.value })} placeholder="Port B" className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-white w-full sm:w-20" />
           <button onClick={handleAddLink} className="px-3 py-1 bg-[#228be6] text-white rounded">Link</button>
         </div>
       </header>
-      <div className="px-4 py-2 border-b border-[#373a40] bg-[#1a1b1e] flex items-center justify-between">
-        <div className="flex items-center gap-2">
+      <div className="px-3 md:px-4 py-2 border-b border-[#373a40] bg-[#1a1b1e] flex flex-col xl:flex-row xl:items-center xl:justify-between gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <button
             type="button"
             onClick={() => setTopologyMode('ip')}
@@ -743,7 +743,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
             </button>
           ))}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <input
             value={newRegion}
             onChange={(e) => setNewRegion(e.target.value)}
@@ -771,7 +771,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
 
       <div
         ref={containerRef}
-        className={`flex-1 bg-[#141517] relative overflow-hidden ${isRightPanning ? 'cursor-grabbing' : 'cursor-crosshair'}`}
+        className={`flex-1 min-h-[420px] bg-[#141517] relative overflow-hidden ${isRightPanning ? 'cursor-grabbing' : 'cursor-crosshair'}`}
         onContextMenu={(e) => e.preventDefault()}
         onClick={() => {
           setContextMenu(null);
@@ -957,10 +957,10 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           </div>
         )}
 
-        <div className="absolute bottom-6 right-6 p-4 bg-[#25262b] border border-[#373a40] rounded text-[10px] font-mono text-[#909296] pointer-events-none z-10">
+        <div className="hidden md:block absolute bottom-6 right-6 p-4 bg-[#25262b] border border-[#373a40] rounded text-[10px] font-mono text-[#909296] pointer-events-none z-10">
           {t('topologyCanvasHint')}
         </div>
-        <div className="absolute top-4 right-4 p-3 bg-[#25262b] border border-[#373a40] rounded text-[10px] text-[#909296] z-10 max-w-xs">
+        <div className="absolute top-3 right-3 md:top-4 md:right-4 p-2 md:p-3 bg-[#25262b] border border-[#373a40] rounded text-[10px] text-[#909296] z-10 w-[calc(100%-1.5rem)] max-w-xs max-h-[45vh] overflow-auto">
           <div className="font-bold mb-2 text-white">Manual links</div>
           <div className="space-y-1 max-h-40 overflow-auto">
             {links.map((l, i) => (

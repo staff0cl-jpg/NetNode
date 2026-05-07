@@ -33,7 +33,6 @@ type DiscoveryWatchProfile = {
   subnets: string;
   protocol: 'snmp';
   city: string;
-  zone: string;
   branch: string;
   enabled: boolean;
   intervalHours: number;
@@ -710,7 +709,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
   };
 
   return (
-    <div className="p-8 space-y-8 max-w-4xl animate-in slide-in-from-bottom-5 duration-700">
+    <div className="p-4 md:p-8 space-y-8 max-w-4xl animate-in slide-in-from-bottom-5 duration-700">
       <header>
         <h2 className="text-2xl font-bold text-white mb-2 leading-tight">{t('sysConfig')}</h2>
         <p className="text-sm text-[#909296]">{t('manageInfra')}</p>
@@ -723,7 +722,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             <Database size={18} className="text-[#228be6]" />
             <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('sysConfig')}</h3>
           </div>
-          <div className="p-6">
+          <div className="p-4 md:p-6">
             <div className="max-w-xs space-y-2">
               <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">Default Language (Default для всех)</label>
               <select 
@@ -739,13 +738,13 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
               </select>
               <p className="text-[9px] text-[#5c5f66] mt-1 font-medium">Этот параметр определяет язык системы для всех новых сессий и пользователей без локальных настроек.</p>
             </div>
-            <div className="max-w-xl space-y-2 mt-6">
+            <div className="max-w-xl space-y-2 mt-6 min-w-0">
               <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">DC Label (верхняя панель)</label>
-              <div className="flex gap-3">
+              <div className="flex flex-col sm:flex-row gap-3">
                 <input
                   value={siteLabel}
                   onChange={(e) => setSiteLabel(e.target.value)}
-                  className="flex-1 bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none"
+                  className="flex-1 min-w-0 bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none"
                   placeholder="DC-EAST :: MOSCOW"
                 />
                 <button
@@ -765,7 +764,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             <Shield className="text-[#40c057]" size={18} />
             <h3 className="text-sm font-bold text-white uppercase tracking-widest">SSH Readonly Fallback</h3>
           </div>
-          <div className="p-6 space-y-4">
+          <div className="p-4 md:p-6 space-y-4">
             <p className="text-[10px] text-[#5c5f66]">
               Uses read-only show/display commands only. Credentials are kept in backend memory with TTL, not written to files.
             </p>
@@ -835,7 +834,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             </div>
             {!isAdmin && <span className="text-[10px] bg-red-500/20 text-red-500 px-2 py-0.5 rounded font-bold uppercase tracking-widest ml-auto">Admin Only</span>}
           </div>
-          <div className="p-6 space-y-10">
+          <div className="p-4 md:p-6 space-y-10">
             <div className="flex flex-wrap gap-4 items-end pb-4 border-b border-[#373a40]">
               <div className="space-y-2 min-w-[140px]">
                 <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('ldapTestAccount')}</label>
@@ -877,7 +876,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                   {t('ldapEnabled')}
                 </label>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="space-y-2 md:col-span-2">
+                  <div className="space-y-2 md:col-span-2 min-w-0">
                     <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('ldapUrl')}</label>
                     <input
                       className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none"
@@ -887,7 +886,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                       }
                     />
                   </div>
-                  <div className="space-y-2 md:col-span-2">
+                  <div className="space-y-2 md:col-span-2 min-w-0">
                     <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('ldapBindDn')}</label>
                     <input
                       className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none font-mono text-xs"
@@ -920,7 +919,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                       }
                     />
                   </div>
-                  <div className="space-y-2 md:col-span-2">
+                  <div className="space-y-2 md:col-span-2 min-w-0">
                     <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('ldapSearchFilter')}</label>
                     <input
                       className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none font-mono text-xs"
@@ -984,7 +983,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('autoDiscovery')}</h3>
             {!isOperator && <span className="text-[10px] bg-red-500/20 text-red-500 px-2 py-0.5 rounded font-bold uppercase tracking-widest ml-auto">Privileged Action Required</span>}
           </div>
-          <div className="p-6 space-y-6">
+          <div className="p-4 md:p-6 space-y-6">
             <p className="text-[10px] text-[#5c5f66] leading-relaxed">{t('discoveryScanExplain')}</p>
             <div className="grid grid-cols-1 gap-6">
               <div className="space-y-2">
@@ -999,7 +998,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             </div>
             
             <p className="text-[10px] text-[#5c5f66]">{t('discoveryProbeNote')}</p>
-            <div className="grid grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6">
               <div className="space-y-2">
                 <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">Default City</label>
                 <input
@@ -1056,9 +1055,9 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                   {!(watchStatus?.nextRuns || []).length && <div>-</div>}
                 </div>
               </div>
-              <div className="flex items-center justify-between">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                 <p className="text-[10px] text-[#5c5f66] uppercase">Saved Watch Profiles</p>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
                     onClick={() =>
@@ -1070,7 +1069,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                           subnets: discoveryConfig.subnets,
                           protocol: 'snmp',
                           city: discoveryConfig.city,
-                          zone: String(discoveryConfig.zone || '').trim() || 'Core',
                           branch: discoveryConfig.branch,
                           enabled: true,
                           intervalHours: 3,
@@ -1094,7 +1092,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                           subnets: discoveryConfig.subnets,
                           protocol: 'snmp',
                           city: discoveryConfig.city,
-                          zone: String(discoveryConfig.zone || '').trim() || 'Core',
                           branch: discoveryConfig.branch,
                           enabled: true,
                           intervalHours: 3,
@@ -1125,22 +1122,21 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
               </div>
               <div className="space-y-3">
                 {watchProfiles.map((p, i) => (
-                  <div key={p.id} className="grid grid-cols-12 gap-2 items-center border border-[#373a40] rounded p-3 bg-[#141517]">
-                    <input className="col-span-2 bg-[#25262b] border border-[#373a40] p-2 rounded text-xs text-white" value={p.name} onChange={(e) => setWatchProfiles((prev) => prev.map((x, idx) => idx === i ? { ...x, name: e.target.value } : x))} />
-                    <input className="col-span-3 bg-[#25262b] border border-[#373a40] p-2 rounded text-xs text-white" value={p.subnets} onChange={(e) => setWatchProfiles((prev) => prev.map((x, idx) => idx === i ? { ...x, subnets: e.target.value } : x))} />
-                    <select className="col-span-1 bg-[#25262b] border border-[#373a40] p-2 rounded text-xs text-white" value="snmp" disabled>
+                  <div key={p.id} className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center border border-[#373a40] rounded p-3 bg-[#141517]">
+                    <input className="sm:col-span-2 bg-[#25262b] border border-[#373a40] p-2 rounded text-xs text-white min-w-0" value={p.name} onChange={(e) => setWatchProfiles((prev) => prev.map((x, idx) => idx === i ? { ...x, name: e.target.value } : x))} />
+                    <input className="sm:col-span-4 bg-[#25262b] border border-[#373a40] p-2 rounded text-xs text-white min-w-0" value={p.subnets} onChange={(e) => setWatchProfiles((prev) => prev.map((x, idx) => idx === i ? { ...x, subnets: e.target.value } : x))} />
+                    <select className="sm:col-span-1 bg-[#25262b] border border-[#373a40] p-2 rounded text-xs text-white" value="snmp" disabled>
                       <option value="snmp">snmp</option>
                     </select>
-                    <input className="col-span-1 bg-[#25262b] border border-[#373a40] p-2 rounded text-xs text-white" value={p.city} onChange={(e) => setWatchProfiles((prev) => prev.map((x, idx) => idx === i ? { ...x, city: e.target.value } : x))} />
-                    <input className="col-span-1 bg-[#25262b] border border-[#373a40] p-2 rounded text-xs text-white" value={p.zone} onChange={(e) => setWatchProfiles((prev) => prev.map((x, idx) => idx === i ? { ...x, zone: e.target.value } : x))} />
-                    <input className="col-span-1 bg-[#25262b] border border-[#373a40] p-2 rounded text-xs text-white" value={p.branch} onChange={(e) => setWatchProfiles((prev) => prev.map((x, idx) => idx === i ? { ...x, branch: e.target.value } : x))} />
-                    <input type="number" min={1} className="col-span-1 bg-[#25262b] border border-[#373a40] p-2 rounded text-xs text-white" value={p.intervalHours} onChange={(e) => setWatchProfiles((prev) => prev.map((x, idx) => idx === i ? { ...x, intervalHours: Math.max(1, Number(e.target.value) || 1) } : x))} />
-                    <label className="col-span-1 flex items-center justify-center"><input type="checkbox" checked={p.enabled} onChange={(e) => setWatchProfiles((prev) => prev.map((x, idx) => idx === i ? { ...x, enabled: e.target.checked } : x))} /></label>
-                    <div className="col-span-1 flex gap-2 justify-end">
+                    <input className="sm:col-span-1 bg-[#25262b] border border-[#373a40] p-2 rounded text-xs text-white min-w-0" value={p.city} onChange={(e) => setWatchProfiles((prev) => prev.map((x, idx) => idx === i ? { ...x, city: e.target.value } : x))} />
+                    <input className="sm:col-span-1 bg-[#25262b] border border-[#373a40] p-2 rounded text-xs text-white min-w-0" value={p.branch} onChange={(e) => setWatchProfiles((prev) => prev.map((x, idx) => idx === i ? { ...x, branch: e.target.value } : x))} />
+                    <input type="number" min={1} className="sm:col-span-1 bg-[#25262b] border border-[#373a40] p-2 rounded text-xs text-white" value={p.intervalHours} onChange={(e) => setWatchProfiles((prev) => prev.map((x, idx) => idx === i ? { ...x, intervalHours: Math.max(1, Number(e.target.value) || 1) } : x))} />
+                    <label className="sm:col-span-1 flex items-center sm:justify-center"><input type="checkbox" checked={p.enabled} onChange={(e) => setWatchProfiles((prev) => prev.map((x, idx) => idx === i ? { ...x, enabled: e.target.checked } : x))} /></label>
+                    <div className="sm:col-span-1 flex gap-2 sm:justify-end">
                       <button type="button" onClick={() => runWatchNow(p.id)} className="text-[#228be6] text-xs">Run</button>
                       <button type="button" onClick={() => setWatchProfiles((prev) => prev.filter((_, idx) => idx !== i))} className="text-red-400 text-xs">Del</button>
                     </div>
-                    <div className="col-span-12 text-[10px] text-[#5c5f66]">
+                    <div className="sm:col-span-12 text-[10px] text-[#5c5f66] break-words">
                       Last run: {p.lastRunAt || '-'} | Last result: {p.lastResult?.success === false ? p.lastResult.error : (p.lastResult ? `added ${p.lastResult.added}, scanned ${p.lastResult.scanned}` : '-')}
                     </div>
                   </div>
@@ -1156,7 +1152,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             <Database className="text-[#228be6]" size={18} />
             <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('inventoryDictionaries')}</h3>
           </div>
-          <div className="p-6 space-y-4">
+          <div className="p-4 md:p-6 space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.categories} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, categories: e.target.value })} placeholder={t('categoriesCommaSeparated')} />
               <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.subcategories} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, subcategories: e.target.value })} placeholder={t('subcategoriesCommaSeparated')} />
@@ -1186,8 +1182,8 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('snmpConfig')}</h3>
             {!isAdmin && <span className="text-[10px] bg-red-500/20 text-red-500 px-2 py-0.5 rounded font-bold uppercase tracking-widest ml-auto">Admin Only</span>}
           </div>
-          <div className="p-6 space-y-6">
-            <div className="grid grid-cols-2 gap-6">
+          <div className="p-4 md:p-6 space-y-6">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6">
               <div className="space-y-2">
                 <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('snmpCommunity')}</label>
                 <input 
@@ -1270,8 +1266,8 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             <h3 className="text-sm font-bold text-white uppercase tracking-widest">SNMP Trap Receiver</h3>
             {!isAdmin && <span className="text-[10px] bg-red-500/20 text-red-500 px-2 py-0.5 rounded font-bold uppercase tracking-widest ml-auto">Admin Only</span>}
           </div>
-          <div className="p-6 space-y-6">
-            <div className="grid grid-cols-2 gap-6">
+          <div className="p-4 md:p-6 space-y-6">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6">
               <div className="space-y-2">
                 <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('trapReceiverIp')}</label>
                 <input 
@@ -1309,7 +1305,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('snmpTemplatesTitle')}</h3>
             {!isAdmin && <span className="text-[10px] bg-red-500/20 text-red-500 px-2 py-0.5 rounded font-bold uppercase tracking-widest ml-auto">Admin Only</span>}
           </div>
-          <div className="p-6 space-y-6">
+          <div className="p-4 md:p-6 space-y-6">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="space-y-2">
                 <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">Template ID</label>
