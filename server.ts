@@ -225,13 +225,48 @@ function isLikelyTrunkPort(name: string, alias: string, descr: string, ifType?: 
   return /(^|\s)(trunk|trk|lag|port-channel|po\d+|etherchannel|bond|bridge-aggregation|ae\d+|lacp)\b/.test(v);
 }
 
+function parseCiscoIfIndexFromSuffix(suffix: string): string {
+  const parts = String(suffix || "").split(".").filter(Boolean);
+  if (!parts.length) return "";
+  // Cisco tables can have composite indexes; last numeric token is typically ifIndex.
+  return parts[parts.length - 1] || "";
+}
+
+async function getCiscoTrunkPortHints(host: string): Promise<Set<string>> {
+  try {
+    // CISCO-VTP-MIB trunk-related tables.
+    // vmVlanTrunkPortDynamicStatus: 1=trunking, 2=notTrunking
+    const dynStatus = await snmpWalk(host, "1.3.6.1.4.1.9.9.46.1.6.1.1.14");
+    // vmVlanTrunkPortDynamicState: mode hints (on/desirable/auto/etc)
+    const dynState = await snmpWalk(host, "1.3.6.1.4.1.9.9.46.1.6.1.1.13");
+    const out = new Set<string>();
+    Object.entries(dynStatus).forEach(([suffix, raw]) => {
+      const ifIndex = parseCiscoIfIndexFromSuffix(suffix);
+      const status = Number(raw || 0);
+      if (!ifIndex) return;
+      if (status === 1) out.add(ifIndex);
+    });
+    Object.entries(dynState).forEach(([suffix, raw]) => {
+      const ifIndex = parseCiscoIfIndexFromSuffix(suffix);
+      const mode = Number(raw || 0);
+      if (!ifIndex) return;
+      // on(1), desirable(3), onNoNegotiate(5) are strong trunk mode hints.
+      if (mode === 1 || mode === 3 || mode === 5) out.add(ifIndex);
+    });
+    return out;
+  } catch {
+    return new Set<string>();
+  }
+}
+
 async function getTrunkPortCountFromSnmp(host: string): Promise<number> {
   try {
-    const [ifNames, ifAlias, ifDescr, ifType] = await Promise.all([
+    const [ifNames, ifAlias, ifDescr, ifType, ciscoHints] = await Promise.all([
       snmpWalk(host, "1.3.6.1.2.1.31.1.1.1.1"),
       snmpWalk(host, "1.3.6.1.2.1.31.1.1.1.18"),
       snmpWalk(host, "1.3.6.1.2.1.2.2.1.2"),
       snmpWalk(host, "1.3.6.1.2.1.2.2.1.3"),
+      getCiscoTrunkPortHints(host),
     ]);
     const indexes = new Set([...Object.keys(ifNames), ...Object.keys(ifAlias), ...Object.keys(ifDescr)]);
     let count = 0;
@@ -239,7 +274,7 @@ async function getTrunkPortCountFromSnmp(host: string): Promise<number> {
       const ifName = String(ifNames[ifIndex] || `if${ifIndex}`).trim();
       const alias = String(ifAlias[ifIndex] || "").trim();
       const descr = String(ifDescr[ifIndex] || "").trim();
-      if (isLikelyTrunkPort(ifName, alias, descr, ifType[ifIndex])) count += 1;
+      if (isLikelyTrunkPort(ifName, alias, descr, ifType[ifIndex]) || ciscoHints.has(ifIndex)) count += 1;
     }
     return count;
   } catch {
@@ -981,7 +1016,7 @@ function snmpWalk(host: string, baseOid: string, timeout = snmpConfig.timeoutMs)
 }
 
 async function collectTrunkMetrics(host: string): Promise<TrunkMetric[]> {
-  const [ifNames, ifAlias, ifDescr, ifType, ifOper, ifSpeed, hcInOctets, hcOutOctets, inOctets32, outOctets32] = await Promise.all([
+  const [ifNames, ifAlias, ifDescr, ifType, ifOper, ifSpeed, hcInOctets, hcOutOctets, inOctets32, outOctets32, ciscoHints] = await Promise.all([
     snmpWalk(host, "1.3.6.1.2.1.31.1.1.1.1"),
     snmpWalk(host, "1.3.6.1.2.1.31.1.1.1.18"),
     snmpWalk(host, "1.3.6.1.2.1.2.2.1.2"),
@@ -992,6 +1027,7 @@ async function collectTrunkMetrics(host: string): Promise<TrunkMetric[]> {
     snmpWalk(host, "1.3.6.1.2.1.31.1.1.1.10"),
     snmpWalk(host, "1.3.6.1.2.1.2.2.1.10"),
     snmpWalk(host, "1.3.6.1.2.1.2.2.1.16"),
+    getCiscoTrunkPortHints(host),
   ]);
   const now = Date.now();
   const indexes = Array.from(
@@ -1018,7 +1054,7 @@ async function collectTrunkMetrics(host: string): Promise<TrunkMetric[]> {
     const alias = String(ifAlias[idx] || "").trim();
     const descr = String(ifDescr[idx] || "").trim();
     const ifName = String(ifNames[idx] || `if${idx}`).trim();
-    if (!isLikelyTrunkPort(ifName, alias, descr, ifType[idx])) continue;
+    if (!isLikelyTrunkPort(ifName, alias, descr, ifType[idx]) && !ciscoHints.has(idx)) continue;
     const desc = alias || descr || ifName;
     const in64 = parseCounter(hcInOctets[idx]);
     const out64 = parseCounter(hcOutOctets[idx]);
@@ -1214,11 +1250,12 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
 
   await forEachWithLimit(genericDevices, 12, async (dev) => {
     try {
-      const [ifNameMap, ifAliasMap, ifDescrMap, ifTypeMap] = await Promise.all([
+      const [ifNameMap, ifAliasMap, ifDescrMap, ifTypeMap, ciscoHints] = await Promise.all([
         snmpWalk(dev.ip, "1.3.6.1.2.1.31.1.1.1.1"), // ifName
         snmpWalk(dev.ip, "1.3.6.1.2.1.31.1.1.1.18"), // ifAlias/Description
         snmpWalk(dev.ip, "1.3.6.1.2.1.2.2.1.2"), // ifDescr (fallback for old gear)
         snmpWalk(dev.ip, "1.3.6.1.2.1.2.2.1.3"), // ifType
+        getCiscoTrunkPortHints(dev.ip),
       ]);
       const indexes = new Set([...Object.keys(ifAliasMap), ...Object.keys(ifDescrMap)]);
       for (const ifIndex of indexes) {
@@ -1226,7 +1263,7 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
         const descr = String(ifDescrMap[ifIndex] || "").trim();
         const ifName = String(ifNameMap[ifIndex] || `if${ifIndex}`).trim();
         const trunkHint = alias || descr;
-        if (!isLikelyTrunkPort(ifName, alias, descr, ifTypeMap[ifIndex])) continue;
+        if (!isLikelyTrunkPort(ifName, alias, descr, ifTypeMap[ifIndex]) && !ciscoHints.has(ifIndex)) continue;
         const aliasNorm = norm(trunkHint);
         const peer = findDeviceByNameHint(aliasNorm, dev.id);
         if (!peer) continue;
@@ -1240,7 +1277,7 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
   // Fallback path: LLDP neighbor correlation for trunk-like local ports.
   await forEachWithLimit(genericDevices, 10, async (dev) => {
     try {
-      const [ifNameMap, ifAliasMap, ifDescrMap, ifTypeMap, basePortIfIndex, lldpLocPortId, lldpRemSysName] = await Promise.all([
+      const [ifNameMap, ifAliasMap, ifDescrMap, ifTypeMap, basePortIfIndex, lldpLocPortId, lldpRemSysName, ciscoHints] = await Promise.all([
         snmpWalk(dev.ip, "1.3.6.1.2.1.31.1.1.1.1"), // ifName
         snmpWalk(dev.ip, "1.3.6.1.2.1.31.1.1.1.18"), // ifAlias
         snmpWalk(dev.ip, "1.3.6.1.2.1.2.2.1.2"), // ifDescr
@@ -1248,6 +1285,7 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
         snmpWalk(dev.ip, "1.3.6.1.2.1.17.1.4.1.2"), // dot1dBasePortIfIndex
         snmpWalk(dev.ip, "1.0.8802.1.1.2.1.3.7.1.3"), // lldpLocPortId
         snmpWalk(dev.ip, "1.0.8802.1.1.2.1.4.1.1.9"), // lldpRemSysName
+        getCiscoTrunkPortHints(dev.ip),
       ]);
 
       const trunkIfIndexes = new Set<string>();
@@ -1256,7 +1294,7 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
         const ifName = String(ifNameMap[ifIndex] || `if${ifIndex}`).trim();
         const alias = String(ifAliasMap[ifIndex] || "").trim();
         const descr = String(ifDescrMap[ifIndex] || "").trim();
-        if (isLikelyTrunkPort(ifName, alias, descr, ifTypeMap[ifIndex])) trunkIfIndexes.add(ifIndex);
+        if (isLikelyTrunkPort(ifName, alias, descr, ifTypeMap[ifIndex]) || ciscoHints.has(ifIndex)) trunkIfIndexes.add(ifIndex);
       }
 
       for (const [suffix, sysNameRaw] of Object.entries(lldpRemSysName)) {
