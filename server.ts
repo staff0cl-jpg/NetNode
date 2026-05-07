@@ -150,21 +150,67 @@ let snmpConfig = {
 let inventoryMeta = {
   categories: ["Switch", "Router", "UPS", "Firewall", "Other"],
   subcategories: ["Core", "Distribution", "Access"],
-  branches: ["HQ"],
-  cities: ["Moscow"],
-  zones: ["DC-East"],
-  vendors: ["Cisco", "Juniper", "HPE", "Aruba", "MikroTik", "Huawei", "Arista", "Unknown"],
+  branches: ["ULN", "NCH", "VRN", "VLG", "VLD", "SMR", "KRD"],
+  cities: ["Ульяновск", "Набережные Челны", "Краснодар", "Воронеж", "Волгоград", "Владимир", "Самара"],
+  zones: ["Core", "Distribution", "Access"],
+  vendors: ["Cisco", "Juniper", "HPE", "Aruba", "MikroTik", "APC", "Eaton", "Vertiv", "Riello", "Huawei", "Arista", "Unknown"],
   models: {
     Cisco: ["Catalyst 9300", "Catalyst 9200", "Nexus 93180YC", "ASR 1001-X"],
     Juniper: ["EX4300", "EX2300", "MX204", "QFX5120"],
     HPE: ["HP 1910", "HP 1810", "Aruba 2530", "Aruba CX6000", "Aruba 2930F", "Aruba 5406R", "FlexFabric 5940", "Aruba 6300M"],
     Aruba: ["Aruba 2530", "Aruba CX6000", "Aruba 2930F", "Aruba 5406R", "Aruba 6300M"],
     MikroTik: ["CCR2004", "CRS326", "RB5009", "CCR2116"],
+    APC: ["Smart-UPS", "Easy UPS", "Symmetra"],
+    Eaton: ["9PX", "9SX", "93PM"],
+    Vertiv: ["Liebert GXT", "Liebert EXM"],
+    Riello: ["Sentinel", "Vision"],
     Huawei: ["CloudEngine S5735", "S6730", "NetEngine AR6121"],
     Arista: ["7050SX3", "7280SR3", "7010T"],
-    Unknown: ["Discovered (SNMP/SSH)", "Generic L2"],
+    Unknown: ["Discovered (SNMP)", "Generic L2"],
   } as Record<string, string[]>,
 };
+
+async function forEachWithLimit<T>(items: T[], limit: number, worker: (item: T, index: number) => Promise<void>) {
+  let cursor = 0;
+  const safeLimit = Math.max(1, Math.min(limit, items.length || 1));
+  const jobs = Array.from({ length: safeLimit }, async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      await worker(items[index], index);
+    }
+  });
+  await Promise.all(jobs);
+}
+
+function isLikelyTrunkPort(name: string, alias: string, descr: string, ifType?: string): boolean {
+  const v = `${name} ${alias} ${descr}`.trim().toLowerCase();
+  const t = Number(ifType || 0);
+  if (t === 161) return true; // ieee8023adLag
+  if (!v) return false;
+  return /(^|\s)(trunk|trk|lag|port-channel|po\d+|etherchannel|bond|bridge-aggregation|ae\d+|lacp)\b/.test(v);
+}
+
+async function getTrunkPortCountFromSnmp(host: string): Promise<number> {
+  try {
+    const [ifNames, ifAlias, ifDescr, ifType] = await Promise.all([
+      snmpWalk(host, "1.3.6.1.2.1.31.1.1.1.1"),
+      snmpWalk(host, "1.3.6.1.2.1.31.1.1.1.18"),
+      snmpWalk(host, "1.3.6.1.2.1.2.2.1.2"),
+      snmpWalk(host, "1.3.6.1.2.1.2.2.1.3"),
+    ]);
+    const indexes = new Set([...Object.keys(ifNames), ...Object.keys(ifAlias), ...Object.keys(ifDescr)]);
+    let count = 0;
+    for (const ifIndex of indexes) {
+      const ifName = String(ifNames[ifIndex] || `if${ifIndex}`).trim();
+      const alias = String(ifAlias[ifIndex] || "").trim();
+      const descr = String(ifDescr[ifIndex] || "").trim();
+      if (isLikelyTrunkPort(ifName, alias, descr, ifType[ifIndex])) count += 1;
+    }
+    return count;
+  } catch {
+    return 0;
+  }
+}
 
 type SnmpOidDef = {
   key: string;
@@ -433,9 +479,9 @@ async function runDiscoveryScan(input: DiscoveryScanInput): Promise<DiscoverySca
   const MAX_TOTAL = 1024;
   const CONCURRENCY = 32;
   const protocol = normalizeProtocol(input.protocol);
-  const city = String(input.city || "Auto").trim() || "Auto";
-  const zone = String(input.zone || "Discovery").trim() || "Discovery";
-  const branch = String(input.branch || "HQ").trim() || "HQ";
+  const city = String(input.city || "Ульяновск").trim() || "Ульяновск";
+  const zone = String(input.zone || "Core").trim() || "Core";
+  const branch = String(input.branch || "ULN").trim() || "ULN";
   const actor = input.actor || "unknown";
 
   const ips = parseSubnetList(String(input.subnets || ""), MAX_TOTAL);
@@ -466,6 +512,8 @@ async function runDiscoveryScan(input: DiscoveryScanInput): Promise<DiscoverySca
       const vendor = probe.sysDescr ? detectVendorFromSnmp(probe.sysDescr, probe.sysObjectId || "") : "Unknown";
       const model = probe.sysDescr ? detectModelFromSnmp(probe.sysDescr) : "Unknown";
       const category = detectCategoryFromSnmp(probe.sysDescr || "", probe.sysObjectId || "");
+      const trunkCount = await getTrunkPortCountFromSnmp(ip);
+      const subcategory = trunkCount >= 2 ? "Core" : trunkCount === 1 ? "Distribution" : "Access";
       const uptimeSeconds = probe.uptimeSeconds ?? 0;
       discovered.push({
         id: `d-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -473,6 +521,7 @@ async function runDiscoveryScan(input: DiscoveryScanInput): Promise<DiscoverySca
         vendor,
         model,
         category,
+        subcategory,
         branch,
         city,
         zone,
@@ -521,7 +570,13 @@ function formatDuration(seconds: number): string {
 }
 
 function detectVendorFromSnmp(sysDescr: string, sysObjectId: string): string {
+  const d = (sysDescr || "").toLowerCase();
   const oid = (sysObjectId || "").toLowerCase();
+  // UPS vendor detection has priority over network-vendor branches.
+  if (oid.startsWith("1.3.6.1.4.1.318") || d.includes("apc")) return "APC";
+  if (oid.startsWith("1.3.6.1.4.1.534") || d.includes("eaton") || d.includes("powerware")) return "Eaton";
+  if (d.includes("vertiv") || d.includes("liebert")) return "Vertiv";
+  if (d.includes("riello")) return "Riello";
   if (oid.startsWith("1.3.6.1.4.1.9")) return "Cisco";
   if (oid.startsWith("1.3.6.1.4.1.14988")) return "MikroTik";
   if (oid.startsWith("1.3.6.1.4.1.2636")) return "Juniper";
@@ -534,6 +589,10 @@ function detectVendorFromSnmp(sysDescr: string, sysObjectId: string): string {
 
 function detectVendorFromDescr(descr: string): string {
   const d = descr.toLowerCase();
+  if (d.includes("apc")) return "APC";
+  if (d.includes("eaton") || d.includes("powerware")) return "Eaton";
+  if (d.includes("vertiv") || d.includes("liebert")) return "Vertiv";
+  if (d.includes("riello")) return "Riello";
   if (d.includes("cisco")) return "Cisco";
   if (d.includes("juniper")) return "Juniper";
   if (d.includes("aruba")) return "HPE";
@@ -780,18 +839,11 @@ async function collectTrunkMetrics(host: string): Promise<TrunkMetric[]> {
       return null;
     }
   };
-  const isTrunkPort = (name: string, alias: string, descr: string, ifType?: string): boolean => {
-    const v = `${name} ${alias} ${descr}`.trim().toLowerCase();
-    const t = Number(ifType || 0);
-    if (t === 161) return true;
-    if (!v) return false;
-    return /(^|\s)(trunk|trk|lag|port-channel|po\d+|etherchannel|bond|bridge-aggregation|ae\d+|lacp)\b/.test(v);
-  };
   for (const idx of indexes) {
     const alias = String(ifAlias[idx] || "").trim();
     const descr = String(ifDescr[idx] || "").trim();
     const ifName = String(ifNames[idx] || `if${idx}`).trim();
-    if (!isTrunkPort(ifName, alias, descr, ifType[idx])) continue;
+    if (!isLikelyTrunkPort(ifName, alias, descr, ifType[idx])) continue;
     const desc = alias || descr || ifName;
     const in64 = parseCounter(hcInOctets[idx]);
     const out64 = parseCounter(hcOutOctets[idx]);
@@ -947,11 +999,6 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
   const byId = new Map(devices.map((d) => [d.id, d]));
   const directed: Array<{ source: string; target: string; portA: string; raw: string }> = [];
   const norm = (v: string) => v.toLowerCase().replace(/\s+/g, " ").trim();
-  const isTrunkPort = (name: string, alias: string, descr: string): boolean => {
-    const v = `${name} ${alias} ${descr}`.trim().toLowerCase();
-    if (!v) return false;
-    return /(^|\s)(trunk|trk|lag|port-channel|bridge-aggregation)\b/.test(v);
-  };
   const findDeviceByNameHint = (hint: string, selfId: string): InventoryItem | undefined => {
     const h = norm(hint);
     if (!h) return undefined;
@@ -972,7 +1019,7 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
     return candidates[0]?.d;
   };
 
-  for (const dev of devices) {
+  await forEachWithLimit(devices, 12, async (dev) => {
     try {
       const [ifNameMap, ifAliasMap, ifDescrMap, ifTypeMap] = await Promise.all([
         snmpWalk(dev.ip, "1.3.6.1.2.1.31.1.1.1.1"), // ifName
@@ -986,7 +1033,7 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
         const descr = String(ifDescrMap[ifIndex] || "").trim();
         const ifName = String(ifNameMap[ifIndex] || `if${ifIndex}`).trim();
         const trunkHint = alias || descr;
-        if (!isTrunkPort(ifName, alias, descr, ifTypeMap[ifIndex])) continue;
+        if (!isLikelyTrunkPort(ifName, alias, descr, ifTypeMap[ifIndex])) continue;
         const aliasNorm = norm(trunkHint);
         const peer = findDeviceByNameHint(aliasNorm, dev.id);
         if (!peer) continue;
@@ -995,10 +1042,10 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
     } catch {
       // Skip device-level parsing errors, keep building topology from others.
     }
-  }
+  });
 
   // Fallback path: LLDP neighbor correlation for trunk-like local ports.
-  for (const dev of devices) {
+  await forEachWithLimit(devices, 10, async (dev) => {
     try {
       const [ifNameMap, ifAliasMap, ifDescrMap, ifTypeMap, basePortIfIndex, lldpLocPortId, lldpRemSysName] = await Promise.all([
         snmpWalk(dev.ip, "1.3.6.1.2.1.31.1.1.1.1"), // ifName
@@ -1016,7 +1063,7 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
         const ifName = String(ifNameMap[ifIndex] || `if${ifIndex}`).trim();
         const alias = String(ifAliasMap[ifIndex] || "").trim();
         const descr = String(ifDescrMap[ifIndex] || "").trim();
-        if (isTrunkPort(ifName, alias, descr, ifTypeMap[ifIndex])) trunkIfIndexes.add(ifIndex);
+        if (isLikelyTrunkPort(ifName, alias, descr, ifTypeMap[ifIndex])) trunkIfIndexes.add(ifIndex);
       }
 
       for (const [suffix, sysNameRaw] of Object.entries(lldpRemSysName)) {
@@ -1051,7 +1098,7 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
     } catch {
       // Skip device-level LLDP errors and continue.
     }
-  }
+  });
 
   const used = new Set<string>();
   const out: TopologyLink[] = [];
@@ -1427,7 +1474,7 @@ async function startServer() {
           vendor: nextVendor,
           model: nextModel,
           category: item.category || nextCategory,
-          branch: item.branch || "HQ",
+          branch: item.branch || "ULN",
           status: "online" as const,
           uptimeSeconds,
           uptime: formatDuration(uptimeSeconds),
@@ -1445,9 +1492,9 @@ async function startServer() {
       ...sw,
       id: Date.now().toString(),
       category: sw.category || "Switch",
-      branch: sw.branch || "HQ",
-      city: sw.city || "Moscow",
-      zone: sw.zone || "DC-East",
+      branch: sw.branch || "ULN",
+      city: sw.city || "Ульяновск",
+      zone: sw.zone || "Core",
     } as InventoryItem;
     upsertInventoryMetaFromItem(newSwitch);
     inventory.push(newSwitch);
@@ -1693,9 +1740,9 @@ async function startServer() {
           name: String(p.name || `Profile ${idx + 1}`).trim() || `Profile ${idx + 1}`,
           subnets,
           protocol: normalizeProtocol(p.protocol),
-          city: String(p.city || "Auto").trim() || "Auto",
-          zone: String(p.zone || "Discovery").trim() || "Discovery",
-          branch: String(p.branch || "HQ").trim() || "HQ",
+          city: String(p.city || "Ульяновск").trim() || "Ульяновск",
+          zone: String(p.zone || "Core").trim() || "Core",
+          branch: String(p.branch || "ULN").trim() || "ULN",
           enabled: p.enabled !== false,
           intervalHours: Math.max(1, Number(p.intervalHours || 3)),
           lastRunAt: typeof p.lastRunAt === "string" ? p.lastRunAt : null,
@@ -1884,7 +1931,7 @@ async function startServer() {
           id: item.id,
           name: item.name,
           ip: item.ip,
-          branch: item.branch || "HQ",
+          branch: item.branch || "ULN",
           category: item.category || "Switch",
           trunks,
           metrics: custom,

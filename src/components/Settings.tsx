@@ -65,9 +65,9 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
     username: 'admin',
     password: '',
     protocol: 'snmp',
-    city: 'Auto',
-    zone: 'Discovery',
-    branch: 'HQ',
+    city: 'Ульяновск',
+    zone: 'Core',
+    branch: 'ULN',
   });
   const [watchProfiles, setWatchProfiles] = React.useState<DiscoveryWatchProfile[]>([]);
   const [watchStatus, setWatchStatus] = React.useState<{
@@ -954,7 +954,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                   className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors"
                   value={discoveryConfig.city}
                   onChange={(e) => setDiscoveryConfig({ ...discoveryConfig, city: e.target.value })}
-                  placeholder="Moscow"
+                  placeholder="Ульяновск"
                 />
               </div>
               <div className="space-y-2">
@@ -963,7 +963,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                   className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors"
                   value={discoveryConfig.zone}
                   onChange={(e) => setDiscoveryConfig({ ...discoveryConfig, zone: e.target.value })}
-                  placeholder="DC-East"
+                  placeholder="Core"
                 />
               </div>
               <div className="space-y-2">
@@ -972,7 +972,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                   className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors"
                   value={discoveryConfig.branch}
                   onChange={(e) => setDiscoveryConfig({ ...discoveryConfig, branch: e.target.value })}
-                  placeholder="HQ"
+                  placeholder="ULN"
                 />
               </div>
             </div>
@@ -1111,16 +1111,16 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         <div className={cn("bg-[#25262b] border border-[#373a40] rounded overflow-hidden", !isAdmin && "opacity-50 pointer-events-none")}>
           <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
             <Database className="text-[#228be6]" size={18} />
-            <h3 className="text-sm font-bold text-white uppercase tracking-widest">Inventory Dictionaries</h3>
+            <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('inventoryDictionaries')}</h3>
           </div>
           <div className="p-6 space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.categories} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, categories: e.target.value })} placeholder="Categories (comma separated)" />
-              <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.subcategories} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, subcategories: e.target.value })} placeholder="Subcategories (comma separated)" />
-              <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.branches} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, branches: e.target.value })} placeholder="Branches (comma separated)" />
-              <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.cities} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, cities: e.target.value })} placeholder="Cities (comma separated)" />
-              <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.zones} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, zones: e.target.value })} placeholder="Zones (comma separated)" />
-              <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.vendors} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, vendors: e.target.value })} placeholder="Vendors (comma separated)" />
+              <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.categories} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, categories: e.target.value })} placeholder={t('categoriesCommaSeparated')} />
+              <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.subcategories} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, subcategories: e.target.value })} placeholder={t('subcategoriesCommaSeparated')} />
+              <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.branches} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, branches: e.target.value })} placeholder={t('branchesCommaSeparated')} />
+              <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.cities} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, cities: e.target.value })} placeholder={t('citiesCommaSeparated')} />
+              <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.zones} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, zones: e.target.value })} placeholder={t('zonesCommaSeparated')} />
+              <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.vendors} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, vendors: e.target.value })} placeholder={t('vendorsCommaSeparated')} />
               <textarea
                 className="md:col-span-2 min-h-[140px] bg-[#141517] border border-[#373a40] p-2.5 rounded text-xs text-white font-mono"
                 value={inventoryMetaEditor.modelsJson}

@@ -154,7 +154,8 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
   });
   const minDx = 230;
   const minDy = 130;
-  for (let iter = 0; iter < 180; iter++) {
+  const maxIterations = points.length > 120 ? 70 : points.length > 70 ? 110 : 160;
+  for (let iter = 0; iter < maxIterations; iter++) {
     let moved = false;
     for (let i = 0; i < points.length; i++) {
       for (let j = i + 1; j < points.length; j++) {
@@ -259,13 +260,16 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     const w = containerRef.current?.offsetWidth || canvasSize.width;
     const h = containerRef.current?.offsetHeight || canvasSize.height;
     const visibleLinks = links.filter((l) => topologySwitchIds.has(l.source) && topologySwitchIds.has(l.target));
-    const computed = computeLayout(regionSwitches, visibleLinks, w, h);
-    setNodes(
-      computed.map((n) => {
-        const saved = savedLayout[n.id];
-        return saved ? { ...n, x: saved.x, y: saved.y } : n;
-      })
-    );
+    const timer = window.setTimeout(() => {
+      const computed = computeLayout(regionSwitches, visibleLinks, w, h);
+      setNodes(
+        computed.map((n) => {
+          const saved = savedLayout[n.id];
+          return saved ? { ...n, x: saved.x, y: saved.y } : n;
+        })
+      );
+    }, 80);
+    return () => window.clearTimeout(timer);
   }, [regionSwitches, topologySwitchIds, links, canvasSize.width, canvasSize.height, savedLayout]);
 
   const handleAutoLayout = async () => {

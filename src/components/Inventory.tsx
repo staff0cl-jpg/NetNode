@@ -39,7 +39,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
     uptime: '0d 0h',
     category: 'Switch',
     subcategory: 'Core',
-    branch: 'HQ'
+    branch: 'ULN'
   });
   const [meta, setMeta] = useState<{
     categories: string[];
@@ -52,9 +52,9 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
   }>({
     categories: ['Switch'],
     subcategories: ['Core'],
-    branches: ['HQ'],
-    cities: ['Moscow'],
-    zones: ['DC-East'],
+    branches: ['ULN', 'NCH', 'VRN', 'VLG', 'VLD', 'SMR', 'KRD'],
+    cities: ['Ульяновск', 'Набережные Челны', 'Краснодар', 'Воронеж', 'Волгоград', 'Владимир', 'Самара'],
+    zones: ['Core', 'Distribution', 'Access'],
     vendors: ['Cisco', 'Juniper', 'HPE', 'Aruba'],
     models: { HPE: ['Aruba 2930F'] }
   });
@@ -70,9 +70,9 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
       uptime: '0d 0h',
       category: meta.categories[0] || 'Switch',
       subcategory: meta.subcategories[0] || 'Core',
-      branch: meta.branches[0] || 'HQ',
-      city: meta.cities[0] || 'Moscow',
-      zone: meta.zones[0] || 'DC-East'
+      branch: meta.branches[0] || 'ULN',
+      city: meta.cities[0] || 'Ульяновск',
+      zone: meta.zones[0] || 'Core'
     }),
     [meta]
   );
@@ -138,7 +138,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
         ip: (newSwitch.ip || '').trim(),
         model: (newSwitch.model || '').trim() || 'Unknown',
         city: (newSwitch.city || '').trim(),
-        zone: (newSwitch.zone || '').trim() || (meta.zones[0] || 'DC-East'),
+        zone: (newSwitch.zone || '').trim() || (meta.zones[0] || 'Core'),
         status: newSwitch.status || 'online',
         uptime: newSwitch.uptime || '0d 0h',
         customOids: customOidsText
@@ -214,7 +214,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
 
   const handleExport = () => {
     const headers = ['Name', 'Vendor', 'Model', 'Category', 'Branch', 'IP', 'City', 'Zone', 'Status', 'Uptime'];
-    const rows = switches.map(s => [s.name, s.vendor, s.model, s.category || 'Switch', s.branch || 'HQ', s.ip, s.city, s.zone, s.status, s.uptime]);
+    const rows = switches.map(s => [s.name, s.vendor, s.model, s.category || 'Switch', s.branch || 'ULN', s.ip, s.city, s.zone, s.status, s.uptime]);
     const csvContent = [headers, ...rows].map(e => e.join(",")).join("\n");
     const blob = new Blob([csvContent], { type: 'text/csv' });
     const url = window.URL.createObjectURL(blob);
@@ -374,7 +374,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
               onChange={(e) => setSubcategoryFilter(e.target.value)}
               className="px-4 py-2 bg-[#141517] border border-[#373a40] rounded text-sm text-white focus:outline-none focus:border-[#228be6] appearance-none"
             >
-              <option value="all">All Subcategories</option>
+              <option value="all">{t('allSubcategories')}</option>
               {meta.subcategories.map((s) => <option key={s} value={s}>{s}</option>)}
             </select>
           </div>
@@ -443,7 +443,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                 </div>
               </th>
               <th>{t('categoryLabel')}</th>
-              <th>Subcategory</th>
+              <th>{t('subcategoryLabel')}</th>
               <th>{t('branchLabel')}</th>
               <th onClick={() => handleSort('ip')} className="cursor-pointer hover:text-white transition-colors">
                 <div className="flex items-center gap-2">
@@ -495,7 +495,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                 </td>
                 <td className="text-xs">{localizeCategory(sw.category || 'Switch')}</td>
                 <td className="text-xs">{sw.subcategory || 'Core'}</td>
-                <td className="text-xs">{sw.branch || 'HQ'}</td>
+                <td className="text-xs">{sw.branch || 'ULN'}</td>
                 <td className="font-mono text-xs text-[#228be6]">{sw.ip}</td>
                 <td>
                   <div className="flex flex-col">
@@ -655,10 +655,10 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                 >
                   {meta.categories.map(c => <option key={c} value={c}>{localizeCategory(c)}</option>)}
                 </select>
-                <p className="text-[10px] text-[#909296]">Manage categories in Settings.</p>
+                <p className="text-[10px] text-[#909296]">{t('manageCategoriesInSettings')}</p>
               </div>
               <div className="space-y-2">
-                <label className="text-[10px] font-bold text-[#909296] uppercase">Subcategory</label>
+                <label className="text-[10px] font-bold text-[#909296] uppercase">{t('subcategoryLabel')}</label>
                 <select
                   className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:outline-none focus:border-[#228be6]"
                   value={newSwitch.subcategory || 'Core'}
@@ -671,12 +671,12 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                 <label className="text-[10px] font-bold text-[#909296] uppercase">{t('branchLabel')}</label>
                 <select
                   className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:outline-none focus:border-[#228be6]"
-                  value={newSwitch.branch || 'HQ'}
+                  value={newSwitch.branch || 'ULN'}
                   onChange={e => setNewSwitch({ ...newSwitch, branch: e.target.value })}
                 >
                   {meta.branches.map(b => <option key={b} value={b}>{b}</option>)}
                 </select>
-                <p className="text-[10px] text-[#909296]">Manage branches in Settings.</p>
+                <p className="text-[10px] text-[#909296]">{t('manageBranchesInSettings')}</p>
               </div>
               <div className="space-y-2 col-span-2">
                 <label className="text-[10px] font-bold text-[#909296] uppercase">SNMP Template</label>
