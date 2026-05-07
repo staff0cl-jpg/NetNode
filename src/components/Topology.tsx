@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Stage, Layer, Rect, Text, Line, Circle } from 'react-konva';
-import { Share2, Box, ZoomIn, ZoomOut, RotateCcw, Globe, TerminalSquare, Hand } from 'lucide-react';
+import { Share2, Box, ZoomIn, ZoomOut, RotateCcw, Globe, TerminalSquare } from 'lucide-react';
 import { Switch } from '../types';
 import { useTranslation } from '../lib/i18n';
 
@@ -205,8 +205,9 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   const [scale, setScale] = useState(0.82);
   const [stagePos, setStagePos] = useState({ x: 20, y: 20 });
   const [contextMenu, setContextMenu] = useState<{ node: Switch; x: number; y: number } | null>(null);
-  const [isPanMode, setIsPanMode] = useState(false);
+  const [isRightPanning, setIsRightPanning] = useState(false);
   const [isNodeDragging, setIsNodeDragging] = useState(false);
+  const panLastPointRef = useRef<{ x: number; y: number } | null>(null);
   const [selectedRegion, setSelectedRegion] = useState<string>('');
   const [newRegion, setNewRegion] = useState('');
   const [regionEditor, setRegionEditor] = useState({ from: '', to: '' });
@@ -551,15 +552,6 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
             </button>
             <button
               type="button"
-              onClick={() => setIsPanMode((v) => !v)}
-              className={`flex items-center gap-1 px-2 py-1.5 rounded text-[10px] font-bold uppercase border ${isPanMode ? 'bg-[#228be6] border-[#228be6] text-white' : 'bg-[#2c2e33] border-[#373a40] text-[#c1c2c5] hover:text-white'}`}
-              title="Pan mode"
-            >
-              <Hand size={12} />
-              Pan
-            </button>
-            <button
-              type="button"
               onClick={() => setScale((s) => Math.max(0.35, s - 0.1))}
               className="flex items-center gap-1 px-2 py-1.5 bg-[#2c2e33] text-[#c1c2c5] hover:text-white rounded text-[10px] font-bold uppercase border border-[#373a40]"
               title="Zoom out"
@@ -642,7 +634,8 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
 
       <div
         ref={containerRef}
-        className={`flex-1 bg-[#141517] relative overflow-hidden ${isPanMode ? 'cursor-grab' : 'cursor-crosshair'}`}
+        className={`flex-1 bg-[#141517] relative overflow-hidden ${isRightPanning ? 'cursor-grabbing' : 'cursor-crosshair'}`}
+        onContextMenu={(e) => e.preventDefault()}
         onClick={() => {
           setContextMenu(null);
           setEditingLinkId(null);
@@ -656,8 +649,40 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           scaleY={scale}
           x={stagePos.x}
           y={stagePos.y}
-          draggable={isPanMode && !isNodeDragging}
-          onDragEnd={(e) => setStagePos({ x: e.target.x(), y: e.target.y() })}
+          draggable={false}
+          onMouseDown={(e) => {
+            const evt = e.evt as MouseEvent;
+            if (evt.button !== 2 || isNodeDragging) return;
+            const stage = e.target.getStage();
+            if (!stage || e.target !== stage) return;
+            evt.preventDefault();
+            setContextMenu(null);
+            setEditingLinkId(null);
+            setIsRightPanning(true);
+            panLastPointRef.current = { x: evt.clientX, y: evt.clientY };
+          }}
+          onMouseMove={(e) => {
+            if (!isRightPanning) return;
+            const evt = e.evt as MouseEvent;
+            evt.preventDefault();
+            const prev = panLastPointRef.current;
+            if (!prev) {
+              panLastPointRef.current = { x: evt.clientX, y: evt.clientY };
+              return;
+            }
+            const dx = evt.clientX - prev.x;
+            const dy = evt.clientY - prev.y;
+            panLastPointRef.current = { x: evt.clientX, y: evt.clientY };
+            setStagePos((p) => ({ x: p.x + dx, y: p.y + dy }));
+          }}
+          onMouseUp={() => {
+            setIsRightPanning(false);
+            panLastPointRef.current = null;
+          }}
+          onMouseLeave={() => {
+            setIsRightPanning(false);
+            panLastPointRef.current = null;
+          }}
           onWheel={handleWheelZoom}
         >
           <Layer>
@@ -680,7 +705,11 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                     fill={editingLinkId === link.id ? "#ffffff" : "#5c5f66"}
                     fontSize={9}
                     align="center"
-                    onClick={() => {
+                    onMouseDown={(e) => {
+                      e.cancelBubble = true;
+                    }}
+                    onClick={(e) => {
+                      e.cancelBubble = true;
                       if (!link.id) return;
                       setEditingLinkId(link.id);
                       setEditingLinkValue({ portA: link.portA, portB: link.portB });
@@ -722,7 +751,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                   onMouseLeave={() => {
                     const stage = stageRef.current;
                     if (!stage) return;
-                    stage.container().style.cursor = isPanMode ? 'grab' : 'crosshair';
+                    stage.container().style.cursor = isRightPanning ? 'grabbing' : 'crosshair';
                   }}
                   onMouseDown={(e) => {
                     e.cancelBubble = true;
@@ -757,6 +786,8 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           <div
             className="absolute z-20 -translate-x-1/2 -translate-y-full bg-[#25262b] border border-[#373a40] rounded px-2 py-1 flex items-center gap-1"
             style={{ left: editingLinkAnchor.x, top: editingLinkAnchor.y }}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
           >
             <input
               value={editingLinkValue.portA}
