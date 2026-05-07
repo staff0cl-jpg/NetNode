@@ -135,7 +135,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
   }, [targetDevice, onClearTarget]);
 
   useEffect(() => {
-    socket.current = io();
+    socket.current = io({ withCredentials: true });
 
     socket.current.on('ssh:data', ({ sessionId, data }: { sessionId: string, data: string }) => {
       const xtermEntry = xterms.current.get(sessionId);
@@ -349,7 +349,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
           ))}
           {sessions.length === 0 && (
             <div className="p-8 text-center text-[10px] text-[#5c5f66] uppercase">
-              No active sessions
+              {t('terminalNoActiveSessions')}
             </div>
           )}
         </div>
@@ -373,17 +373,17 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
                 </div>
                 <div className="h-4 w-px bg-[#373a40]" />
                 <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-bold text-[#5c5f66] uppercase">Status:</span>
+                  <span className="text-[10px] font-bold text-[#5c5f66] uppercase">{t('terminalStatus')}</span>
                   <span className={cn(
                     "text-[10px] font-bold uppercase",
                     sessions.find(s => s.id === activeSessionId)?.connected ? "text-[#40c057]" : "text-red-500"
                   )}>
-                    {sessions.find(s => s.id === activeSessionId)?.connected ? 'Online' : 'Offline'}
+                    {sessions.find(s => s.id === activeSessionId)?.connected ? t('statusOnline') : t('statusOffline')}
                   </span>
                 </div>
               </>
             ) : (
-              <span className="text-xs text-[#5c5f66] italic">Select a session to start terminal</span>
+              <span className="text-xs text-[#5c5f66] italic">{t('selectSessionToStart')}</span>
             )}
           </div>
 
@@ -395,7 +395,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
                   className="flex items-center gap-2 px-3 py-1.5 bg-[#2c2e33] text-[#c1c2c5] rounded text-[10px] font-bold uppercase tracking-widest hover:text-white transition-all border border-[#373a40]"
                 >
                   <Save size={12} />
-                  Settings
+                  {t('terminalSettings')}
                 </button>
                 {!sessions.find(s => s.id === activeSessionId)?.connected ? (
                   <button 
@@ -403,7 +403,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
                     className="flex items-center gap-2 px-3 py-1.5 bg-[#228be6] text-white rounded text-[10px] font-bold uppercase tracking-widest hover:bg-[#1c7ed6] transition-all"
                   >
                     <Power size={12} />
-                    Connect
+                    {t('connect')}
                   </button>
                 ) : (
                   <button 
@@ -411,7 +411,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
                     className="flex items-center gap-2 px-3 py-1.5 bg-red-500/10 border border-red-500/30 text-red-500 rounded text-[10px] font-bold uppercase tracking-widest hover:bg-red-500/20 transition-all"
                   >
                     <X size={12} />
-                    Hangup
+                    {t('hangup')}
                   </button>
                 )}
               </>
@@ -444,7 +444,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
           {!activeSessionId && (
             <div className="h-full flex flex-col items-center justify-center text-[#373a40]">
               <TerminalIcon size={64} className="mb-4 opacity-10" />
-              <p className="text-sm font-mono uppercase tracking-[0.2em] opacity-30">Waiting for session...</p>
+              <p className="text-sm font-mono uppercase tracking-[0.2em] opacity-30">{t('waitingForSession')}</p>
             </div>
           )}
         </div>
@@ -461,13 +461,13 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
             <div className="flex items-center gap-3 mb-8">
               {editingSessionId ? <Settings className="text-[#fab005]" /> : <Plus className="text-[#228be6]" />}
               <h3 className="text-lg font-bold text-white uppercase tracking-widest">
-                {editingSessionId ? 'Edit Session Configuration' : 'Add New SSH Session'}
+                {editingSessionId ? t('editSessionConfiguration') : t('addNewSshSession')}
               </h3>
             </div>
 
             <div className="space-y-6">
               <div className="space-y-2">
-                <label className="text-[10px] font-bold text-[#5c5f66] uppercase">Session Name</label>
+                <label className="text-[10px] font-bold text-[#5c5f66] uppercase">{t('sessionName')}</label>
                 <input 
                   className="w-full bg-[#141517] border border-[#373a40] p-3 rounded text-sm text-white focus:border-[#228be6] outline-none"
                   placeholder="e.g. CORE-SW-NORTH"
@@ -476,7 +476,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
                 />
               </div>
               <div className="space-y-2">
-                <label className="text-[10px] font-bold text-[#5c5f66] uppercase">Node Address (IP/FQDN)</label>
+                <label className="text-[10px] font-bold text-[#5c5f66] uppercase">{t('nodeAddress')}</label>
                 <input 
                   className="w-full bg-[#141517] border border-[#373a40] p-3 rounded text-sm text-white focus:border-[#228be6] outline-none"
                   placeholder="10.0.0.1"
@@ -486,7 +486,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <label className="text-[10px] font-bold text-[#5c5f66] uppercase">Username</label>
+                  <label className="text-[10px] font-bold text-[#5c5f66] uppercase">{t('username')}</label>
                   <input 
                     className="w-full bg-[#141517] border border-[#373a40] p-3 rounded text-sm text-white focus:border-[#228be6] outline-none"
                     value={newSession.username}
@@ -494,7 +494,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
                   />
                 </div>
                 <div className="space-y-2">
-                  <label className="text-[10px] font-bold text-[#5c5f66] uppercase">Auto Reconnect</label>
+                  <label className="text-[10px] font-bold text-[#5c5f66] uppercase">{t('autoReconnect')}</label>
                   <div className="flex items-center gap-2 h-11">
                     <input 
                       type="checkbox"
@@ -502,7 +502,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
                       checked={newSession.autoReconnect}
                       onChange={e => setNewSession({...newSession, autoReconnect: e.target.checked})}
                     />
-                    <span className="text-xs text-[#909296]">Retry on loss</span>
+                    <span className="text-xs text-[#909296]">{t('retryOnLoss')}</span>
                   </div>
                 </div>
               </div>
@@ -529,7 +529,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
                 }}
                 className="flex-1 py-3 border border-[#373a40] text-[#909296] rounded text-[10px] font-bold uppercase tracking-widest hover:bg-white/5 transition-all"
               >
-                Cancel
+                {t('cancel')}
               </button>
               <button 
                 onClick={addSession}
@@ -538,7 +538,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
                   editingSessionId ? "bg-[#fab005] text-black hover:bg-[#f08c00]" : "bg-[#228be6] hover:bg-[#1c7ed6]"
                 )}
               >
-                {editingSessionId ? 'Save Configuration' : 'Create Session'}
+                {editingSessionId ? t('saveConfiguration') : t('createSession')}
               </button>
             </div>
           </motion.div>

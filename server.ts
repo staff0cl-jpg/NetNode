@@ -139,16 +139,73 @@ type TopologyLink = {
 let topologyLinks: TopologyLink[] = [];
 let topologyLayout: Record<string, { x: number; y: number }> = {};
 
-let users = [
-  { id: '1', username: 'admin', role: 'admin', lastLogin: '2024-05-04 10:15', password: 'admin' },
-  { id: '2', username: 'operator_01', role: 'operator', lastLogin: '2024-05-03 16:45', password: 'password' },
-];
-
 type AuthUser = { id: string; username: string; role: string };
+type LocalUser = AuthUser & {
+  lastLogin: string;
+  passwordHash?: string;
+  password?: string; // legacy plaintext, migrated at startup
+};
 type SessionRecord = { user: AuthUser; expiresAt: number };
 const SESSION_COOKIE_NAME = "netnode_sid";
 const SESSION_TTL_MS = 1000 * 60 * 60 * 8; // 8 hours
 const sessionStore = new Map<string, SessionRecord>();
+
+function hashPassword(password: string): string {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const derived = crypto.scryptSync(password, salt, 64).toString("hex");
+  return `scrypt$${salt}$${derived}`;
+}
+
+function verifyPasswordHash(password: string, stored: string): boolean {
+  const [scheme, salt, expected] = stored.split("$");
+  if (scheme !== "scrypt" || !salt || !expected) return false;
+  const derived = crypto.scryptSync(password, salt, 64);
+  const expectedBuffer = Buffer.from(expected, "hex");
+  return derived.length === expectedBuffer.length && crypto.timingSafeEqual(derived, expectedBuffer);
+}
+
+function verifyLocalPassword(user: LocalUser, password: string): boolean {
+  return !!user.passwordHash && verifyPasswordHash(password, user.passwordHash);
+}
+
+function createInitialUsers(): LocalUser[] {
+  const users: LocalUser[] = [];
+  const initialAdminPassword = process.env.NETNODE_INITIAL_ADMIN_PASSWORD;
+  if (initialAdminPassword) {
+    users.push({
+      id: "1",
+      username: process.env.NETNODE_INITIAL_ADMIN_USERNAME || "admin",
+      role: "admin",
+      lastLogin: "-",
+      passwordHash: hashPassword(initialAdminPassword),
+    });
+    return users;
+  }
+
+  if (process.env.NODE_ENV !== "production") {
+    console.warn("[Security] Using development-only local users. Set NETNODE_INITIAL_ADMIN_PASSWORD for deployments.");
+    users.push(
+      { id: "1", username: "admin", role: "admin", lastLogin: "-", passwordHash: hashPassword("admin") },
+      { id: "2", username: "operator_01", role: "operator", lastLogin: "-", passwordHash: hashPassword("password") }
+    );
+  } else {
+    console.warn("[Security] No initial local admin created. Set NETNODE_INITIAL_ADMIN_PASSWORD or configure LDAP before production use.");
+  }
+  return users;
+}
+
+let users: LocalUser[] = createInitialUsers();
+
+function migratePlaintextPasswords() {
+  users.forEach((user) => {
+    if (user.password && !user.passwordHash) {
+      user.passwordHash = hashPassword(user.password);
+      delete user.password;
+      console.warn(`[Security] Migrated plaintext password for local user ${user.username}.`);
+    }
+  });
+}
+migratePlaintextPasswords();
 
 interface AuditLog {
   id: string;
@@ -165,6 +222,13 @@ let auditLogs: AuditLog[] = [];
 let systemConfig = {
   defaultLanguage: 'ru',
   siteLabel: 'UNSET',
+  automationDefaults: {
+    batchSize: 10,
+    timeoutMs: 15000,
+    retry: 1,
+    concurrency: 10,
+    errorThreshold: 20,
+  },
   dashboardUi: {
     trunkThroughputTitle: 'Trunk Throughput (Mbps)',
     trunkLoadTitle: 'Trunk Load (Mbps)',
@@ -379,6 +443,98 @@ type TrunkMetric = {
 };
 
 const trunkCounterCache = new Map<string, { inOctets: bigint; outOctets: bigint; ts: number; bits: 32 | 64 }>();
+
+type AutomationScenario = "create-vlan" | "allow-vlan-on-trunk";
+type AutomationTargetScope = "selectedIds" | "filters" | "all";
+type AutomationAllowMode = "add" | "replace";
+type AutomationTarget = {
+  scope: AutomationTargetScope;
+  selectedIds?: string[];
+  selectedDeviceIds?: string[]; // backward-compatible alias
+  filters?: {
+    vendor?: string[];
+    model?: string[];
+    branch?: string[];
+    category?: string[];
+    subcategory?: string[];
+  };
+  portConditions?: {
+    isTrunk?: boolean;
+    trunkOnly?: boolean; // backward-compatible alias
+    ifNameRegex?: string;
+    operStatusUp?: boolean;
+    descriptionContains?: string;
+  };
+};
+type AutomationPlan = {
+  scenario: AutomationScenario;
+  vlanId: number;
+  vlanName?: string;
+  mode?: AutomationAllowMode;
+  target: AutomationTarget;
+  options?: {
+    dryRun?: boolean;
+    batchSize?: number;
+    retry?: number;
+    errorThreshold?: number;
+    timeoutMs?: number;
+    concurrency?: number;
+  };
+};
+type AutomationStepStatus = "pending" | "dry-run" | "applied" | "noop" | "error" | "unsupported" | "cancelled";
+type AutomationStepResult = {
+  id: string;
+  jobId: string;
+  deviceId: string;
+  deviceName: string;
+  deviceIp: string;
+  vendor: string;
+  port?: string;
+  scenario: AutomationScenario;
+  status: AutomationStepStatus;
+  message: string;
+  commandPreview: string[];
+  commandResult?: string;
+  retries: number;
+  createdAt: string;
+  updatedAt: string;
+};
+type AutomationJob = {
+  id: string;
+  planId: string;
+  actor: string;
+  status: "running" | "completed" | "failed" | "cancelled";
+  createdAt: string;
+  startedAt: string;
+  finishedAt?: string;
+  cancelledAt?: string;
+  summary: {
+    total: number;
+    applied: number;
+    noop: number;
+    errors: number;
+    unsupported: number;
+    cancelled: number;
+  };
+  progress: {
+    done: number;
+    total: number;
+  };
+  meta: {
+    batchSize: number;
+    retry: number;
+    errorThreshold: number;
+    timeoutMs: number;
+    concurrency: number;
+  };
+  plan: AutomationPlan;
+  steps: AutomationStepResult[];
+  error?: string;
+};
+
+const automationPlans = new Map<string, { id: string; createdAt: string; actor: string; plan: AutomationPlan }>();
+const automationJobs = new Map<string, AutomationJob>();
+const automationCancellation = new Set<string>();
 
 interface LdapRoleProfile {
   enabled: boolean;
@@ -1219,6 +1375,196 @@ async function collectTrunkMetricsWithFallback(item: InventoryItem): Promise<Tru
   }
 }
 
+function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(n)));
+}
+
+function uniqueById(items: InventoryItem[]): InventoryItem[] {
+  const seen = new Set<string>();
+  const out: InventoryItem[] = [];
+  for (const item of items) {
+    if (seen.has(item.id)) continue;
+    seen.add(item.id);
+    out.push(item);
+  }
+  return out;
+}
+
+function normalizeAutomationPlan(body: Partial<AutomationPlan> | undefined): AutomationPlan {
+  const rawTarget = body?.target || ({ scope: "all" } as AutomationTarget);
+  const rawScope = String((rawTarget as { scope?: string }).scope || "all");
+  const normalizedScope: AutomationTargetScope = rawScope === "selectedIds" || rawScope === "selected" ? "selectedIds" : rawScope === "filters" || rawScope === "filter" ? "filters" : "all";
+  const mode: AutomationAllowMode = body?.mode === "replace" ? "replace" : "add";
+  return {
+    scenario: body?.scenario === "allow-vlan-on-trunk" ? "allow-vlan-on-trunk" : "create-vlan",
+    vlanId: clampNumber(body?.vlanId, 1, 4094, 1),
+    vlanName: String(body?.vlanName || "").trim() || undefined,
+    mode,
+    target: {
+      ...rawTarget,
+      scope: normalizedScope,
+      selectedIds: rawTarget.selectedIds || rawTarget.selectedDeviceIds || [],
+      filters: rawTarget.filters || {},
+      portConditions: {
+        ...(rawTarget.portConditions || {}),
+        isTrunk: rawTarget.portConditions?.isTrunk ?? rawTarget.portConditions?.trunkOnly ?? true,
+      },
+    },
+    options: body?.options || {},
+  };
+}
+
+async function resolveAutomationTargets(plan: AutomationPlan): Promise<Array<{ device: InventoryItem; ports: TrunkMetric[] }>> {
+  const target = plan.target || { scope: "all" as const };
+  let devices: InventoryItem[] = [];
+  if (target.scope === "selectedIds") {
+    const set = new Set((target.selectedIds || target.selectedDeviceIds || []).map((v) => String(v)));
+    devices = inventory.filter((d) => set.has(d.id));
+  } else if (target.scope === "filters") {
+    const f = target.filters || {};
+    const inList = (v: string | undefined, list?: string[]) => !list?.length || list.map((x) => String(x).toLowerCase()).includes(String(v || "").toLowerCase());
+    devices = inventory.filter((d) =>
+      inList(d.vendor, f.vendor) &&
+      inList(d.model, f.model) &&
+      inList(d.branch, f.branch) &&
+      inList(d.category, f.category) &&
+      inList(d.subcategory, f.subcategory)
+    );
+  } else {
+    devices = [...inventory];
+  }
+  devices = uniqueById(devices);
+  if (plan.scenario === "create-vlan") {
+    return devices.map((device) => ({ device, ports: [] }));
+  }
+  const cond = target.portConditions || {};
+  let re: RegExp;
+  try {
+    re = new RegExp(cond.ifNameRegex || ".*", "i");
+  } catch {
+    re = /.*/i;
+  }
+  const mustBeTrunk = cond.isTrunk ?? cond.trunkOnly ?? true;
+  const resolved = await Promise.all(
+    devices.map(async (device) => {
+      const trunks = await collectTrunkMetricsWithFallback(device);
+      const ports = trunks.filter((t) => {
+        if (mustBeTrunk && t.operStatus <= 0) return false;
+        if (!re.test(t.ifName || "")) return false;
+        if (cond.operStatusUp && t.operStatus !== 1) return false;
+        if (cond.descriptionContains && !String(t.description || "").toLowerCase().includes(cond.descriptionContains.toLowerCase())) return false;
+        return true;
+      });
+      return { device, ports };
+    })
+  );
+  return resolved.filter((x) => x.ports.length > 0);
+}
+
+function buildVendorCommands(
+  vendor: string,
+  scenario: AutomationScenario,
+  vlanId: number,
+  vlanName: string | undefined,
+  port?: string,
+  mode: AutomationAllowMode = "add"
+): { unsupported?: boolean; warning?: string; precheck: string[]; apply: string[] } {
+  const v = String(vendor || "").toLowerCase();
+  if (v.includes("cisco")) {
+    if (scenario === "create-vlan") {
+      return { precheck: [`show vlan id ${vlanId}`], apply: ["configure terminal", `vlan ${vlanId}`, vlanName ? `name ${vlanName}` : "", "end", "write memory"].filter(Boolean) };
+    }
+    return {
+      precheck: [`show running-config interface ${port}`],
+      apply: ["configure terminal", `interface ${port}`, mode === "replace" ? `switchport trunk allowed vlan ${vlanId}` : `switchport trunk allowed vlan add ${vlanId}`, "end", "write memory"],
+    };
+  }
+  if (v.includes("hpe") || v.includes("aruba")) {
+    if (scenario === "create-vlan") {
+      return { precheck: [`show vlan ${vlanId}`], apply: ["configure terminal", `vlan ${vlanId}`, vlanName ? `name ${vlanName}` : "", "exit", "write memory"].filter(Boolean) };
+    }
+    return {
+      warning: "HPE/Aruba trunk syntax may vary by model; using safe add-style command",
+      precheck: [`show running-config interface ${port}`],
+      apply: ["configure terminal", `interface ${port}`, mode === "replace" ? `vlan trunk allowed ${vlanId}` : `vlan trunk allowed add ${vlanId}`, "exit", "write memory"],
+    };
+  }
+  if (v.includes("mikrotik")) {
+    if (scenario === "create-vlan") {
+      return { precheck: [`/interface vlan print where vlan-id=${vlanId}`], apply: [`/interface vlan add name=vlan${vlanId} vlan-id=${vlanId} interface=bridge`] };
+    }
+    return {
+      warning: "MikroTik fallback adds bridge vlan row; validate bridge/interface mapping",
+      precheck: [`/interface bridge vlan print where vlan-ids=${vlanId}`],
+      apply: [`/interface bridge vlan add vlan-ids=${vlanId} tagged=${port}`],
+    };
+  }
+  return { unsupported: true, warning: `Vendor '${vendor}' is unsupported by automation adapter`, precheck: [], apply: [] };
+}
+
+function detectNoopFromOutput(output: string, scenario: AutomationScenario, vlanId: number, port?: string): boolean {
+  const low = String(output || "").toLowerCase();
+  if (scenario === "create-vlan") {
+    return low.includes(` ${vlanId} `) || low.includes(`vlan${vlanId}`) || low.includes(`id ${vlanId}`);
+  }
+  return (!!port && low.includes(String(port).toLowerCase()) && low.includes(String(vlanId)));
+}
+
+async function runSshCommandBatch(device: InventoryItem, commands: string[], timeoutMs: number): Promise<string> {
+  const profile = getActiveSshReadonlyProfile();
+  if (!profile) throw new Error("SSH readonly profile is not configured");
+  const timeout = new Promise<string>((_r, reject) => setTimeout(() => reject(new Error("SSH command timeout")), timeoutMs));
+  return Promise.race([runSshReadonlyCommands(device.ip, profile.username, profile.password, profile.port, commands), timeout]);
+}
+
+async function executeAutomationStep(job: AutomationJob, step: AutomationStepResult, retryLimit: number): Promise<void> {
+  const device = inventory.find((d) => d.id === step.deviceId);
+  if (!device) {
+    step.status = "error";
+    step.message = "Device not found";
+    step.updatedAt = new Date().toISOString();
+    return;
+  }
+  const cmds = buildVendorCommands(device.vendor, step.scenario, job.plan.vlanId, job.plan.vlanName, step.port, job.plan.mode || "add");
+  if (cmds.unsupported) {
+    step.status = "unsupported";
+    step.message = cmds.warning || `Unsupported vendor: ${device.vendor}`;
+    step.updatedAt = new Date().toISOString();
+    return;
+  }
+  step.commandPreview = cmds.apply;
+  let attempt = 0;
+  while (attempt <= retryLimit) {
+    try {
+      const pre = await runSshCommandBatch(device, cmds.precheck, job.meta.timeoutMs);
+      if (detectNoopFromOutput(pre, step.scenario, job.plan.vlanId, step.port)) {
+        step.status = "noop";
+        step.message = "Already configured (idempotent no-op)";
+        step.commandResult = pre;
+        step.updatedAt = new Date().toISOString();
+        return;
+      }
+      const out = await runSshCommandBatch(device, cmds.apply, job.meta.timeoutMs);
+      step.status = "applied";
+      step.message = cmds.warning ? `Commands applied (${cmds.warning})` : "Commands applied";
+      step.commandResult = out;
+      step.updatedAt = new Date().toISOString();
+      return;
+    } catch (e) {
+      attempt += 1;
+      step.retries = attempt;
+      if (attempt > retryLimit) {
+        step.status = "error";
+        step.message = e instanceof Error ? e.message : String(e);
+        step.updatedAt = new Date().toISOString();
+        return;
+      }
+    }
+  }
+}
+
 async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise<TopologyLink[]> {
   const branchFilter = String(branch || "").trim();
   const devices = branchFilter
@@ -1592,8 +1938,7 @@ const logAction = (user: string, action: string, details: string, category: Audi
   console.log(`[Audit] [${category.toUpperCase()}] ${user}: ${action} - ${details}`);
 };
 
-function parseCookies(req: express.Request): Record<string, string> {
-  const src = req.headers.cookie || "";
+function parseCookieHeader(src = ""): Record<string, string> {
   return src
     .split(";")
     .map((entry) => entry.trim())
@@ -1634,7 +1979,11 @@ function makeSession(user: AuthUser): string {
 }
 
 function readSession(req: express.Request): { sid?: string; user: AuthUser | null } {
-  const sid = parseCookies(req)[SESSION_COOKIE_NAME];
+  return readSessionFromCookieHeader(req.headers.cookie || "");
+}
+
+function readSessionFromCookieHeader(cookieHeader = ""): { sid?: string; user: AuthUser | null } {
+  const sid = parseCookieHeader(cookieHeader)[SESSION_COOKIE_NAME];
   if (!sid) return { user: null };
   const record = sessionStore.get(sid);
   if (!record) return { sid, user: null };
@@ -1645,14 +1994,16 @@ function readSession(req: express.Request): { sid?: string; user: AuthUser | nul
   return { sid, user: record.user };
 }
 
-function authFromRequest(req: express.Request): AuthUser {
-  const session = readSession(req).user;
-  if (session) return session;
-  return {
-    id: String(req.headers["x-user-id"] || "header-user"),
-    username: String(req.headers["x-user-name"] || "unknown"),
-    role: String(req.headers["x-user-role"] || "viewer"),
-  };
+function authFromRequest(req: express.Request): AuthUser | null {
+  return readSession(req).user;
+}
+
+function actorName(req: express.Request): string {
+  return authFromRequest(req)?.username || "unknown";
+}
+
+function actorRole(req: express.Request): string {
+  return authFromRequest(req)?.role || "viewer";
 }
 
 async function startServer() {
@@ -1667,9 +2018,13 @@ async function startServer() {
 
   app.use(express.json());
   
-  // Helper: Role Check Middleware (Simulated)
+  // Helper: Role Check Middleware (server-side session only)
   const checkRole = (roles: string[]) => (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    const userRole = authFromRequest(req).role || "viewer";
+    const user = authFromRequest(req);
+    if (!user) {
+      return res.status(401).json({ error: "Authentication required." });
+    }
+    const userRole = user.role || "viewer";
     if (roles.includes(userRole)) {
       next();
     } else {
@@ -1735,13 +2090,202 @@ async function startServer() {
     res.json(auditLogs);
   });
 
+  app.post("/api/automation/plans/dry-run", checkRole(["admin", "operator"]), async (req, res) => {
+    const actor = actorName(req);
+    const body = req.body as Partial<AutomationPlan>;
+    const plan = normalizeAutomationPlan(body);
+    const resolved = await resolveAutomationTargets(plan);
+    const previewSteps: AutomationStepResult[] = [];
+    for (const entry of resolved) {
+      if (plan.scenario === "create-vlan") {
+        const commands = buildVendorCommands(entry.device.vendor, plan.scenario, plan.vlanId, plan.vlanName, undefined, plan.mode || "add");
+        previewSteps.push({
+          id: `st-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          jobId: "dry-run",
+          deviceId: entry.device.id,
+          deviceName: entry.device.name,
+          deviceIp: entry.device.ip,
+          vendor: entry.device.vendor,
+          scenario: plan.scenario,
+          status: commands.unsupported ? "unsupported" : "dry-run",
+          message: commands.unsupported ? (commands.warning || "Unsupported vendor") : (commands.warning || "Ready for apply"),
+          commandPreview: commands.apply,
+          retries: 0,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+      } else {
+        for (const p of entry.ports) {
+          const commands = buildVendorCommands(entry.device.vendor, plan.scenario, plan.vlanId, plan.vlanName, p.ifName, plan.mode || "add");
+          previewSteps.push({
+            id: `st-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            jobId: "dry-run",
+            deviceId: entry.device.id,
+            deviceName: entry.device.name,
+            deviceIp: entry.device.ip,
+            vendor: entry.device.vendor,
+            port: p.ifName,
+            scenario: plan.scenario,
+            status: commands.unsupported ? "unsupported" : "dry-run",
+            message: commands.unsupported ? (commands.warning || "Unsupported vendor") : (commands.warning || "Ready for apply"),
+            commandPreview: commands.apply,
+            retries: 0,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          });
+        }
+      }
+    }
+    const planId = `plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    automationPlans.set(planId, { id: planId, createdAt: new Date().toISOString(), actor, plan });
+    logAction(actor, "AUTOMATION_PLAN", `Dry-run prepared ${previewSteps.length} step(s) for ${plan.scenario}`, "system");
+    return res.json({ success: true, planId, summary: { total: previewSteps.length, unsupported: previewSteps.filter((s) => s.status === "unsupported").length }, steps: previewSteps });
+  });
+
+  app.post("/api/automation/plans/apply", checkRole(["admin", "operator"]), async (req, res) => {
+    const actor = actorName(req);
+    const body = req.body as { planId?: string; plan?: Partial<AutomationPlan> };
+    let plan = body?.plan ? normalizeAutomationPlan(body.plan) : undefined;
+    if (!plan && body?.planId && automationPlans.has(body.planId)) {
+      const existing = automationPlans.get(body.planId)?.plan;
+      plan = existing ? normalizeAutomationPlan(existing) : undefined;
+    }
+    if (!plan) return res.status(400).json({ error: "plan or planId is required" });
+    const resolved = await resolveAutomationTargets(plan);
+    const batchSize = clampNumber(plan.options?.batchSize ?? systemConfig.automationDefaults.batchSize, 1, 100, 10);
+    const retry = clampNumber(plan.options?.retry ?? systemConfig.automationDefaults.retry, 0, 5, 1);
+    const errorThreshold = clampNumber(plan.options?.errorThreshold ?? systemConfig.automationDefaults.errorThreshold, 1, 10000, 20);
+    const timeoutMs = clampNumber(plan.options?.timeoutMs ?? systemConfig.automationDefaults.timeoutMs, 1000, 60000, 15000);
+    const concurrency = clampNumber(plan.options?.concurrency ?? systemConfig.automationDefaults.concurrency, 1, 100, batchSize);
+    const steps: AutomationStepResult[] = [];
+    for (const entry of resolved) {
+      if (plan.scenario === "create-vlan") {
+        steps.push({
+          id: `st-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          jobId: "",
+          deviceId: entry.device.id,
+          deviceName: entry.device.name,
+          deviceIp: entry.device.ip,
+          vendor: entry.device.vendor,
+          scenario: plan.scenario,
+          status: "pending",
+          message: "Pending",
+          commandPreview: [],
+          retries: 0,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+      } else {
+        for (const p of entry.ports) {
+          steps.push({
+            id: `st-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            jobId: "",
+            deviceId: entry.device.id,
+            deviceName: entry.device.name,
+            deviceIp: entry.device.ip,
+            vendor: entry.device.vendor,
+            port: p.ifName,
+            scenario: plan.scenario,
+            status: "pending",
+            message: "Pending",
+            commandPreview: [],
+            retries: 0,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          });
+        }
+      }
+    }
+    const jobId = `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    steps.forEach((s) => (s.jobId = jobId));
+    const job: AutomationJob = {
+      id: jobId,
+      planId: body?.planId || `plan-${Date.now()}`,
+      actor,
+      status: "running",
+      createdAt: new Date().toISOString(),
+      startedAt: new Date().toISOString(),
+      summary: { total: steps.length, applied: 0, noop: 0, errors: 0, unsupported: 0, cancelled: 0 },
+      progress: { done: 0, total: steps.length },
+      meta: { batchSize, retry, errorThreshold, timeoutMs, concurrency },
+      plan,
+      steps,
+    };
+    automationJobs.set(jobId, job);
+    logAction(actor, "AUTOMATION_APPLY", `Job ${jobId} created (${steps.length} step(s))`, "system");
+
+    void (async () => {
+      let index = 0;
+      while (index < job.steps.length) {
+        if (automationCancellation.has(job.id)) {
+          job.status = "cancelled";
+          job.cancelledAt = new Date().toISOString();
+          job.finishedAt = new Date().toISOString();
+          for (let i = index; i < job.steps.length; i += 1) {
+            if (job.steps[i].status === "pending") {
+              job.steps[i].status = "cancelled";
+              job.steps[i].message = "Cancelled by user";
+              job.steps[i].updatedAt = new Date().toISOString();
+              job.summary.cancelled += 1;
+            }
+          }
+          break;
+        }
+        const chunk = job.steps.slice(index, index + Math.max(1, Math.min(batchSize, concurrency)));
+        await Promise.all(chunk.map(async (s) => executeAutomationStep(job, s, retry)));
+        index += chunk.length;
+        job.summary.applied = job.steps.filter((s) => s.status === "applied").length;
+        job.summary.noop = job.steps.filter((s) => s.status === "noop").length;
+        job.summary.errors = job.steps.filter((s) => s.status === "error").length;
+        job.summary.unsupported = job.steps.filter((s) => s.status === "unsupported").length;
+        job.progress.done = job.steps.filter((s) => s.status !== "pending").length;
+        if (job.summary.errors >= errorThreshold) {
+          job.status = "failed";
+          job.error = `Error threshold exceeded (${job.summary.errors})`;
+          job.finishedAt = new Date().toISOString();
+          break;
+        }
+      }
+      if (!job.finishedAt) {
+        job.finishedAt = new Date().toISOString();
+        if (job.status === "running") {
+          job.status = job.summary.errors > 0 ? "failed" : "completed";
+        }
+      }
+    })();
+
+    return res.json({ success: true, jobId });
+  });
+
+  app.get("/api/automation/jobs", checkRole(["admin", "operator", "viewer"]), (_req, res) => {
+    const jobs = Array.from(automationJobs.values()).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    res.json({ jobs });
+  });
+
+  app.get("/api/automation/jobs/:id", checkRole(["admin", "operator", "viewer"]), (req, res) => {
+    const id = String(req.params.id || "");
+    const job = automationJobs.get(id);
+    if (!job) return res.status(404).json({ error: "Job not found" });
+    return res.json({ job });
+  });
+
+  app.post("/api/automation/jobs/:id/cancel", checkRole(["admin", "operator"]), (req, res) => {
+    const id = String(req.params.id || "");
+    const job = automationJobs.get(id);
+    if (!job) return res.status(404).json({ error: "Job not found" });
+    if (job.status !== "running") return res.json({ success: true, status: job.status });
+    automationCancellation.add(id);
+    logAction(actorName(req), "AUTOMATION_CANCEL", `Cancel requested for ${id}`, "system");
+    return res.json({ success: true });
+  });
+
   // API: System Configuration
-  app.get("/api/config/system", checkRole(['admin', 'operator']), (req, res) => {
+  app.get("/api/config/system", checkRole(['admin', 'operator', 'viewer']), (req, res) => {
     res.json({ config: systemConfig });
   });
 
   app.post("/api/config/system", checkRole(['admin']), (req, res) => {
-    const actor = req.headers["x-user-name"] as string || "unknown";
+    const actor = actorName(req);
     systemConfig = { ...systemConfig, ...req.body };
     logAction(actor, 'System Config Update', `Updated system settings`, 'config');
     res.json({ success: true, config: systemConfig });
@@ -1759,7 +2303,7 @@ async function startServer() {
   });
 
   app.post("/api/config/ldap", checkRole(['admin']), (req, res) => {
-    const actor = req.headers["x-user-name"] as string || "unknown";
+    const actor = actorName(req);
     const body = req.body as { admin?: Partial<LdapRoleProfile>; operator?: Partial<LdapRoleProfile> };
     mergeLdapPasswords(body || {});
     logAction(actor, 'LDAP Config Update', 'Updated LDAP authentication profiles', 'config');
@@ -1795,7 +2339,7 @@ async function startServer() {
 
     const bindRes = await testLdapServiceBind(p);
     logAction(
-      (req.headers["x-user-name"] as string) || "unknown",
+      actorName(req),
       "LDAP Test",
       `${key}: ${bindRes.message}`,
       "config"
@@ -1848,12 +2392,12 @@ async function startServer() {
 
   app.post("/api/inventory/bulk", checkRole(['admin', 'operator']), (req, res) => {
     const { ids, action, value } = req.body;
-    const actor = req.headers["x-user-name"] as string || "unknown";
+    const actor = actorName(req);
 
     if (!Array.isArray(ids)) return res.status(400).json({ error: 'Invalid IDs' });
 
     if (action === "delete") {
-      if ((req.headers["x-user-role"] as string) !== "admin") {
+      if (actorRole(req) !== "admin") {
         return res.status(403).json({ error: "Access Denied: Insufficient permissions." });
       }
       inventory = inventory.filter((item) => !ids.includes(item.id));
@@ -1879,7 +2423,7 @@ async function startServer() {
   });
 
   // API: Get Inventory
-  app.get("/api/inventory", (_req, res) => {
+  app.get("/api/inventory", checkRole(['admin', 'operator', 'viewer']), (_req, res) => {
     Promise.all(
       inventory.map(async (item) => {
         const probe = await getSnmpProbe(item.ip, 900);
@@ -1920,7 +2464,7 @@ async function startServer() {
 
   app.post("/api/inventory", checkRole(['admin', 'operator']), (req, res) => {
     const sw = req.body;
-    const actor = req.headers["x-user-name"] as string || "unknown";
+    const actor = actorName(req);
     const category = String(sw.category || "Switch");
     const normalizedCategory = category.toLowerCase();
     const fcSubcategory = (
@@ -1945,7 +2489,7 @@ async function startServer() {
   });
 
   app.patch("/api/inventory/:id", checkRole(['admin', 'operator']), (req, res) => {
-    const actor = req.headers["x-user-name"] as string || "unknown";
+    const actor = actorName(req);
     const index = inventory.findIndex(s => s.id === req.params.id);
     if (index === -1) return res.status(404).json({ error: "Device not found" });
     
@@ -1962,7 +2506,7 @@ async function startServer() {
   });
 
   app.delete("/api/inventory/:id", checkRole(['admin']), (req, res) => {
-    const actor = req.headers["x-user-name"] as string || "unknown";
+    const actor = actorName(req);
     const sw = inventory.find(s => s.id === req.params.id);
     if (sw) {
       logAction(actor, 'Remove Device', `Deleted switch: ${sw.name} (${sw.ip})`, 'inventory');
@@ -1976,16 +2520,17 @@ async function startServer() {
 
   // API: User Management
   app.get("/api/users", checkRole(['admin']), (req, res) => {
-    // Don't send passwords to frontend
-    res.json(users.map(({ password, ...u }) => u));
+    // Don't send password material to frontend
+    res.json(users.map(({ password, passwordHash, ...u }) => u));
   });
 
   app.post("/api/auth/login", async (req, res) => {
     const { username, password } = req.body as { username?: string; password?: string };
 
-    const user = users.find((u) => u.username === username && u.password === password);
+    const user = users.find((u) => u.username === username && password && verifyLocalPassword(u, password));
     if (user) {
       const authUser = { id: user.id, username: user.username, role: user.role };
+      user.lastLogin = new Date().toISOString();
       const sid = makeSession(authUser);
       writeSessionCookie(res, sid, useSecureCookie);
       logAction(username || "unknown", "Login Success", "User authenticated successfully", "auth");
@@ -2036,24 +2581,25 @@ async function startServer() {
 
   app.post("/api/users", checkRole(['admin']), (req, res) => {
     const { username, password, role } = req.body;
-    const actor = req.headers["x-user-name"] as string || "unknown";
+    const actor = actorName(req);
     if (!username || !password) return res.status(400).json({ error: "Missing fields" });
     
     const newUser = {
       id: Date.now().toString(),
       username,
-      password,
+      passwordHash: hashPassword(String(password)),
       role: role || 'operator',
       lastLogin: '-'
     };
     users.push(newUser);
     logAction(actor, 'Create User', `Created new user: ${username} with role ${role}`, 'user_mgmt');
-    res.json({ success: true, user: newUser });
+    const { passwordHash, ...safeUser } = newUser;
+    res.json({ success: true, user: safeUser });
   });
 
   app.patch("/api/users/:id", checkRole(['admin']), (req, res) => {
     const { role } = req.body;
-    const actor = req.headers["x-user-name"] as string || "unknown";
+    const actor = actorName(req);
     const user = users.find(u => u.id === req.params.id);
     if (!user) return res.status(404).json({ error: "User not found" });
     
@@ -2065,17 +2611,20 @@ async function startServer() {
 
   app.post("/api/users/:id/password", checkRole(['admin']), (req, res) => {
     const { password } = req.body;
-    const actor = req.headers["x-user-name"] as string || "unknown";
+    const actor = actorName(req);
     const user = users.find(u => u.id === req.params.id);
     if (!user) return res.status(404).json({ error: "User not found" });
     
-    if (password) user.password = password;
+    if (password) {
+      user.passwordHash = hashPassword(String(password));
+      delete user.password;
+    }
     logAction(actor, 'Reset Password', `Reset password for user: ${user.username}`, 'user_mgmt');
     res.json({ success: true, message: "Password updated successfully" });
   });
 
   app.delete("/api/users/:id", checkRole(['admin']), (req, res) => {
-    const actor = req.headers["x-user-name"] as string || "unknown";
+    const actor = actorName(req);
     const user = users.find(u => u.id === req.params.id);
     if (user) {
       logAction(actor, 'Delete User', `Deleted user: ${user.username}`, 'user_mgmt');
@@ -2130,7 +2679,7 @@ async function startServer() {
     const { subnets, protocol, city, zone, branch } = req.body as {
       subnets?: string; protocol?: string; city?: string; zone?: string; branch?: string;
     };
-    const actor = (req.headers["x-user-name"] as string) || "unknown";
+    const actor = actorName(req);
     if (!subnets || typeof subnets !== "string") {
       return res.status(400).json({ error: "Укажите подсети, например 192.168.1.0/24" });
     }
@@ -2262,20 +2811,20 @@ async function startServer() {
         } as DiscoveryWatchProfile;
       })
       .filter(Boolean) as DiscoveryWatchProfile[];
-    const actor = (req.headers["x-user-name"] as string) || "unknown";
+    const actor = actorName(req);
     logAction(actor, "Discovery Watch Update", `Profiles saved: ${discoveryWatchProfiles.length}`, "inventory");
     res.json({ success: true, profiles: discoveryWatchProfiles });
   });
 
   app.post("/api/discovery/watch/run", checkRole(["admin", "operator"]), async (req, res) => {
-    const actor = (req.headers["x-user-name"] as string) || "unknown";
+    const actor = actorName(req);
     const profileIds = Array.isArray(req.body?.profileIds) ? req.body.profileIds.map((x: unknown) => String(x)) : undefined;
     const out = await runWatchProfiles(actor, "manual", profileIds);
     if (!out.started) return res.status(409).json({ success: false, error: out.reason });
     return res.json({ success: true, runs: out.runs, profiles: discoveryWatchProfiles });
   });
 
-  app.get("/api/topology/links", (_req, res) => {
+  app.get("/api/topology/links", checkRole(["admin", "operator", "viewer"]), (_req, res) => {
     topologyLinks = topologyLinks.map((l) => ensureTopologyLinkId(l));
     res.json({ links: topologyLinks, layout: topologyLayout });
   });
@@ -2361,7 +2910,7 @@ async function startServer() {
         topologyLinks = out;
       }
       rebuildTopologyFromInventory();
-      const actor = (req.headers["x-user-name"] as string) || "unknown";
+      const actor = actorName(req);
       logAction(
         actor,
         "Rebuild Topology",
@@ -2379,7 +2928,7 @@ async function startServer() {
     try {
       const branch = String(req.body?.branch || "").trim();
       const out = await classifyInventorySubcategoriesBySnmp(branch || undefined);
-      const actor = (req.headers["x-user-name"] as string) || "unknown";
+      const actor = actorName(req);
       logAction(
         actor,
         "Classify Subcategories",
@@ -2418,7 +2967,7 @@ async function startServer() {
       String(profile.branch || "").trim() === from ? { ...profile, branch: to } : profile
     );
 
-    const actor = (req.headers["x-user-name"] as string) || "unknown";
+    const actor = actorName(req);
     logAction(actor, "Rename Branch", `${from} -> ${to}, affected: ${renamed}`, "inventory");
     return res.json({ success: true, renamed, from, to, branches: inventoryMeta.branches });
   });
@@ -2595,7 +3144,7 @@ async function startServer() {
   // API: SNMP Configuration
   app.post("/api/config/snmp", checkRole(['admin']), (req, res) => {
     const { community, version, communities, timeoutMs, retries, port } = req.body;
-    const actor = req.headers["x-user-name"] as string || "unknown";
+    const actor = actorName(req);
     if (typeof community === "string" && community.trim()) snmpConfig.community = community.trim();
     if (Array.isArray(communities)) {
       snmpConfig.communities = communities.map((v) => String(v).trim()).filter(Boolean);
@@ -2642,7 +3191,7 @@ async function startServer() {
       expiresAt: Date.now() + ttlHours * 60 * 60 * 1000,
     };
     logAction(
-      (req.headers["x-user-name"] as string) || "unknown",
+      actorName(req),
       "SSH Readonly Profile Set",
       `TTL ${ttlHours}h, metrics fallback: ${sshReadonlyProfile.allowMetricsFallback ? "on" : "off"}`,
       "config"
@@ -2653,16 +3202,34 @@ async function startServer() {
   // API: Trap Receiver Configuration
   app.post("/api/config/trap-receiver", checkRole(['admin']), (req, res) => {
     const { ip, port } = req.body;
-    const actor = req.headers["x-user-name"] as string || "unknown";
+    const actor = actorName(req);
     logAction(actor, 'Trap Receiver Update', `Updated trap receiver to ${ip}:${port}`, 'config');
     res.json({ success: true, message: "Trap receiver configuration saved." });
   });
 
   // Socket.io for Terminal (SSH)
   io.on("connection", (socket) => {
+    const socketCookieHeader = socket.handshake.headers.cookie || "";
+    const authenticatedUser = readSessionFromCookieHeader(socketCookieHeader).user;
+    if (!authenticatedUser) {
+      socket.emit("ssh:status", { sessionId: "auth", status: "unauthorized" });
+      socket.disconnect(true);
+      return;
+    }
+    const requireSocketUser = (sessionId = "auth") => {
+      const user = readSessionFromCookieHeader(socketCookieHeader).user;
+      if (!user) {
+        socket.emit("ssh:data", { sessionId, data: "\r\n*** Authentication required for SSH proxy. ***\r\n" });
+        socket.disconnect(true);
+        return null;
+      }
+      return user;
+    };
     const sessions = new Map<string, { client: Client, stream?: any }>();
 
     socket.on("ssh:connect", ({ sessionId, host, username, password, port }) => {
+      const socketUser = requireSocketUser(sessionId);
+      if (!socketUser) return;
       // Clean up existing session if it exists for this ID
       if (sessions.has(sessionId)) {
         sessions.get(sessionId)?.client.end();
@@ -2722,9 +3289,11 @@ async function startServer() {
           keepaliveCountMax: 6,
           ...legacySshConnectOptions(),
         });
+      logAction(socketUser.username, "SSH Connect", `Opened SSH proxy to ${host}:${sshPort} as ${username}`, "system");
     });
 
     socket.on("ssh:input", ({ sessionId, input }) => {
+      if (!requireSocketUser(sessionId)) return;
       const session = sessions.get(sessionId);
       if (session && session.stream) {
         session.stream.write(input);
@@ -2732,6 +3301,7 @@ async function startServer() {
     });
 
     socket.on("ssh:disconnect", ({ sessionId }) => {
+      if (!requireSocketUser(sessionId)) return;
       const session = sessions.get(sessionId);
       if (session) {
         session.client.end();

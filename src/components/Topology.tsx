@@ -676,7 +676,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
               type="button"
               onClick={() => setScale((s) => Math.max(0.35, s - 0.1))}
               className="flex items-center gap-1 px-2 py-1.5 bg-[#2c2e33] text-[#c1c2c5] hover:text-white rounded text-[10px] font-bold uppercase border border-[#373a40]"
-              title="Zoom out"
+              title={t('topologyZoomOut')}
             >
               <ZoomOut size={12} />
             </button>
@@ -684,7 +684,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
               type="button"
               onClick={() => setScale((s) => Math.min(1.8, s + 0.1))}
               className="flex items-center gap-1 px-2 py-1.5 bg-[#2c2e33] text-[#c1c2c5] hover:text-white rounded text-[10px] font-bold uppercase border border-[#373a40]"
-              title="Zoom in"
+              title={t('topologyZoomIn')}
             >
               <ZoomIn size={12} />
             </button>
@@ -695,7 +695,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                 setStagePos({ x: 20, y: 20 });
               }}
               className="flex items-center gap-1 px-2 py-1.5 bg-[#2c2e33] text-[#c1c2c5] hover:text-white rounded text-[10px] font-bold uppercase border border-[#373a40]"
-              title="Reset view"
+              title={t('topologyResetView')}
             >
               <RotateCcw size={12} />
             </button>
@@ -703,16 +703,16 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:flex xl:items-center gap-2 text-xs w-full xl:w-auto">
           <select value={manualLink.source} onChange={(e) => setManualLink({ ...manualLink, source: e.target.value })} className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-white min-w-0">
-            <option value="">Source</option>
+            <option value="">{t('topologySource')}</option>
             {regionSwitches.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
-          <input value={manualLink.portA} onChange={(e) => setManualLink({ ...manualLink, portA: e.target.value })} placeholder="Port A" className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-white w-full sm:w-20" />
+          <input value={manualLink.portA} onChange={(e) => setManualLink({ ...manualLink, portA: e.target.value })} placeholder={t('topologyPortA')} className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-white w-full sm:w-20" />
           <select value={manualLink.target} onChange={(e) => setManualLink({ ...manualLink, target: e.target.value })} className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-white min-w-0">
-            <option value="">Target</option>
+            <option value="">{t('topologyTarget')}</option>
             {regionSwitches.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
-          <input value={manualLink.portB} onChange={(e) => setManualLink({ ...manualLink, portB: e.target.value })} placeholder="Port B" className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-white w-full sm:w-20" />
-          <button onClick={handleAddLink} className="px-3 py-1 bg-[#228be6] text-white rounded">Link</button>
+          <input value={manualLink.portB} onChange={(e) => setManualLink({ ...manualLink, portB: e.target.value })} placeholder={t('topologyPortB')} className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-white w-full sm:w-20" />
+          <button onClick={handleAddLink} className="px-3 py-1 bg-[#228be6] text-white rounded">{t('topologyLinkBtn')}</button>
         </div>
       </header>
       <div className="px-3 md:px-4 py-2 border-b border-[#373a40] bg-[#1a1b1e] flex flex-col xl:flex-row xl:items-center xl:justify-between gap-2">
@@ -747,25 +747,25 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           <input
             value={newRegion}
             onChange={(e) => setNewRegion(e.target.value)}
-            placeholder="Add region"
+            placeholder={t('addRegion')}
             className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-xs text-white"
           />
-          <button onClick={handleAddRegion} className="px-3 py-1 bg-[#40c057] text-white rounded text-[10px] font-bold uppercase">Add</button>
+          <button onClick={handleAddRegion} className="px-3 py-1 bg-[#40c057] text-white rounded text-[10px] font-bold uppercase">{t('add')}</button>
           <select
             value={regionEditor.from || selectedRegion}
             onChange={(e) => setRegionEditor((prev) => ({ ...prev, from: e.target.value }))}
             className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-xs text-white"
           >
-            <option value="">Rename tab</option>
+            <option value="">{t('renameTab')}</option>
             {regions.map((r) => <option key={`rename-${r}`} value={r}>{r}</option>)}
           </select>
           <input
             value={regionEditor.to}
             onChange={(e) => setRegionEditor((prev) => ({ ...prev, to: e.target.value }))}
-            placeholder="New tab name"
+            placeholder={t('newTabName')}
             className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-xs text-white"
           />
-          <button onClick={handleRenameRegion} className="px-3 py-1 bg-[#f08c00] text-white rounded text-[10px] font-bold uppercase">Rename</button>
+          <button onClick={handleRenameRegion} className="px-3 py-1 bg-[#f08c00] text-white rounded text-[10px] font-bold uppercase">{t('rename')}</button>
         </div>
       </div>
 
@@ -961,7 +961,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           {t('topologyCanvasHint')}
         </div>
         <div className="absolute top-3 right-3 md:top-4 md:right-4 p-2 md:p-3 bg-[#25262b] border border-[#373a40] rounded text-[10px] text-[#909296] z-10 w-[calc(100%-1.5rem)] max-w-xs max-h-[45vh] overflow-auto">
-          <div className="font-bold mb-2 text-white">Manual links</div>
+          <div className="font-bold mb-2 text-white">{t('topologyManualLinks')}</div>
           <div className="space-y-1 max-h-40 overflow-auto">
             {links.map((l, i) => (
               <div key={`${l.id || `${l.source}-${l.target}-${i}`}`} className="flex items-center justify-between gap-2">
@@ -972,7 +972,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                     return (
                       <span
                         className="cursor-text"
-                        title="Click to rename"
+                        title={t('clickToRename')}
                         onClick={() => {
                           if (!key) return;
                           setEditingLinkId(key);
@@ -1002,14 +1002,14 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                           handleRenameLink(l, editingLinkValue);
                           setEditingLinkId(null);
                         }}
-                        title="Save"
+                        title={t('save')}
                       >
                         ok
                       </button>
                       <button
                         className="text-[#fa5252] px-1"
                         onClick={() => setEditingLinkId(null)}
-                        title="Cancel"
+                        title={t('cancel')}
                       >
                         x
                       </button>
@@ -1034,7 +1034,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
               }}
             >
               <TerminalSquare size={14} />
-              SSH connect
+              {t('sshConnect')}
             </button>
             <button
               className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[#c1c2c5] hover:bg-[#141517] hover:text-white rounded"
@@ -1044,7 +1044,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
               }}
             >
               <Globe size={14} />
-              Open web UI
+              {t('openWebUi')}
             </button>
           </div>
         )}

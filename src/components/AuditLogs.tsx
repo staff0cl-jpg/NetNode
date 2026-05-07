@@ -9,7 +9,7 @@ interface AuditLog {
   user: string;
   action: string;
   details: string;
-  category: 'auth' | 'inventory' | 'config' | 'user_mgmt' | 'system';
+  category: 'auth' | 'inventory' | 'config' | 'user_mgmt' | 'system' | 'automation';
 }
 
 const CategoryIcon = ({ category }: { category: AuditLog['category'] }) => {
@@ -19,6 +19,7 @@ const CategoryIcon = ({ category }: { category: AuditLog['category'] }) => {
     case 'config': return <Settings size={14} className="text-[#fab005]" />;
     case 'user_mgmt': return <User size={14} className="text-[#7950f2]" />;
     case 'system': return <Shield size={14} className="text-[#fa5252]" />;
+    case 'automation': return <Filter size={14} className="text-[#20c997]" />;
     default: return <History size={14} />;
   }
 };
@@ -68,40 +69,43 @@ const AuditLogs: React.FC<{ role?: string, username?: string }> = ({ role, usern
       case 'config': return t('auditCategoryConfig');
       case 'user_mgmt': return t('auditCategoryUserMgmt');
       case 'system': return t('auditCategorySystem');
+      case 'automation': return t('auditCategoryAutomation');
       default: return category;
     }
   };
 
   const localizeAction = (action: string) => {
-    if (language !== 'ru') return action;
     const map: Record<string, string> = {
-      'Start Discovery': 'Запуск автообнаружения',
-      'Discovery Complete': 'Автообнаружение завершено',
-      'Discovery Watch Scheduled Run': 'Плановый запуск профилей автообнаружения',
-      'Discovery Watch Scheduler Start': 'Планировщик автообнаружения запущен',
-      'Discovery Watch Manual Run': 'Ручной запуск профилей автообнаружения',
-      'System Config Update': 'Обновление системной конфигурации',
-      'LDAP Config Update': 'Обновление LDAP-конфигурации',
-      'LDAP Test': 'Проверка LDAP',
-      'Bulk Action': 'Массовое действие',
-      'Add Device': 'Добавление устройства',
-      'Update Device': 'Обновление устройства',
-      'Remove Device': 'Удаление устройства',
-      'Rename Branch': 'Переименование филиала',
-      'Login Success': 'Успешный вход',
-      'Login Failure': 'Ошибка входа',
-      'Logout': 'Выход из системы',
-      'Create User': 'Создание пользователя',
-      'Update User Role': 'Изменение роли пользователя',
-      'Reset Password': 'Сброс пароля',
-      'Delete User': 'Удаление пользователя',
-      'SNMP Config Update': 'Обновление SNMP-конфигурации',
-      'Trap Receiver Update': 'Обновление Trap Receiver',
-      'SSH Readonly Profile Set': 'Сохранение read-only SSH профиля',
-      'Topology Rebuild': 'Перестроение топологии',
-      'Topology Manual Link Add': 'Добавление ручной связи',
-      'Topology Manual Link Delete': 'Удаление ручной связи',
-      'Topology Link Rename': 'Переименование подписи связи',
+      'Start Discovery': t('auditActionStartDiscovery'),
+      'Discovery Complete': t('auditActionDiscoveryComplete'),
+      'Discovery Watch Scheduled Run': t('auditActionDiscoveryWatchScheduledRun'),
+      'Discovery Watch Scheduler Start': t('auditActionDiscoveryWatchSchedulerStart'),
+      'Discovery Watch Manual Run': t('auditActionDiscoveryWatchManualRun'),
+      'System Config Update': t('auditActionSystemConfigUpdate'),
+      'LDAP Config Update': t('auditActionLdapConfigUpdate'),
+      'LDAP Test': t('auditActionLdapTest'),
+      'Bulk Action': t('auditActionBulkAction'),
+      'Add Device': t('auditActionAddDevice'),
+      'Update Device': t('auditActionUpdateDevice'),
+      'Remove Device': t('auditActionRemoveDevice'),
+      'Rename Branch': t('auditActionRenameBranch'),
+      'Login Success': t('auditActionLoginSuccess'),
+      'Login Failure': t('auditActionLoginFailure'),
+      'Logout': t('auditActionLogout'),
+      'Create User': t('auditActionCreateUser'),
+      'Update User Role': t('auditActionUpdateUserRole'),
+      'Reset Password': t('auditActionResetPassword'),
+      'Delete User': t('auditActionDeleteUser'),
+      'SNMP Config Update': t('auditActionSnmpConfigUpdate'),
+      'Trap Receiver Update': t('auditActionTrapReceiverUpdate'),
+      'SSH Readonly Profile Set': t('auditActionSshReadonlyProfileSet'),
+      'Topology Rebuild': t('auditActionTopologyRebuild'),
+      'Topology Manual Link Add': t('auditActionTopologyManualLinkAdd'),
+      'Topology Manual Link Delete': t('auditActionTopologyManualLinkDelete'),
+      'Topology Link Rename': t('auditActionTopologyLinkRename'),
+      'AUTOMATION_PLAN': t('auditActionAutomationPlan'),
+      'AUTOMATION_APPLY': t('auditActionAutomationApply'),
+      'AUTOMATION_ROLLBACK': t('auditActionAutomationRollback'),
     };
     return map[action] || action;
   };
@@ -126,7 +130,10 @@ const AuditLogs: React.FC<{ role?: string, username?: string }> = ({ role, usern
       .replace('Deleted user:', 'Удален пользователь:')
       .replace('TTL', 'TTL')
       .replace('metrics fallback: on', 'fallback метрик: включен')
-      .replace('metrics fallback: off', 'fallback метрик: выключен');
+      .replace('metrics fallback: off', 'fallback метрик: выключен')
+      .replace('Dry-run prepared', 'Dry-run подготовил')
+      .replace('step(s)', 'шаг(ов)')
+      .replace('Cancel requested for', 'Запрошена отмена для');
   };
 
   return (
@@ -163,6 +170,7 @@ const AuditLogs: React.FC<{ role?: string, username?: string }> = ({ role, usern
             <option value="config">{t('auditCategoryConfig')}</option>
             <option value="user_mgmt">{t('auditCategoryUserMgmt')}</option>
             <option value="system">{t('auditCategorySystem')}</option>
+            <option value="automation">{t('auditCategoryAutomation')}</option>
           </select>
 
           <button 

@@ -61,11 +61,8 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
   const isOperator = role === 'admin' || role === 'operator';
   const [discoveryConfig, setDiscoveryConfig] = React.useState({
     subnets: '10.0.0.0/24, 192.168.1.0/24',
-    username: 'admin',
-    password: '',
     protocol: 'snmp',
     city: 'Ульяновск',
-    zone: 'Core',
     branch: 'ULN',
   });
   const [watchProfiles, setWatchProfiles] = React.useState<DiscoveryWatchProfile[]>([]);
@@ -81,6 +78,13 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
   } | null>(null);
   const [defaultLanguage, setDefaultLanguage] = React.useState('ru');
   const [siteLabel, setSiteLabel] = React.useState('UNSET');
+  const [automationDefaults, setAutomationDefaults] = React.useState({
+    batchSize: 10,
+    timeoutMs: 15000,
+    retry: 1,
+    concurrency: 10,
+    errorThreshold: 20,
+  });
   const [snmpConfig, setSnmpConfig] = React.useState({
     community: 'public',
     communities: 'public',
@@ -99,23 +103,15 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
     hasPassword: false,
     expiresAt: '',
   });
-  const [trapConfig, setTrapConfig] = React.useState({ ip: '10.10.50.10', port: '162' });
   const [inventoryMetaEditor, setInventoryMetaEditor] = React.useState({
     categories: '',
     subcategories: '',
     branches: '',
     cities: '',
-    zones: '',
     vendors: '',
     modelsJson: '{}'
   });
   const [snmpTemplates, setSnmpTemplates] = React.useState<SnmpTemplate[]>([]);
-  const [dashboardUi, setDashboardUi] = React.useState({
-    trunkThroughputTitle: '',
-    trunkLoadTitle: '',
-    trunkMonitorTitle: '',
-    showTrunkMonitor: true,
-  });
   const [templateEditor, setTemplateEditor] = React.useState({
     id: '',
     name: '',
@@ -145,12 +141,13 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         if (data.config && data.config.siteLabel) {
           setSiteLabel(data.config.siteLabel);
         }
-        if (data.config && data.config.dashboardUi) {
-          setDashboardUi({
-            trunkThroughputTitle: data.config.dashboardUi.trunkThroughputTitle || '',
-            trunkLoadTitle: data.config.dashboardUi.trunkLoadTitle || '',
-            trunkMonitorTitle: data.config.dashboardUi.trunkMonitorTitle || '',
-            showTrunkMonitor: data.config.dashboardUi.showTrunkMonitor !== false,
+        if (data.config && data.config.automationDefaults) {
+          setAutomationDefaults({
+            batchSize: Number(data.config.automationDefaults.batchSize || 10),
+            timeoutMs: Number(data.config.automationDefaults.timeoutMs || 15000),
+            retry: Number(data.config.automationDefaults.retry || 1),
+            concurrency: Number(data.config.automationDefaults.concurrency || 10),
+            errorThreshold: Number(data.config.automationDefaults.errorThreshold || 20),
           });
         }
         const snmpResp = await fetch('/api/config/snmp', {
@@ -216,7 +213,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             subcategories: (inv.subcategories || []).join(', '),
             branches: (inv.branches || []).join(', '),
             cities: (inv.cities || []).join(', '),
-            zones: (inv.zones || []).join(', '),
             vendors: (inv.vendors || []).join(', '),
             modelsJson: JSON.stringify(inv.models || {}, null, 2)
           });
@@ -331,7 +327,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
     }
   };
 
-  const saveSystemConfig = async (payload: { defaultLanguage?: string; siteLabel?: string; dashboardUi?: any }) => {
+  const saveSystemConfig = async (payload: { defaultLanguage?: string; siteLabel?: string; automationDefaults?: any }) => {
     try {
       await fetch('/api/config/system', {
         method: 'POST',
@@ -378,7 +374,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       subnets: String(discoveryConfig.subnets || '').trim(),
       protocol: 'snmp' as const,
       city: String(discoveryConfig.city || '').trim() || 'Ульяновск',
-      zone: String(discoveryConfig.zone || '').trim() || 'Core',
       branch: String(discoveryConfig.branch || '').trim() || 'ULN',
     };
     const parseResponseSafe = (raw: string) => {
@@ -570,24 +565,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
     }
   };
 
-  const handleSaveTrap = async () => {
-    try {
-      const response = await fetch('/api/config/trap-receiver', {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
-        },
-        body: JSON.stringify(trapConfig),
-      });
-      const data = await response.json();
-      alert(data.message);
-    } catch (error) {
-      alert('Failed to save Trap Receiver config.');
-    }
-  };
-
   const handleDeleteTemplate = async (id: string) => {
     if (!confirm(`Delete template ${id}?`)) return;
     try {
@@ -607,11 +584,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
     } catch {
       alert('Template delete failed');
     }
-  };
-
-  const handleSaveDashboardUi = async () => {
-    await saveSystemConfig({ dashboardUi });
-    alert('Dashboard UI saved');
   };
 
   const parseList = (src: string) =>
@@ -635,7 +607,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
           subcategories: parseList(inventoryMetaEditor.subcategories),
           branches: parseList(inventoryMetaEditor.branches),
           cities: parseList(inventoryMetaEditor.cities),
-          zones: parseList(inventoryMetaEditor.zones),
           vendors: parseList(inventoryMetaEditor.vendors),
           models
         }),
@@ -724,7 +695,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
           </div>
           <div className="p-4 md:p-6">
             <div className="max-w-xs space-y-2">
-              <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">Default Language (Default для всех)</label>
+            <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('defaultLanguageLabel')}</label>
               <select 
                 value={defaultLanguage}
                 onChange={(e) => {
@@ -733,26 +704,85 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                 }}
                 className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none appearance-none cursor-pointer"
               >
-                <option value="ru">Русский (Russian)</option>
-                <option value="en">English</option>
+                <option value="ru">{t('russianLanguage')}</option>
+                <option value="en">{t('englishLanguage')}</option>
               </select>
-              <p className="text-[9px] text-[#5c5f66] mt-1 font-medium">Этот параметр определяет язык системы для всех новых сессий и пользователей без локальных настроек.</p>
+              <p className="text-[9px] text-[#5c5f66] mt-1 font-medium">{t('defaultLanguageHelp')}</p>
             </div>
             <div className="max-w-xl space-y-2 mt-6 min-w-0">
-              <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">DC Label (верхняя панель)</label>
+              <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('dcLabel')}</label>
               <div className="flex flex-col sm:flex-row gap-3">
                 <input
                   value={siteLabel}
                   onChange={(e) => setSiteLabel(e.target.value)}
                   className="flex-1 min-w-0 bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none"
-                  placeholder="DC-EAST :: MOSCOW"
+                  placeholder={t('dcLabelPlaceholder')}
                 />
                 <button
                   type="button"
                   onClick={() => saveSystemConfig({ siteLabel })}
                   className="px-4 py-2 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-[10px] font-bold uppercase tracking-widest transition-all"
                 >
-                  Save
+                  {t('save')}
+                </button>
+              </div>
+            </div>
+            <div className="max-w-3xl space-y-3 mt-6 min-w-0">
+              <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('automationDefaultsTitle')}</label>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={automationDefaults.batchSize}
+                  onChange={(e) => setAutomationDefaults({ ...automationDefaults, batchSize: Number(e.target.value) || 1 })}
+                  className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                  placeholder={t('automationBatchSize')}
+                />
+                <input
+                  type="number"
+                  min={1000}
+                  max={60000}
+                  value={automationDefaults.timeoutMs}
+                  onChange={(e) => setAutomationDefaults({ ...automationDefaults, timeoutMs: Number(e.target.value) || 1000 })}
+                  className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                  placeholder={t('automationTimeoutMs')}
+                />
+                <input
+                  type="number"
+                  min={0}
+                  max={5}
+                  value={automationDefaults.retry}
+                  onChange={(e) => setAutomationDefaults({ ...automationDefaults, retry: Number(e.target.value) || 0 })}
+                  className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                  placeholder={t('automationRetry')}
+                />
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={automationDefaults.concurrency}
+                  onChange={(e) => setAutomationDefaults({ ...automationDefaults, concurrency: Number(e.target.value) || 1 })}
+                  className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                  placeholder={t('automationConcurrency')}
+                />
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3 items-end">
+                <input
+                  type="number"
+                  min={1}
+                  max={10000}
+                  value={automationDefaults.errorThreshold}
+                  onChange={(e) => setAutomationDefaults({ ...automationDefaults, errorThreshold: Number(e.target.value) || 1 })}
+                  className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                  placeholder={t('automationErrorThreshold')}
+                />
+                <button
+                  type="button"
+                  onClick={() => saveSystemConfig({ automationDefaults })}
+                  className="px-4 py-2 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-[10px] font-bold uppercase tracking-widest transition-all"
+                >
+                  {t('saveChanges')}
                 </button>
               </div>
             </div>
@@ -762,25 +792,25 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         <div className={cn("bg-[#25262b] border border-[#373a40] rounded overflow-hidden", !isOperator && "opacity-50 pointer-events-none")}>
           <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
             <Shield className="text-[#40c057]" size={18} />
-            <h3 className="text-sm font-bold text-white uppercase tracking-widest">SSH Readonly Fallback</h3>
+            <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('sshTerminalFallbackTitle')}</h3>
           </div>
           <div className="p-4 md:p-6 space-y-4">
             <p className="text-[10px] text-[#5c5f66]">
-              Uses read-only show/display commands only. Credentials are kept in backend memory with TTL, not written to files.
+              {t('sshTerminalFallbackDesc')}
             </p>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <input
                 className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
                 value={sshReadonlyConfig.username}
                 onChange={(e) => setSshReadonlyConfig({ ...sshReadonlyConfig, username: e.target.value })}
-                placeholder="SSH username"
+                placeholder={t('username')}
               />
               <input
                 type="password"
                 className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
                 value={sshReadonlyConfig.password}
                 onChange={(e) => setSshReadonlyConfig({ ...sshReadonlyConfig, password: e.target.value })}
-                placeholder={sshReadonlyConfig.hasPassword ? 'Enter new password to rotate' : 'SSH password'}
+                placeholder={sshReadonlyConfig.hasPassword ? t('enterNewPasswordToRotate') : t('sshSessionPassword')}
               />
               <input
                 type="number"
@@ -789,7 +819,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                 className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
                 value={sshReadonlyConfig.port}
                 onChange={(e) => setSshReadonlyConfig({ ...sshReadonlyConfig, port: Number(e.target.value) || 22 })}
-                placeholder="SSH port"
+                placeholder={t('sshPort')}
               />
               <input
                 type="number"
@@ -798,7 +828,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                 className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
                 value={sshReadonlyConfig.ttlHours}
                 onChange={(e) => setSshReadonlyConfig({ ...sshReadonlyConfig, ttlHours: Math.max(1, Math.min(24, Number(e.target.value) || 3)) })}
-                placeholder="TTL hours"
+                placeholder={t('ttlHours')}
               />
             </div>
             <label className="flex items-center gap-2 text-xs text-[#c1c2c5]">
@@ -807,11 +837,11 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                 checked={sshReadonlyConfig.allowMetricsFallback}
                 onChange={(e) => setSshReadonlyConfig({ ...sshReadonlyConfig, allowMetricsFallback: e.target.checked })}
               />
-              Allow fallback for trunk metrics when SNMP data is unavailable.
+              {t('allowFallbackMetrics')}
             </label>
             <div className="flex items-center justify-between">
               <span className="text-[10px] text-[#909296]">
-                Status: {sshReadonlyConfig.enabled ? `active until ${sshReadonlyConfig.expiresAt || '-'}` : 'disabled'}
+                {t('status')}: {sshReadonlyConfig.enabled ? `${t('activeUntil')} ${sshReadonlyConfig.expiresAt || '-'}` : t('disabled')}
               </span>
               <button
                 type="button"
@@ -832,7 +862,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
               <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('ldapAuthSection')}</h3>
               <p className="text-[10px] text-[#5c5f66] mt-1 max-w-2xl">{t('ldapAuthSectionDesc')}</p>
             </div>
-            {!isAdmin && <span className="text-[10px] bg-red-500/20 text-red-500 px-2 py-0.5 rounded font-bold uppercase tracking-widest ml-auto">Admin Only</span>}
+            {!isAdmin && <span className="text-[10px] bg-red-500/20 text-red-500 px-2 py-0.5 rounded font-bold uppercase tracking-widest ml-auto">{t('adminOnly')}</span>}
           </div>
           <div className="p-4 md:p-6 space-y-10">
             <div className="flex flex-wrap gap-4 items-end pb-4 border-b border-[#373a40]">
@@ -981,7 +1011,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
           <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
             <Database className="text-[#228be6]" size={18} />
             <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('autoDiscovery')}</h3>
-            {!isOperator && <span className="text-[10px] bg-red-500/20 text-red-500 px-2 py-0.5 rounded font-bold uppercase tracking-widest ml-auto">Privileged Action Required</span>}
+            {!isOperator && <span className="text-[10px] bg-red-500/20 text-red-500 px-2 py-0.5 rounded font-bold uppercase tracking-widest ml-auto">{t('privilegedActionRequired')}</span>}
           </div>
           <div className="p-4 md:p-6 space-y-6">
             <p className="text-[10px] text-[#5c5f66] leading-relaxed">{t('discoveryScanExplain')}</p>
@@ -1000,37 +1030,37 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             <p className="text-[10px] text-[#5c5f66]">{t('discoveryProbeNote')}</p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6">
               <div className="space-y-2">
-                <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">Default City</label>
+                <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('defaultCity')}</label>
                 <input
                   className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors"
                   value={discoveryConfig.city}
                   onChange={(e) => setDiscoveryConfig({ ...discoveryConfig, city: e.target.value })}
-                  placeholder="Ульяновск"
+                  placeholder={t('defaultCityPlaceholder')}
                 />
               </div>
               <div className="space-y-2">
-                <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">Default Branch</label>
+                <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('defaultBranch')}</label>
                 <input
                   className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors"
                   value={discoveryConfig.branch}
                   onChange={(e) => setDiscoveryConfig({ ...discoveryConfig, branch: e.target.value })}
-                  placeholder="ULN"
+                  placeholder={t('defaultBranchPlaceholder')}
                 />
               </div>
             </div>
             <div className="space-y-2">
-              <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">Discovery Protocol</label>
+              <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('discoveryProtocol')}</label>
               <select
                 className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none"
                 value={discoveryConfig.protocol}
                 onChange={(e) => setDiscoveryConfig({ ...discoveryConfig, protocol: e.target.value as 'snmp' })}
               >
-                <option value="snmp">SNMP only</option>
+                <option value="snmp">{t('snmpOnly')}</option>
               </select>
             </div>
 
             <div className="pt-4 border-t border-[#373a40] flex justify-between items-center">
-              <p className="text-[10px] text-[#5c5f66] uppercase">{t('sshCredentials')}</p>
+              <p className="text-[10px] text-[#5c5f66] uppercase">{t('discoverySnmpOnlyCredentialsNote')}</p>
               <button 
                 onClick={handleStartDiscovery}
                 className="px-6 py-2 bg-[#40c057] hover:bg-[#37b24d] text-white rounded text-[10px] font-bold uppercase tracking-widest transition-all shadow-lg"
@@ -1056,7 +1086,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                 </div>
               </div>
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-                <p className="text-[10px] text-[#5c5f66] uppercase">Saved Watch Profiles</p>
+                <p className="text-[10px] text-[#5c5f66] uppercase">{t('savedWatchProfiles')}</p>
                 <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
@@ -1079,7 +1109,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                     }
                     className="px-3 py-1.5 bg-[#2c2e33] border border-[#373a40] text-[#c1c2c5] hover:text-white rounded text-[10px] font-bold uppercase"
                   >
-                    Add Profile
+                    {t('addProfile')}
                   </button>
                   <button
                     type="button"
@@ -1109,14 +1139,14 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                     onClick={() => runWatchNow()}
                     className="px-3 py-1.5 bg-[#228be6]/20 border border-[#228be6]/40 text-[#228be6] hover:bg-[#228be6]/30 rounded text-[10px] font-bold uppercase"
                   >
-                    Run all now
+                    {t('runAllNow')}
                   </button>
                   <button
                     type="button"
                     onClick={saveWatchProfiles}
                     className="px-3 py-1.5 bg-[#40c057] hover:bg-[#37b24d] text-white rounded text-[10px] font-bold uppercase"
                   >
-                    Save profiles
+                    {t('saveProfiles')}
                   </button>
                 </div>
               </div>
@@ -1133,11 +1163,11 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                     <input type="number" min={1} className="sm:col-span-1 bg-[#25262b] border border-[#373a40] p-2 rounded text-xs text-white" value={p.intervalHours} onChange={(e) => setWatchProfiles((prev) => prev.map((x, idx) => idx === i ? { ...x, intervalHours: Math.max(1, Number(e.target.value) || 1) } : x))} />
                     <label className="sm:col-span-1 flex items-center sm:justify-center"><input type="checkbox" checked={p.enabled} onChange={(e) => setWatchProfiles((prev) => prev.map((x, idx) => idx === i ? { ...x, enabled: e.target.checked } : x))} /></label>
                     <div className="sm:col-span-1 flex gap-2 sm:justify-end">
-                      <button type="button" onClick={() => runWatchNow(p.id)} className="text-[#228be6] text-xs">Run</button>
-                      <button type="button" onClick={() => setWatchProfiles((prev) => prev.filter((_, idx) => idx !== i))} className="text-red-400 text-xs">Del</button>
+                      <button type="button" onClick={() => runWatchNow(p.id)} className="text-[#228be6] text-xs">{t('run')}</button>
+                      <button type="button" onClick={() => setWatchProfiles((prev) => prev.filter((_, idx) => idx !== i))} className="text-red-400 text-xs">{t('deleteShort')}</button>
                     </div>
                     <div className="sm:col-span-12 text-[10px] text-[#5c5f66] break-words">
-                      Last run: {p.lastRunAt || '-'} | Last result: {p.lastResult?.success === false ? p.lastResult.error : (p.lastResult ? `added ${p.lastResult.added}, scanned ${p.lastResult.scanned}` : '-')}
+                      {t('lastRun')}: {p.lastRunAt || '-'} | {t('lastResult')}: {p.lastResult?.success === false ? p.lastResult.error : (p.lastResult ? `${t('addedCount')} ${p.lastResult.added}, ${t('scannedCount')} ${p.lastResult.scanned}` : '-')}
                     </div>
                   </div>
                 ))}
@@ -1158,7 +1188,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
               <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.subcategories} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, subcategories: e.target.value })} placeholder={t('subcategoriesCommaSeparated')} />
               <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.branches} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, branches: e.target.value })} placeholder={t('branchesCommaSeparated')} />
               <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.cities} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, cities: e.target.value })} placeholder={t('citiesCommaSeparated')} />
-              <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.zones} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, zones: e.target.value })} placeholder={t('zonesCommaSeparated')} />
               <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={inventoryMetaEditor.vendors} onChange={(e) => setInventoryMetaEditor({ ...inventoryMetaEditor, vendors: e.target.value })} placeholder={t('vendorsCommaSeparated')} />
               <textarea
                 className="md:col-span-2 min-h-[140px] bg-[#141517] border border-[#373a40] p-2.5 rounded text-xs text-white font-mono"
@@ -1180,7 +1209,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
           <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
             <Shield className="text-[#fab005]" size={18} />
             <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('snmpConfig')}</h3>
-            {!isAdmin && <span className="text-[10px] bg-red-500/20 text-red-500 px-2 py-0.5 rounded font-bold uppercase tracking-widest ml-auto">Admin Only</span>}
+            {!isAdmin && <span className="text-[10px] bg-red-500/20 text-red-500 px-2 py-0.5 rounded font-bold uppercase tracking-widest ml-auto">{t('adminOnly')}</span>}
           </div>
           <div className="p-4 md:p-6 space-y-6">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6">
@@ -1202,7 +1231,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                 >
                   <option>SNMP v2c</option>
                   <option>SNMP v1</option>
-                  <option>SNMP v3 (AuthPriv)</option>
                 </select>
               </div>
               <div className="space-y-2 col-span-2">
@@ -1251,45 +1279,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             <div className="flex justify-end">
                <button 
                 onClick={handleSaveSNMP}
-                className="px-6 py-2 bg-[#fab005] hover:bg-[#f08c00] text-black rounded text-[10px] font-bold uppercase tracking-widest transition-all shadow-lg"
-              >
-                {t('saveChanges')}
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* SNMP Trap Receiver Section */}
-        <div className={cn("bg-[#25262b] border border-[#373a40] rounded overflow-hidden", !isAdmin && "opacity-50 pointer-events-none")}>
-          <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
-            <Shield className="text-[#fab005]" size={18} />
-            <h3 className="text-sm font-bold text-white uppercase tracking-widest">SNMP Trap Receiver</h3>
-            {!isAdmin && <span className="text-[10px] bg-red-500/20 text-red-500 px-2 py-0.5 rounded font-bold uppercase tracking-widest ml-auto">Admin Only</span>}
-          </div>
-          <div className="p-4 md:p-6 space-y-6">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6">
-              <div className="space-y-2">
-                <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('trapReceiverIp')}</label>
-                <input 
-                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" 
-                  value={trapConfig.ip}
-                  onChange={(e) => setTrapConfig({...trapConfig, ip: e.target.value})}
-                  placeholder="10.0.0.10" 
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('trapReceiverPort')}</label>
-                <input 
-                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors" 
-                  value={trapConfig.port}
-                  onChange={(e) => setTrapConfig({...trapConfig, port: e.target.value})}
-                  placeholder="162" 
-                />
-              </div>
-            </div>
-            <div className="flex justify-end">
-               <button 
-                onClick={handleSaveTrap}
                 className="px-6 py-2 bg-[#fab005] hover:bg-[#f08c00] text-black rounded text-[10px] font-bold uppercase tracking-widest transition-all shadow-lg"
               >
                 {t('saveChanges')}
@@ -1379,54 +1368,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                   </div>
                 ))}
               </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Dashboard customization */}
-        <div className={cn("bg-[#25262b] border border-[#373a40] rounded overflow-hidden", !isAdmin && "opacity-50 pointer-events-none")}>
-          <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
-            <Database className="text-[#228be6]" size={18} />
-            <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('dashboardCustomization')}</h3>
-          </div>
-          <div className="p-6 space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <input
-                value={dashboardUi.trunkThroughputTitle}
-                onChange={(e) => setDashboardUi({ ...dashboardUi, trunkThroughputTitle: e.target.value })}
-                className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none"
-                placeholder={t('trunkThroughputTitle')}
-              />
-              <input
-                value={dashboardUi.trunkLoadTitle}
-                onChange={(e) => setDashboardUi({ ...dashboardUi, trunkLoadTitle: e.target.value })}
-                className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none"
-                placeholder={t('trunkLoadTitle')}
-              />
-              <input
-                value={dashboardUi.trunkMonitorTitle}
-                onChange={(e) => setDashboardUi({ ...dashboardUi, trunkMonitorTitle: e.target.value })}
-                className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none md:col-span-2"
-                placeholder={t('trunkMonitorTitle')}
-              />
-              <label className="flex items-center gap-2 text-xs text-[#c1c2c5] md:col-span-2">
-                <input
-                  type="checkbox"
-                  checked={dashboardUi.showTrunkMonitor}
-                  onChange={(e) => setDashboardUi({ ...dashboardUi, showTrunkMonitor: e.target.checked })}
-                  className="w-4 h-4 rounded border-[#373a40] bg-[#141517] text-[#228be6]"
-                />
-                {t('showTrunkMonitor')}
-              </label>
-            </div>
-            <div className="flex justify-end">
-              <button
-                type="button"
-                onClick={handleSaveDashboardUi}
-                className="px-6 py-2 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-[10px] font-bold uppercase tracking-widest transition-all shadow-lg"
-              >
-                {t('saveChanges')}
-              </button>
             </div>
           </div>
         </div>

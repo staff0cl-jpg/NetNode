@@ -225,7 +225,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
   };
 
   const handleDelete = async (id: string) => {
-    if (confirm('Are you sure you want to remove this node from inventory?')) {
+    if (confirm(t('confirmRemoveNode'))) {
       try {
         await fetch(`/api/inventory/${id}`, {
           method: 'DELETE',
@@ -235,7 +235,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
           }
         });
       } catch (error) {
-        alert('Error deleting device');
+        alert(t('errorDeletingDevice'));
       }
     }
   };
@@ -494,10 +494,10 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
               onChange={(e) => setStatusFilter(e.target.value)}
               className="w-full md:w-auto px-4 py-2 bg-[#141517] border border-[#373a40] rounded text-sm text-white focus:outline-none focus:border-[#228be6] appearance-none"
             >
-              <option value="all">All Status</option>
-              <option value="online">Online</option>
-              <option value="offline">Offline</option>
-              <option value="warning">Warning</option>
+      <option value="all">{t('allStatus')}</option>
+      <option value="online">{t('statusOnline')}</option>
+      <option value="offline">{t('statusOffline')}</option>
+      <option value="warning">{t('statusWarning')}</option>
             </select>
             <select
               value={subcategoryFilter}
@@ -517,12 +517,12 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
               selectedIds.length === 0 && "opacity-0 pointer-events-none"
             )}
           >
-            <span className="text-[10px] font-bold text-[#228be6] uppercase mr-2">{selectedIds.length} Selected</span>
+            <span className="text-[10px] font-bold text-[#228be6] uppercase mr-2">{selectedIds.length} {t('selectedCount')}</span>
             <button 
               onClick={() => handleBulkAction('reboot')}
               disabled={isBulkProcessing || !isOperator}
               className="p-1.5 hover:bg-[#141517] rounded text-[#fab005] transition-colors"
-              title="Bulk Reboot"
+              title={t('bulkReboot')}
             >
               <RefreshCw size={16} className={cn(isBulkProcessing && "animate-spin")} />
             </button>
@@ -535,7 +535,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                 }}
                 disabled={isBulkProcessing}
                 className="p-1.5 hover:bg-[#141517] rounded text-[#fa5252] transition-colors"
-                title="Bulk Delete"
+                title={t('bulkDelete')}
               >
                 <Trash2 size={16} />
               </button>
@@ -645,14 +645,14 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                     <button 
                       onClick={() => onOpenSSH?.(sw)}
                       className="hover:text-[#228be6] transition-colors"
-                      title="Open SSH Session"
+                      title={t('openSshSession')}
                     >
                       <TerminalIcon size={14} />
                     </button>
                     <button
                       onClick={() => window.open(`http://${sw.ip}`, '_blank', 'noopener,noreferrer')}
                       className="hover:text-[#40c057] transition-colors"
-                      title="Open device web UI"
+                      title={t('openDeviceWebUi')}
                     >
                       <Globe size={14} />
                     </button>
@@ -668,7 +668,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                         <button 
                           onClick={() => handleDelete(sw.id)}
                           className="hover:text-red-500 transition-colors"
-                          title="Delete Node"
+                          title={t('deleteNode')}
                         >
                           <Trash2 size={14} />
                         </button>
@@ -678,7 +678,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                       <button
                         onClick={() => setOpenRowMenuId((prev) => (prev === sw.id ? null : sw.id))}
                         className="hover:text-white transition-colors"
-                        title="More actions"
+                        title={t('moreActions')}
                       >
                         <MoreVertical size={14} />
                       </button>
@@ -695,7 +695,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                               setOpenRowMenuId(null);
                             }}
                           >
-                            Copy IP
+                            {t('copyIp')}
                           </button>
                           <button
                             className="w-full px-3 py-2 text-xs text-[#c1c2c5] hover:bg-[#25262b] hover:text-white"
@@ -704,7 +704,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                               setOpenRowMenuId(null);
                             }}
                           >
-                            Open HTTPS UI
+                            {t('openHttpsUi')}
                           </button>
                           <button
                             className="w-full px-3 py-2 text-xs text-[#c1c2c5] hover:bg-[#25262b] hover:text-white"
@@ -713,7 +713,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                               setOpenRowMenuId(null);
                             }}
                           >
-                            Device info
+                            {t('deviceInfo')}
                           </button>
                         </div>
                       )}
@@ -746,7 +746,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                 <label className="text-[10px] font-bold text-[#909296] uppercase">{t('deviceName')}</label>
                 <input 
                   className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:outline-none focus:border-[#228be6]"
-                  placeholder="e.g. CORE-SW-02"
+                  placeholder={t('deviceNameExample')}
                   value={newSwitch.name || ''}
                   onChange={e => setNewSwitch({...newSwitch, name: e.target.value})}
                 />
@@ -761,7 +761,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                 />
               </div>
               <div className="space-y-2">
-                <label className="text-[10px] font-bold text-[#909296] uppercase">Vendor</label>
+                <label className="text-[10px] font-bold text-[#909296] uppercase">{t('vendor')}</label>
                 <select 
                   className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:outline-none focus:border-[#228be6]"
                   value={newSwitch.vendor}
@@ -771,11 +771,11 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                 </select>
               </div>
               <div className="space-y-2">
-                <label className="text-[10px] font-bold text-[#909296] uppercase">Model</label>
+                <label className="text-[10px] font-bold text-[#909296] uppercase">{t('model')}</label>
                 <input 
                   list="models"
                   className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:outline-none focus:border-[#228be6]"
-                  placeholder="Select or enter"
+                  placeholder={t('selectOrEnter')}
                   value={newSwitch.model || ''}
                   onChange={e => setNewSwitch({...newSwitch, model: e.target.value})}
                 />
@@ -816,18 +816,18 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                 <p className="text-[10px] text-[#909296]">{t('manageBranchesInSettings')}</p>
               </div>
               <div className="space-y-2 sm:col-span-2">
-                <label className="text-[10px] font-bold text-[#909296] uppercase">SNMP Template</label>
+                <label className="text-[10px] font-bold text-[#909296] uppercase">{t('snmpTemplate')}</label>
                 <select
                   className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:outline-none focus:border-[#228be6]"
                   value={newSwitch.snmpTemplateId || ''}
                   onChange={e => setNewSwitch({ ...newSwitch, snmpTemplateId: e.target.value })}
                 >
-                  <option value="">Auto</option>
+                  <option value="">{t('auto')}</option>
                   {snmpTemplates.map((tpl) => <option key={tpl.id} value={tpl.id}>{tpl.name}</option>)}
                 </select>
               </div>
               <div className="space-y-2 sm:col-span-2">
-                <label className="text-[10px] font-bold text-[#909296] uppercase">Custom SNMP OIDs (one per line)</label>
+                <label className="text-[10px] font-bold text-[#909296] uppercase">{t('customSnmpOidsOnePerLine')}</label>
                 <textarea
                   className="w-full min-h-[90px] bg-[#141517] border border-[#373a40] p-2.5 rounded text-xs text-white focus:outline-none focus:border-[#228be6] font-mono"
                   value={customOidsText}

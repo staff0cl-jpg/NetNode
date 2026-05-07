@@ -1,5 +1,5 @@
 import React from 'react';
-import { LayoutDashboard, Database, Share2, Terminal as TerminalIcon, Settings, Network, Users, Languages, History, X } from 'lucide-react';
+import { LayoutDashboard, Database, Share2, Terminal as TerminalIcon, Settings, Network, Users, History, X, Wand2 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useTranslation } from '../lib/i18n';
 
@@ -21,6 +21,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, onLogout, us
     { id: 'inventory', label: t('inventory'), icon: Database },
     { id: 'topology', label: t('topology'), icon: Share2 },
     { id: 'terminal', label: t('terminal'), icon: TerminalIcon },
+    { id: 'automation', label: t('automation'), icon: Wand2 },
     { id: 'users', label: t('users'), icon: Users, adminOnly: true },
     { id: 'audit', label: t('auditLogs'), icon: History, adminOnly: true },
     { id: 'settings', label: t('settings'), icon: Settings },
@@ -45,7 +46,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, onLogout, us
           <button
             onClick={onClose}
             className="p-1 text-[#909296] hover:text-white"
-            aria-label="Close menu"
+            aria-label={t('closeMenu')}
           >
             <X size={18} />
           </button>
@@ -92,8 +93,8 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, onLogout, us
               {user?.username.slice(0, 2)}
             </div>
             <div className="flex flex-col overflow-hidden">
-              <span className="text-xs font-semibold text-white truncate">{user?.username || 'Guest'}</span>
-              <span className="text-[10px] text-[#909296] uppercase">{user?.role || 'Viewer'}</span>
+              <span className="text-xs font-semibold text-white truncate">{user?.username || t('guest')}</span>
+              <span className="text-[10px] text-[#909296] uppercase">{user?.role || t('viewer')}</span>
             </div>
           </div>
           <button 

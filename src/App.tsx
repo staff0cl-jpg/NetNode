@@ -4,15 +4,17 @@ import Dashboard from './components/Dashboard';
 import Inventory from './components/Inventory';
 import Topology from './components/Topology';
 import Terminal from './components/Terminal';
+import Automation from './components/Automation';
 import Settings from './components/Settings';
 import UserManagement from './components/UserManagement';
 import AuditLogs from './components/AuditLogs';
 import Login from './components/Login';
 import { Switch } from './types';
-import { LanguageProvider } from './lib/i18n';
+import { LanguageProvider, useTranslation } from './lib/i18n';
 import { Menu } from 'lucide-react';
 
 function AppContent() {
+  const { t } = useTranslation();
   const [user, setUser] = useState<{ id: string, username: string, role: string } | null>(null);
   const [authBootstrapping, setAuthBootstrapping] = useState(true);
   const [activeTab, setActiveTab] = useState('inventory');
@@ -124,7 +126,7 @@ function AppContent() {
   if (authBootstrapping) {
     return (
       <div className="min-h-screen w-full bg-[#1a1b1e] flex items-center justify-center text-[#909296] text-sm font-mono">
-        Restoring session...
+        {t('restoringSession')}
       </div>
     );
   }
@@ -174,6 +176,8 @@ function AppContent() {
             onClearTarget={() => setSshTarget(null)}
           />
         );
+      case 'automation':
+        return <Automation role={user.role} username={user.username} />;
       case 'users':
         return isAdmin ? <UserManagement role={user.role} username={user.username} /> : <Dashboard switches={switches} role={user.role} username={user.username} />;
       case 'audit':
@@ -208,7 +212,7 @@ function AppContent() {
         {mobileSidebarOpen && (
           <button
             className="fixed inset-0 z-[110] bg-black/50"
-            aria-label="Close menu overlay"
+            aria-label={t('closeMenuOverlay')}
             onClick={() => setMobileSidebarOpen(false)}
           />
         )}
@@ -221,20 +225,20 @@ function AppContent() {
             <button
               className="md:hidden p-1.5 text-[#909296] hover:text-white"
               onClick={() => setMobileSidebarOpen(true)}
-              aria-label="Open menu"
+              aria-label={t('openMenu')}
             >
               <Menu size={16} />
             </button>
             <div className="flex items-center gap-2">
               <div className="w-1.5 h-1.5 bg-[#40c057] rounded-full" />
-              <span className="text-[10px] font-mono text-[#909296] uppercase tracking-wider whitespace-nowrap">Sync Status: Real-time</span>
+              <span className="text-[10px] font-mono text-[#909296] uppercase tracking-wider whitespace-nowrap">{t('syncStatusRealtime')}</span>
             </div>
             <div className="h-3 w-px bg-[#373a40] hidden sm:block" />
-            <span className="text-[10px] font-mono text-[#5c5f66] uppercase tracking-wider hidden lg:block">Session: Secure (AES-256)</span>
+            <span className="text-[10px] font-mono text-[#5c5f66] uppercase tracking-wider hidden lg:block">{t('sessionSecure')}</span>
           </div>
           <div className="flex items-center gap-2 md:gap-4 text-[10px] font-mono text-[#909296] min-w-0">
             <span className="truncate max-w-[120px] sm:max-w-[180px]">{banner.siteLabel}</span>
-            <span className="whitespace-nowrap">UPTIME: {banner.appUptime}</span>
+            <span className="whitespace-nowrap">{t('uptimeLabel')}: {banner.appUptime}</span>
           </div>
         </header>
 
