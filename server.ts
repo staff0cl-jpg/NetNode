@@ -77,6 +77,33 @@ let discoveryScheduler: NodeJS.Timeout | null = null;
 let discoveryRunLock = false;
 let discoverySchedulerLastTickAt: string | null = null;
 let discoverySchedulerLastProcessed = 0;
+type ManualDiscoveryJob = {
+  id: string;
+  actor: string;
+  status: "running" | "done" | "error";
+  createdAt: string;
+  startedAt: string;
+  finishedAt?: string;
+  input: {
+    subnets: string;
+    protocol?: string;
+    city?: string;
+    zone?: string;
+    branch?: string;
+  };
+  summary?: DiscoveryScanSummary;
+  error?: string;
+};
+let manualDiscoveryJobs = new Map<string, ManualDiscoveryJob>();
+let activeManualDiscoveryJobId: string | null = null;
+
+function trimManualDiscoveryJobs(max = 30) {
+  if (manualDiscoveryJobs.size <= max) return;
+  const oldest = Array.from(manualDiscoveryJobs.values())
+    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+    .slice(0, manualDiscoveryJobs.size - max);
+  oldest.forEach((j) => manualDiscoveryJobs.delete(j.id));
+}
 type SshReadonlyProfile = {
   username: string;
   password: string;
@@ -1954,14 +1981,80 @@ async function startServer() {
     if (!subnets || typeof subnets !== "string") {
       return res.status(400).json({ error: "Укажите подсети, например 192.168.1.0/24" });
     }
-    try {
-      const summary = await runDiscoveryScan({ subnets, protocol, city, zone, branch, actor, reason: "manual" });
-      return res.json(summary);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      logAction(actor, "Discovery Failed", msg, "inventory");
-      return res.status(500).json({ success: false, error: msg });
+    if (discoveryRunLock) {
+      return res.status(409).json({
+        success: false,
+        error: "Discovery run is already in progress",
+        runningJobId: activeManualDiscoveryJobId,
+      });
     }
+
+    const jobId = `md-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const nowIso = new Date().toISOString();
+    const job: ManualDiscoveryJob = {
+      id: jobId,
+      actor,
+      status: "running",
+      createdAt: nowIso,
+      startedAt: nowIso,
+      input: { subnets, protocol, city, zone, branch },
+    };
+    manualDiscoveryJobs.set(jobId, job);
+    trimManualDiscoveryJobs();
+    activeManualDiscoveryJobId = jobId;
+
+    // Non-blocking run to avoid reverse-proxy timeouts on long subnets.
+    (async () => {
+      discoveryRunLock = true;
+      try {
+        const summary = await runDiscoveryScan({ subnets, protocol, city, zone, branch, actor, reason: "manual" });
+        const current = manualDiscoveryJobs.get(jobId);
+        if (current) {
+          current.status = "done";
+          current.summary = summary;
+          current.finishedAt = new Date().toISOString();
+          manualDiscoveryJobs.set(jobId, current);
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        const current = manualDiscoveryJobs.get(jobId);
+        if (current) {
+          current.status = "error";
+          current.error = msg;
+          current.finishedAt = new Date().toISOString();
+          manualDiscoveryJobs.set(jobId, current);
+        }
+        logAction(actor, "Discovery Failed", msg, "inventory");
+      } finally {
+        discoveryRunLock = false;
+        if (activeManualDiscoveryJobId === jobId) activeManualDiscoveryJobId = null;
+      }
+    })();
+
+    return res.status(202).json({
+      success: true,
+      accepted: true,
+      jobId,
+      status: "running",
+      statusEndpoint: `/api/discovery/start/status/${jobId}`,
+    });
+  });
+
+  app.get("/api/discovery/start/status/:jobId", checkRole(["admin", "operator"]), (req, res) => {
+    const jobId = String(req.params.jobId || "").trim();
+    const job = manualDiscoveryJobs.get(jobId);
+    if (!job) return res.status(404).json({ success: false, error: "Discovery job not found" });
+    return res.json({
+      success: true,
+      jobId: job.id,
+      status: job.status,
+      createdAt: job.createdAt,
+      startedAt: job.startedAt,
+      finishedAt: job.finishedAt || null,
+      error: job.error || null,
+      summary: job.summary || null,
+      input: job.input,
+    });
   });
 
   app.get("/api/discovery/watch", checkRole(["admin", "operator"]), (_req, res) => {
@@ -1986,6 +2079,7 @@ async function startServer() {
       lastTickAt: discoverySchedulerLastTickAt,
       lastProcessedProfiles: discoverySchedulerLastProcessed,
       currentlyRunning: discoveryRunLock,
+      activeManualDiscoveryJobId,
       enabledProfiles: entries.length,
       nextRuns: entries.slice(0, 20),
       serverNow: new Date(now).toISOString(),

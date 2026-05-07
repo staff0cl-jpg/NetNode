@@ -382,6 +382,13 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       zone: String(discoveryConfig.zone || '').trim() || 'Core',
       branch: String(discoveryConfig.branch || '').trim() || 'ULN',
     };
+    const parseResponseSafe = (raw: string) => {
+      try {
+        return raw ? JSON.parse(raw) : {};
+      } catch {
+        return { error: raw || 'Discovery failed' };
+      }
+    };
     try {
       const response = await fetch('/api/discovery/start', {
         method: 'POST',
@@ -393,20 +400,51 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         body: JSON.stringify(payload),
       });
       const raw = await response.text();
-      const data = (() => {
-        try {
-          return raw ? JSON.parse(raw) : {};
-        } catch {
-          return { error: raw || 'Discovery failed' };
-        }
-      })();
+      const data = parseResponseSafe(raw);
       if (!response.ok) {
         alert(data.error || 'Discovery failed');
         return;
       }
-      alert(
-        `${t('discoveryScanned')}: ${data.scanned}\nSkipped existing: ${data.skippedExisting}\nSNMP found: ${data.snmpFound}\n${t('discoveryAdded')}: ${data.added}`
-      );
+      const jobId = String(data.jobId || '').trim();
+      if (!jobId) {
+        alert('Discovery started, but no job id was returned.');
+        return;
+      }
+      let attempts = 0;
+      const maxAttempts = 180; // ~6 minutes at 2s polling
+      const poll = async () => {
+        attempts += 1;
+        const statusResp = await fetch(`/api/discovery/start/status/${encodeURIComponent(jobId)}`, {
+          headers: {
+            'x-user-role': role || 'viewer',
+            'x-user-name': username || 'unknown'
+          }
+        });
+        const statusRaw = await statusResp.text();
+        const statusData = parseResponseSafe(statusRaw);
+        if (!statusResp.ok) {
+          throw new Error(statusData.error || 'Discovery status check failed');
+        }
+        if (statusData.status === 'running') {
+          if (attempts >= maxAttempts) {
+            alert('Discovery is still running. Check status in a minute.');
+            return;
+          }
+          window.setTimeout(() => {
+            poll().catch(() => alert('Failed to initiate discovery.'));
+          }, 2000);
+          return;
+        }
+        if (statusData.status === 'error') {
+          alert(statusData.error || 'Discovery failed');
+          return;
+        }
+        const summary = statusData.summary || {};
+        alert(
+          `${t('discoveryScanned')}: ${summary.scanned ?? 0}\nSkipped existing: ${summary.skippedExisting ?? 0}\nSNMP found: ${summary.snmpFound ?? 0}\n${t('discoveryAdded')}: ${summary.added ?? 0}`
+        );
+      };
+      poll().catch((e) => alert(e instanceof Error ? e.message : 'Failed to initiate discovery.'));
     } catch {
       alert('Failed to initiate discovery.');
     }
