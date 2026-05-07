@@ -767,9 +767,52 @@ function getSnmpProbe(host: string, timeout = snmpConfig.timeoutMs): Promise<Snm
   return new Promise((resolve) => {
     const communities = snmpCommunities();
     const oids = ["1.3.6.1.2.1.1.5.0", "1.3.6.1.2.1.1.1.0", "1.3.6.1.2.1.1.2.0", ...uptimeOidProfiles.map((p) => p.oid)];
+    const baseOids = ["1.3.6.1.2.1.1.5.0", "1.3.6.1.2.1.1.1.0", "1.3.6.1.2.1.1.2.0"];
     const versions = snmpVersionsFromConfig();
     let idx = 0;
     let versionIdx = 0;
+    const fallbackProbeSingle = (community: string, version: snmp.Version) => {
+      const session = snmp.createSession(host, community, {
+        timeout: Math.max(timeout, 1800),
+        retries: Math.max(snmpConfig.retries, 1),
+        version,
+        port: snmpConfig.port,
+      });
+      const readOne = (oid: string) =>
+        new Promise<string>((r) => {
+          session.get([oid], (e, vars) => {
+            if (e || !vars?.length) return r("");
+            const value = vars[0]?.value;
+            r(value === undefined || value === null ? "" : String(value));
+          });
+        });
+      (async () => {
+        try {
+          const sysName = await readOne(baseOids[0]);
+          const sysDescr = await readOne(baseOids[1]);
+          const sysObjectId = await readOne(baseOids[2]);
+          let uptimeSeconds = 0;
+          for (const profile of uptimeOidProfiles) {
+            const raw = Number(await readOne(profile.oid));
+            if (!uptimeSeconds && Number.isFinite(raw) && raw > 0) {
+              uptimeSeconds = Math.floor(raw * profile.multiplier);
+            }
+          }
+          if (sysName || sysDescr || sysObjectId) {
+            return resolve({ ok: true, sysName, sysDescr, sysObjectId, uptimeSeconds });
+          }
+          return tryNext();
+        } catch {
+          return tryNext();
+        } finally {
+          try {
+            session.close();
+          } catch {
+            /* ignore */
+          }
+        }
+      })();
+    };
     const tryNext = () => {
       if (versionIdx >= versions.length) return resolve({ ok: false });
       if (idx >= communities.length) {
@@ -779,8 +822,8 @@ function getSnmpProbe(host: string, timeout = snmpConfig.timeoutMs): Promise<Snm
       }
       const community = communities[idx++];
       const session = snmp.createSession(host, community, {
-        timeout,
-        retries: snmpConfig.retries,
+        timeout: Math.max(timeout, 1800),
+        retries: Math.max(snmpConfig.retries, 1),
         version: versions[versionIdx],
         port: snmpConfig.port,
       });
@@ -790,7 +833,11 @@ function getSnmpProbe(host: string, timeout = snmpConfig.timeoutMs): Promise<Snm
         } catch {
           /* ignore */
         }
-        if (err || !varbinds?.length) return tryNext();
+        if (err || !varbinds?.length) {
+          // Fallback for stricter/quirky SNMP agents (including some MikroTik setups):
+          // try reading key OIDs one-by-one before moving to next credentials/version.
+          return fallbackProbeSingle(community, versions[versionIdx]);
+        }
         const sysName = varbinds[0]?.value ? String(varbinds[0].value) : "";
         const sysDescr = varbinds[1]?.value ? String(varbinds[1].value) : "";
         const sysObjectId = varbinds[2]?.value ? String(varbinds[2].value) : "";
@@ -1110,6 +1157,10 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
     if (s === "access") return "edge";
     return "unknown";
   };
+  const looksLikeFcPort = (ifName: string, alias: string, descr: string): boolean => {
+    const v = `${ifName} ${alias} ${descr}`.toLowerCase();
+    return /\b(fc\d+\/\d+|fibre|fiber|san|port\s*\d+)\b/.test(v);
+  };
   const norm = (v: string) => v.toLowerCase().replace(/\s+/g, " ").trim();
   const genericDevices = devices.filter((d) => !isFcSwitch(d));
   const findDeviceByNameHint = (hint: string, selfId: string): InventoryItem | undefined => {
@@ -1230,10 +1281,12 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
         const peer = findDeviceByNameHint(sysName, dev.id);
         if (!peer || !isFcSwitch(peer)) continue;
         const peerRole = detectFcRole(peer);
-        if (
+        const roleCompatible =
           (selfRole === "core" && peerRole === "edge") ||
-          (selfRole === "edge" && peerRole === "core")
-        ) {
+          (selfRole === "edge" && peerRole === "core") ||
+          selfRole === "unknown" ||
+          peerRole === "unknown";
+        if (roleCompatible) {
           const parts = suffix.split(".").filter(Boolean);
           if (parts.length < 3) continue;
           const localPortNum = parts[1];
@@ -1248,6 +1301,38 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
           }
           directed.push({ source: dev.id, target: peer.id, portA: localIfName || "fc-port", raw: `FC-LLDP:${sysName}` });
         }
+      }
+    } catch {
+      // continue
+    }
+  });
+
+  // FC fallback path: infer links from FC port descriptions/aliases when LLDP is absent.
+  await forEachWithLimit(fcDevices, 10, async (dev) => {
+    try {
+      const [ifNameMap, ifAliasMap, ifDescrMap] = await Promise.all([
+        snmpWalk(dev.ip, "1.3.6.1.2.1.31.1.1.1.1"), // ifName
+        snmpWalk(dev.ip, "1.3.6.1.2.1.31.1.1.1.18"), // ifAlias
+        snmpWalk(dev.ip, "1.3.6.1.2.1.2.2.1.2"), // ifDescr
+      ]);
+      const selfRole = detectFcRole(dev);
+      const indexes = new Set([...Object.keys(ifNameMap), ...Object.keys(ifAliasMap), ...Object.keys(ifDescrMap)]);
+      for (const ifIndex of indexes) {
+        const ifName = String(ifNameMap[ifIndex] || `if${ifIndex}`).trim();
+        const alias = String(ifAliasMap[ifIndex] || "").trim();
+        const descr = String(ifDescrMap[ifIndex] || "").trim();
+        if (!looksLikeFcPort(ifName, alias, descr)) continue;
+        const hint = norm(`${alias} ${descr}`);
+        const peer = findDeviceByNameHint(hint, dev.id);
+        if (!peer || !isFcSwitch(peer)) continue;
+        const peerRole = detectFcRole(peer);
+        const roleCompatible =
+          (selfRole === "core" && peerRole === "edge") ||
+          (selfRole === "edge" && peerRole === "core") ||
+          selfRole === "unknown" ||
+          peerRole === "unknown";
+        if (!roleCompatible) continue;
+        directed.push({ source: dev.id, target: peer.id, portA: ifName || "fc-port", raw: `FC-ALIAS:${alias || descr}` });
       }
     } catch {
       // continue
