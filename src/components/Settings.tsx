@@ -375,6 +375,13 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
   };
 
   const handleStartDiscovery = async () => {
+    const payload = {
+      subnets: String(discoveryConfig.subnets || '').trim(),
+      protocol: 'snmp' as const,
+      city: String(discoveryConfig.city || '').trim() || 'Ульяновск',
+      zone: String(discoveryConfig.zone || '').trim() || 'Core',
+      branch: String(discoveryConfig.branch || '').trim() || 'ULN',
+    };
     try {
       const response = await fetch('/api/discovery/start', {
         method: 'POST',
@@ -383,9 +390,16 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
           'x-user-role': role || 'viewer',
           'x-user-name': username || 'unknown'
         },
-        body: JSON.stringify(discoveryConfig),
+        body: JSON.stringify(payload),
       });
-      const data = await response.json();
+      const raw = await response.text();
+      const data = (() => {
+        try {
+          return raw ? JSON.parse(raw) : {};
+        } catch {
+          return { error: raw || 'Discovery failed' };
+        }
+      })();
       if (!response.ok) {
         alert(data.error || 'Discovery failed');
         return;
@@ -947,7 +961,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             </div>
             
             <p className="text-[10px] text-[#5c5f66]">{t('discoveryProbeNote')}</p>
-            <div className="grid grid-cols-3 gap-6">
+            <div className="grid grid-cols-2 gap-6">
               <div className="space-y-2">
                 <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">Default City</label>
                 <input
@@ -955,15 +969,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                   value={discoveryConfig.city}
                   onChange={(e) => setDiscoveryConfig({ ...discoveryConfig, city: e.target.value })}
                   placeholder="Ульяновск"
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">Default Zone</label>
-                <input
-                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none transition-colors"
-                  value={discoveryConfig.zone}
-                  onChange={(e) => setDiscoveryConfig({ ...discoveryConfig, zone: e.target.value })}
-                  placeholder="Core"
                 />
               </div>
               <div className="space-y-2">
@@ -1027,7 +1032,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                           subnets: discoveryConfig.subnets,
                           protocol: 'snmp',
                           city: discoveryConfig.city,
-                          zone: discoveryConfig.zone,
+                          zone: String(discoveryConfig.zone || '').trim() || 'Core',
                           branch: discoveryConfig.branch,
                           enabled: true,
                           intervalHours: 3,
@@ -1051,7 +1056,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                           subnets: discoveryConfig.subnets,
                           protocol: 'snmp',
                           city: discoveryConfig.city,
-                          zone: discoveryConfig.zone,
+                          zone: String(discoveryConfig.zone || '').trim() || 'Core',
                           branch: discoveryConfig.branch,
                           enabled: true,
                           intervalHours: 3,
