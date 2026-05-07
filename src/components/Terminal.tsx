@@ -37,6 +37,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [newSession, setNewSession] = useState({ name: '', host: '', username: 'admin', password: '', autoReconnect: true });
   const [passwordPrompt, setPasswordPrompt] = useState<{ session: TerminalSession } | null>(null);
+  const [promptUsername, setPromptUsername] = useState('admin');
   const [promptPassword, setPromptPassword] = useState('');
   const [savePasswordToSession, setSavePasswordToSession] = useState(true);
   
@@ -75,6 +76,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
     const effectivePassword = overridePassword ?? session.password ?? '';
     if (!effectivePassword.trim()) {
       setPasswordPrompt({ session });
+      setPromptUsername(session.username || 'admin');
       return;
     }
 
@@ -556,6 +558,13 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
             </p>
             <div className="space-y-4">
               <input
+                type="text"
+                className="w-full bg-[#141517] border border-[#373a40] p-3 rounded text-sm text-white focus:border-[#228be6] outline-none"
+                placeholder={t('username')}
+                value={promptUsername}
+                onChange={(e) => setPromptUsername(e.target.value)}
+              />
+              <input
                 type="password"
                 className="w-full bg-[#141517] border border-[#373a40] p-3 rounded text-sm text-white focus:border-[#228be6] outline-none"
                 placeholder={t('sshPasswordPlaceholder')}
@@ -565,20 +574,22 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && promptPassword.trim()) {
                     e.preventDefault();
+                    const uname = (promptUsername || '').trim() || 'admin';
                     const pwd = promptPassword.trim();
                     if (savePasswordToSession) {
                       setSessions((prev) => {
                         const next = prev.map((s) =>
-                          s.id === passwordPrompt.session.id ? { ...s, password: pwd } : s
+                          s.id === passwordPrompt.session.id ? { ...s, username: uname, password: pwd } : s
                         );
                         localStorage.setItem('netnode_ssh_sessions', JSON.stringify(next));
                         return next;
                       });
-                      handleConnectRef.current({ ...passwordPrompt.session, password: pwd });
+                      handleConnectRef.current({ ...passwordPrompt.session, username: uname, password: pwd });
                     } else {
-                      handleConnectRef.current(passwordPrompt.session, pwd);
+                      handleConnectRef.current({ ...passwordPrompt.session, username: uname }, pwd);
                     }
                     setPasswordPrompt(null);
+                    setPromptUsername('admin');
                     setPromptPassword('');
                   }
                 }}
@@ -598,6 +609,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
                 type="button"
                 onClick={() => {
                   setPasswordPrompt(null);
+                  setPromptUsername('admin');
                   setPromptPassword('');
                 }}
                 className="flex-1 py-3 border border-[#373a40] text-[#909296] rounded text-[10px] font-bold uppercase tracking-widest hover:bg-white/5 transition-all"
@@ -607,21 +619,23 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
               <button
                 type="button"
                 onClick={() => {
+                  const uname = (promptUsername || '').trim() || 'admin';
                   const pwd = promptPassword.trim();
                   if (!pwd) return;
                   if (savePasswordToSession) {
                     setSessions((prev) => {
                       const next = prev.map((s) =>
-                        s.id === passwordPrompt.session.id ? { ...s, password: pwd } : s
+                        s.id === passwordPrompt.session.id ? { ...s, username: uname, password: pwd } : s
                       );
                       localStorage.setItem('netnode_ssh_sessions', JSON.stringify(next));
                       return next;
                     });
-                    handleConnectRef.current({ ...passwordPrompt.session, password: pwd });
+                    handleConnectRef.current({ ...passwordPrompt.session, username: uname, password: pwd });
                   } else {
-                    handleConnectRef.current(passwordPrompt.session, pwd);
+                    handleConnectRef.current({ ...passwordPrompt.session, username: uname }, pwd);
                   }
                   setPasswordPrompt(null);
+                  setPromptUsername('admin');
                   setPromptPassword('');
                 }}
                 className="flex-[2] py-3 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-[10px] font-bold uppercase tracking-widest transition-all"
