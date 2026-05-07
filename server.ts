@@ -582,14 +582,9 @@ async function runDiscoveryScan(input: DiscoveryScanInput): Promise<DiscoverySca
       const vendor = probe.sysDescr ? detectVendorFromSnmp(probe.sysDescr, probe.sysObjectId || "") : "Unknown";
       const model = detectModelFromSnmp(probe.sysDescr || "", probe.sysObjectId || "", probe.sysName || "");
       const category = detectCategoryFromSnmp(probe.sysDescr || "", probe.sysObjectId || "", probe.sysName || "");
-      const trunkCount = await getTrunkPortCountFromSnmp(ip);
       const subcategory = category === "FC Switch"
         ? deriveFcSubcategoryByName(probe.sysName || model || "")
-        : trunkCount >= 2
-          ? "Core"
-          : trunkCount === 1
-            ? "Distribution"
-            : "Access";
+        : "Access";
       const uptimeSeconds = probe.uptimeSeconds ?? 0;
       discovered.push({
         id: `d-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -613,6 +608,10 @@ async function runDiscoveryScan(input: DiscoveryScanInput): Promise<DiscoverySca
   discovered.forEach((d) => upsertInventoryMetaFromItem(d));
   inventory.push(...discovered);
   rebuildTopologyFromInventory();
+  // Keep discovery fast: run expensive SNMP trunk-role classification in background.
+  void classifyInventorySubcategoriesBySnmp(branch).catch(() => {
+    /* ignore async classification errors */
+  });
   const summary: DiscoveryScanSummary = {
     success: true,
     protocol,
