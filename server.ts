@@ -800,8 +800,8 @@ function getSnmpProbe(host: string, timeout = snmpConfig.timeoutMs): Promise<Snm
     let versionIdx = 0;
     const fallbackProbeSingle = (community: string, version: snmp.Version) => {
       const session = snmp.createSession(host, community, {
-        timeout: Math.max(timeout, 1800),
-        retries: Math.max(snmpConfig.retries, 1),
+        timeout: Math.max(timeout, 1200),
+        retries: Math.max(snmpConfig.retries, 0),
         version,
         port: snmpConfig.port,
       });
@@ -849,8 +849,8 @@ function getSnmpProbe(host: string, timeout = snmpConfig.timeoutMs): Promise<Snm
       }
       const community = communities[idx++];
       const session = snmp.createSession(host, community, {
-        timeout: Math.max(timeout, 1800),
-        retries: Math.max(snmpConfig.retries, 1),
+        timeout,
+        retries: snmpConfig.retries,
         version: versions[versionIdx],
         port: snmpConfig.port,
       });
@@ -861,8 +861,11 @@ function getSnmpProbe(host: string, timeout = snmpConfig.timeoutMs): Promise<Snm
           /* ignore */
         }
         if (err || !varbinds?.length) {
-          // Fallback for stricter/quirky SNMP agents (including some MikroTik setups):
-          // try reading key OIDs one-by-one before moving to next credentials/version.
+          // Do not fallback on plain timeout, otherwise scans become very slow on /24.
+          // Fallback is reserved for non-timeout SNMP agent quirks.
+          const errMsg = String((err as any)?.message || "").toLowerCase();
+          const isTimeout = errMsg.includes("timeout");
+          if (isTimeout || !err) return tryNext();
           return fallbackProbeSingle(community, versions[versionIdx]);
         }
         const sysName = varbinds[0]?.value ? String(varbinds[0].value) : "";
