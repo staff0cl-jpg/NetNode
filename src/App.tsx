@@ -13,6 +13,8 @@ import { Switch } from './types';
 import { LanguageProvider, useTranslation } from './lib/i18n';
 import { Menu } from 'lucide-react';
 
+const APP_VERSION = '1.02';
+
 function AppContent() {
   const { t } = useTranslation();
   const [user, setUser] = useState<{ id: string, username: string, role: string } | null>(null);
@@ -237,6 +239,7 @@ function AppContent() {
             <span className="text-[10px] font-mono text-[#5c5f66] uppercase tracking-wider hidden lg:block">{t('sessionSecure')}</span>
           </div>
           <div className="flex items-center gap-2 md:gap-4 text-[10px] font-mono text-[#909296] min-w-0">
+            <span className="whitespace-nowrap text-[#5c5f66]">v{APP_VERSION}</span>
             <span className="truncate max-w-[120px] sm:max-w-[180px]">{banner.siteLabel}</span>
             <span className="whitespace-nowrap">{t('uptimeLabel')}: {banner.appUptime}</span>
           </div>
