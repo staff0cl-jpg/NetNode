@@ -60,6 +60,8 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
   });
   const [snmpTemplates, setSnmpTemplates] = useState<Array<{ id: string; name: string }>>([]);
   const [customOidsText, setCustomOidsText] = useState('');
+  const [activeBranchTab, setActiveBranchTab] = useState<string>('all');
+  const [activeCategoryTab, setActiveCategoryTab] = useState<'switch' | 'router' | 'ups' | 'all'>('switch');
   const [openRowMenuId, setOpenRowMenuId] = useState<string | null>(null);
   const rowMenuRef = React.useRef<HTMLDivElement | null>(null);
   const makeDefaultSwitch = React.useCallback(
@@ -85,6 +87,26 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
     if (v === 'firewall') return 'Межсетевой экран';
     if (v === 'other') return 'Прочее';
     return value || 'Коммутатор';
+  };
+
+  const branches = React.useMemo(
+    () =>
+      Array.from(
+        new Set(
+          switches
+            .map((s) => String(s.branch || '').trim())
+            .filter(Boolean)
+        )
+      ).sort((a, b) => a.localeCompare(b)),
+    [switches]
+  );
+
+  const categoryKey = (category?: string): 'switch' | 'router' | 'ups' | 'other' => {
+    const v = (category || '').toLowerCase();
+    if (v === 'switch' || v === 'коммутатор') return 'switch';
+    if (v === 'router' || v === 'маршрутизатор') return 'router';
+    if (v === 'ups' || v === 'ибп') return 'ups';
+    return 'other';
   };
 
   React.useEffect(() => {
@@ -281,8 +303,14 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
       const matchesStatus = statusFilter === 'all' || s.status === statusFilter;
       const matchesZone = zoneFilter === 'all' || s.zone === zoneFilter;
       const matchesSubcategory = subcategoryFilter === 'all' || (s.subcategory || '') === subcategoryFilter;
+      const matchesBranchTab = activeBranchTab === 'all' || (s.branch || '') === activeBranchTab;
+      const catKey = categoryKey(s.category);
+      const matchesCategoryTab =
+        activeCategoryTab === 'all'
+          ? catKey !== 'other'
+          : activeCategoryTab === catKey;
 
-      return matchesSearch && matchesStatus && matchesZone && matchesSubcategory;
+      return matchesSearch && matchesStatus && matchesZone && matchesSubcategory && matchesBranchTab && matchesCategoryTab;
     })
     .sort((a, b) => {
       if (!sortConfig) return 0;
@@ -337,6 +365,89 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
           )}
         </div>
       </header>
+
+      {/* Region tabs */}
+      <div className="flex flex-wrap gap-2 mb-3">
+        <button
+          type="button"
+          onClick={() => setActiveBranchTab('all')}
+          className={cn(
+            "px-3 py-1 rounded text-[10px] font-bold uppercase border",
+            activeBranchTab === 'all'
+              ? "bg-[#228be6] border-[#228be6] text-white"
+              : "bg-[#2c2e33] border-[#373a40] text-[#c1c2c5]"
+          )}
+        >
+          {t('allBranches')}
+        </button>
+        {branches.map((b) => (
+          <button
+            key={b}
+            type="button"
+            onClick={() => setActiveBranchTab(b)}
+            className={cn(
+              "px-3 py-1 rounded text-[10px] font-bold uppercase border",
+              activeBranchTab === b
+                ? "bg-[#228be6] border-[#228be6] text-white"
+                : "bg-[#2c2e33] border-[#373a40] text-[#c1c2c5]"
+            )}
+          >
+            {b}
+          </button>
+        ))}
+      </div>
+
+      {/* Category tabs */}
+      <div className="flex gap-2 mb-4">
+        <button
+          type="button"
+          onClick={() => setActiveCategoryTab('switch')}
+          className={cn(
+            "px-3 py-1 rounded text-[10px] font-bold uppercase border",
+            activeCategoryTab === 'switch'
+              ? "bg-[#228be6] border-[#228be6] text-white"
+              : "bg-[#2c2e33] border-[#373a40] text-[#c1c2c5]"
+          )}
+        >
+          {t('inventoryTabSwitches')}
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveCategoryTab('router')}
+          className={cn(
+            "px-3 py-1 rounded text-[10px] font-bold uppercase border",
+            activeCategoryTab === 'router'
+              ? "bg-[#228be6] border-[#228be6] text-white"
+              : "bg-[#2c2e33] border-[#373a40] text-[#c1c2c5]"
+          )}
+        >
+          {t('inventoryTabRouters')}
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveCategoryTab('ups')}
+          className={cn(
+            "px-3 py-1 rounded text-[10px] font-bold uppercase border",
+            activeCategoryTab === 'ups'
+              ? "bg-[#228be6] border-[#228be6] text-white"
+              : "bg-[#2c2e33] border-[#373a40] text-[#c1c2c5]"
+          )}
+        >
+          {t('inventoryTabUps')}
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveCategoryTab('all')}
+          className={cn(
+            "px-3 py-1 rounded text-[10px] font-bold uppercase border",
+            activeCategoryTab === 'all'
+              ? "bg-[#228be6] border-[#228be6] text-white"
+              : "bg-[#2c2e33] border-[#373a40] text-[#c1c2c5]"
+          )}
+        >
+          {t('inventoryTabAllWithoutOther')}
+        </button>
+      </div>
 
       <div className="bg-[#25262b] border border-[#373a40] rounded overflow-hidden">
         <div className="flex items-center justify-between bg-[#25262b] p-4 border border-[#373a40] rounded shadow-sm">

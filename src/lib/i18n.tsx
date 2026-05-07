@@ -189,6 +189,11 @@ export const translations: Translations = {
   vendorsCommaSeparated: { ru: 'Вендоры (через запятую)', en: 'Vendors (comma separated)' },
   manageCategoriesInSettings: { ru: 'Управляйте категориями в Настройках.', en: 'Manage categories in Settings.' },
   manageBranchesInSettings: { ru: 'Управляйте филиалами в Настройках.', en: 'Manage branches in Settings.' },
+  allBranches: { ru: 'Все филиалы', en: 'All branches' },
+  inventoryTabSwitches: { ru: 'Коммутаторы', en: 'Switches' },
+  inventoryTabRouters: { ru: 'Маршрутизаторы', en: 'Routers' },
+  inventoryTabUps: { ru: 'ИБП', en: 'UPS' },
+  inventoryTabAllWithoutOther: { ru: 'Все (кроме Прочее)', en: 'All (without Other)' },
 
   // Terminal
   sessions: { ru: 'Сессии', en: 'Sessions' },

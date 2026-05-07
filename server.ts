@@ -1482,11 +1482,16 @@ async function startServer() {
   });
 
   // API: Get Inventory
-  app.get("/api/inventory", (req, res) => {
+  app.get("/api/inventory", (_req, res) => {
     Promise.all(
       inventory.map(async (item) => {
         const probe = await getSnmpProbe(item.ip, 900);
-        if (!probe.ok) return item;
+        if (!probe.ok) {
+          return {
+            ...item,
+            status: "offline" as const,
+          };
+        }
         const nextVendor = probe.sysDescr ? detectVendorFromSnmp(probe.sysDescr, probe.sysObjectId || "") : item.vendor;
         const nextModel = probe.sysDescr ? detectModelFromSnmp(probe.sysDescr) : item.model;
         const nextName = probe.sysName?.trim() ? probe.sysName.trim() : item.name;
@@ -1506,7 +1511,14 @@ async function startServer() {
       })
     )
       .then((next) => res.json(next))
-      .catch(() => res.json(inventory));
+      .catch(() =>
+        res.json(
+          inventory.map((item) => ({
+            ...item,
+            status: item.status ?? ("offline" as const),
+          }))
+        )
+      );
   });
 
   app.post("/api/inventory", checkRole(['admin', 'operator']), (req, res) => {
