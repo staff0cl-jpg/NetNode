@@ -1,0 +1,5 @@
+{
+  "name": "NetNode Pro: Enterprise Switch Manager",
+  "description": "Enterprise-grade network management system for HPE, Aruba, and Cisco switches. Features multi-zone topology mapping, real-time web CLI, and infrastructure monitoring.",
+  "requestFramePermissions": []
+}
