@@ -11,6 +11,18 @@ import { VENDORS } from '../constants';
 import { cn } from '../lib/utils';
 import { useTranslation } from '../lib/i18n';
 
+const parseIpv4 = (ip: string): number | null => {
+  const parts = ip.split('.').map((x) => Number.parseInt(x, 10));
+  if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n) || n < 0 || n > 255)) return null;
+  return (((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0);
+};
+
+const parseUptimeSeconds = (uptime: string): number => {
+  const m = uptime.match(/(\d+)d\s+(\d+)h\s+(\d+)m/i);
+  if (!m) return 0;
+  return (Number(m[1]) * 86400) + (Number(m[2]) * 3600) + (Number(m[3]) * 60);
+};
+
 interface InventoryProps {
   switches: Switch[];
   setSwitches: React.Dispatch<React.SetStateAction<Switch[]>>;
@@ -324,9 +336,15 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
       } else if (sortConfig.key === 'location') {
         aValue = `${a.city} ${a.zone}`.toLowerCase();
         bValue = `${b.city} ${b.zone}`.toLowerCase();
+      } else if (sortConfig.key === 'ip') {
+        aValue = parseIpv4(a.ip) ?? Number.MAX_SAFE_INTEGER;
+        bValue = parseIpv4(b.ip) ?? Number.MAX_SAFE_INTEGER;
+      } else if (sortConfig.key === 'uptime') {
+        aValue = parseUptimeSeconds(a.uptime || '');
+        bValue = parseUptimeSeconds(b.uptime || '');
       } else {
-        aValue = (a[sortConfig.key as keyof Switch] as string).toLowerCase();
-        bValue = (b[sortConfig.key as keyof Switch] as string).toLowerCase();
+        aValue = String(a[sortConfig.key as keyof Switch] ?? '').toLowerCase();
+        bValue = String(b[sortConfig.key as keyof Switch] ?? '').toLowerCase();
       }
 
       if (aValue < bValue) return sortConfig.direction === 'asc' ? -1 : 1;
@@ -553,9 +571,18 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                   <SortIcon active={sortConfig?.key === 'vendorModel'} direction={sortConfig?.direction} />
                 </div>
               </th>
-              <th>{t('categoryLabel')}</th>
-              <th>{t('subcategoryLabel')}</th>
-              <th>{t('branchLabel')}</th>
+              <th onClick={() => handleSort('subcategory')} className="cursor-pointer hover:text-white transition-colors">
+                <div className="flex items-center gap-2">
+                  {t('subcategoryLabel')}
+                  <SortIcon active={sortConfig?.key === 'subcategory'} direction={sortConfig?.direction} />
+                </div>
+              </th>
+              <th onClick={() => handleSort('branch')} className="cursor-pointer hover:text-white transition-colors">
+                <div className="flex items-center gap-2">
+                  {t('branchLabel')}
+                  <SortIcon active={sortConfig?.key === 'branch'} direction={sortConfig?.direction} />
+                </div>
+              </th>
               <th onClick={() => handleSort('ip')} className="cursor-pointer hover:text-white transition-colors">
                 <div className="flex items-center gap-2">
                   {t('ipAddress')}
@@ -604,7 +631,6 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                     <span className="text-[10px] text-[#909296]">{sw.model}</span>
                   </div>
                 </td>
-                <td className="text-xs">{localizeCategory(sw.category || 'Switch')}</td>
                 <td className="text-xs">{sw.subcategory || 'Core'}</td>
                 <td className="text-xs">{sw.branch || 'ULN'}</td>
                 <td className="font-mono text-xs text-[#228be6]">{sw.ip}</td>

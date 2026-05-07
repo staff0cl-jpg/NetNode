@@ -11,7 +11,7 @@ interface TopologyProps {
   onOpenSSH?: (sw: Switch) => void;
 }
 
-type TopoLink = { source: string; target: string; portA: string; portB: string; manual?: boolean; renamed?: boolean };
+type TopoLink = { id?: string; source: string; target: string; portA: string; portB: string; manual?: boolean; renamed?: boolean };
 
 type NodeWithPos = Switch & { x: number; y: number };
 
@@ -210,7 +210,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   const [selectedRegion, setSelectedRegion] = useState<string>('');
   const [newRegion, setNewRegion] = useState('');
   const [regionEditor, setRegionEditor] = useState({ from: '', to: '' });
-  const [editingLinkKey, setEditingLinkKey] = useState<string | null>(null);
+  const [editingLinkId, setEditingLinkId] = useState<string | null>(null);
   const [editingLinkValue, setEditingLinkValue] = useState<{ portA: string; portB: string }>({ portA: '', portB: '' });
   const topologySwitches = React.useMemo(() => {
     const allowed = new Set(['switch', 'router', 'коммутатор', 'маршрутизатор']);
@@ -435,6 +435,24 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     }
   };
 
+  const visibleLinks = React.useMemo(
+    () => links.filter((l) => topologySwitchIds.has(l.source) && topologySwitchIds.has(l.target)),
+    [links, topologySwitchIds]
+  );
+  const editingLink = React.useMemo(
+    () => visibleLinks.find((l) => l.id === editingLinkId) || null,
+    [visibleLinks, editingLinkId]
+  );
+  const editingLinkAnchor = React.useMemo(() => {
+    if (!editingLink) return null;
+    const start = getNodeCenter(editingLink.source);
+    const end = getNodeCenter(editingLink.target);
+    return {
+      x: ((start.x + end.x) / 2) * scale + stagePos.x,
+      y: (((start.y + end.y) / 2) - 10) * scale + stagePos.y,
+    };
+  }, [editingLink, nodes, scale, stagePos]);
+
   const handleWheelZoom = (e: any) => {
     e.evt.preventDefault();
     const stage = stageRef.current;
@@ -625,7 +643,10 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       <div
         ref={containerRef}
         className={`flex-1 bg-[#141517] relative overflow-hidden ${isPanMode ? 'cursor-grab' : 'cursor-crosshair'}`}
-        onClick={() => setContextMenu(null)}
+        onClick={() => {
+          setContextMenu(null);
+          setEditingLinkId(null);
+        }}
       >
         <Stage
           ref={stageRef}
@@ -640,12 +661,12 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           onWheel={handleWheelZoom}
         >
           <Layer>
-            {links.filter((l) => topologySwitchIds.has(l.source) && topologySwitchIds.has(l.target)).map((link, i) => {
+            {visibleLinks.map((link, i) => {
               const start = getNodeCenter(link.source);
               const end = getNodeCenter(link.target);
-              const linkKey = `${link.source}::${link.target}::${link.portA}::${link.portB}::${i}`;
+              const linkId = link.id || `${link.source}::${link.target}::${i}`;
               return (
-                <React.Fragment key={`link-${link.source}-${link.target}-${i}`}>
+                <React.Fragment key={`link-${linkId}`}>
                   <Line
                     points={[start.x, start.y, end.x, end.y]}
                     stroke="#228be6"
@@ -656,11 +677,12 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                     x={(start.x + end.x) / 2}
                     y={(start.y + end.y) / 2 - 10}
                     text={`${link.portA} <-> ${link.portB}`}
-                    fill="#5c5f66"
-                    fontSize={8}
+                    fill={editingLinkId === link.id ? "#ffffff" : "#5c5f66"}
+                    fontSize={9}
                     align="center"
                     onClick={() => {
-                      setEditingLinkKey(linkKey);
+                      if (!link.id) return;
+                      setEditingLinkId(link.id);
                       setEditingLinkValue({ portA: link.portA, portB: link.portB });
                     }}
                   />
@@ -731,6 +753,41 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
             ))}
           </Layer>
         </Stage>
+        {editingLink && editingLinkAnchor && (
+          <div
+            className="absolute z-20 -translate-x-1/2 -translate-y-full bg-[#25262b] border border-[#373a40] rounded px-2 py-1 flex items-center gap-1"
+            style={{ left: editingLinkAnchor.x, top: editingLinkAnchor.y }}
+          >
+            <input
+              value={editingLinkValue.portA}
+              onChange={(e) => setEditingLinkValue((p) => ({ ...p, portA: e.target.value }))}
+              className="bg-[#141517] border border-[#373a40] rounded px-1 py-0.5 text-[10px] text-white w-20"
+            />
+            <span className="text-[#909296] text-[10px]">&lt;-&gt;</span>
+            <input
+              value={editingLinkValue.portB}
+              onChange={(e) => setEditingLinkValue((p) => ({ ...p, portB: e.target.value }))}
+              className="bg-[#141517] border border-[#373a40] rounded px-1 py-0.5 text-[10px] text-white w-20"
+            />
+            <button
+              className="text-[#40c057] px-1 text-[10px]"
+              onClick={() => {
+                handleRenameLink(editingLink, editingLinkValue);
+                setEditingLinkId(null);
+              }}
+              title={t('save')}
+            >
+              ok
+            </button>
+            <button
+              className="text-[#fa5252] px-1 text-[10px]"
+              onClick={() => setEditingLinkId(null)}
+              title={t('cancel')}
+            >
+              x
+            </button>
+          </div>
+        )}
 
         <div className="absolute bottom-6 right-6 p-4 bg-[#25262b] border border-[#373a40] rounded text-[10px] font-mono text-[#909296] pointer-events-none z-10">
           {t('topologyCanvasHint')}
@@ -739,17 +796,18 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           <div className="font-bold mb-2 text-white">Manual links</div>
           <div className="space-y-1 max-h-40 overflow-auto">
             {links.map((l, i) => (
-              <div key={`${l.source}-${l.target}-${i}`} className="flex items-center justify-between gap-2">
+              <div key={`${l.id || `${l.source}-${l.target}-${i}`}`} className="flex items-center justify-between gap-2">
                 {(() => {
-                  const key = `${l.source}::${l.target}::${l.portA}::${l.portB}::${i}`;
-                  const isEditing = editingLinkKey === key;
+                  const key = l.id || '';
+                  const isEditing = !!key && editingLinkId === key;
                   if (!isEditing) {
                     return (
                       <span
                         className="cursor-text"
                         title="Click to rename"
                         onClick={() => {
-                          setEditingLinkKey(key);
+                          if (!key) return;
+                          setEditingLinkId(key);
                           setEditingLinkValue({ portA: l.portA, portB: l.portB });
                         }}
                       >
@@ -774,7 +832,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                         className="text-[#40c057] px-1"
                         onClick={() => {
                           handleRenameLink(l, editingLinkValue);
-                          setEditingLinkKey(null);
+                          setEditingLinkId(null);
                         }}
                         title="Save"
                       >
@@ -782,7 +840,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                       </button>
                       <button
                         className="text-[#fa5252] px-1"
-                        onClick={() => setEditingLinkKey(null)}
+                        onClick={() => setEditingLinkId(null)}
                         title="Cancel"
                       >
                         x

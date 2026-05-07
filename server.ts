@@ -101,6 +101,7 @@ function legacySshConnectOptions() {
 }
 
 type TopologyLink = {
+  id?: string;
   source: string;
   target: string;
   portA: string;
@@ -534,7 +535,7 @@ async function runDiscoveryScan(input: DiscoveryScanInput): Promise<DiscoverySca
       if (!probe.ok) continue;
       foundIps.push(ip);
       const vendor = probe.sysDescr ? detectVendorFromSnmp(probe.sysDescr, probe.sysObjectId || "") : "Unknown";
-      const model = probe.sysDescr ? detectModelFromSnmp(probe.sysDescr) : "Unknown";
+      const model = detectModelFromSnmp(probe.sysDescr || "", probe.sysObjectId || "", probe.sysName || "");
       const category = detectCategoryFromSnmp(probe.sysDescr || "", probe.sysObjectId || "");
       const trunkCount = await getTrunkPortCountFromSnmp(ip);
       const subcategory = trunkCount >= 2 ? "Core" : trunkCount === 1 ? "Distribution" : "Access";
@@ -593,6 +594,15 @@ function formatDuration(seconds: number): string {
   return `${d}d ${h}h ${m}m`;
 }
 
+function makeTopologyLinkId(): string {
+  return `lnk-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function ensureTopologyLinkId(link: TopologyLink): TopologyLink {
+  if (link.id) return link;
+  return { ...link, id: makeTopologyLinkId() };
+}
+
 function detectVendorFromSnmp(sysDescr: string, sysObjectId: string): string {
   const d = (sysDescr || "").toLowerCase();
   const oid = (sysObjectId || "").toLowerCase();
@@ -635,8 +645,18 @@ function parseModelFromDescr(descr: string): string {
   return trimmed.split("\n")[0].trim().slice(0, 80);
 }
 
-function detectModelFromSnmp(sysDescr: string): string {
+function detectModelFromSnmp(sysDescr: string, sysObjectId = "", sysName = ""): string {
   const d = (sysDescr || "").toLowerCase();
+  const oid = (sysObjectId || "").toLowerCase();
+  const n = (sysName || "").toLowerCase();
+  const join = `${sysDescr || ""} ${sysName || ""}`;
+  const mikrotikModel = join.match(/\b(CCR(?:\s|-)?\d{4}[A-Z0-9\/-]*|CRS(?:\s|-)?\d{3}[A-Z0-9\/-]*|RB\d+[A-Z0-9\/-]*|CSS\d+[A-Z0-9\/-]*)\b/i);
+  if (mikrotikModel?.[1]) {
+    return mikrotikModel[1].replace(/\s+/g, "").toUpperCase();
+  }
+  if (oid.startsWith("1.3.6.1.4.1.14988") || d.includes("mikrotik") || d.includes("routeros") || d.includes("routerboard") || n.includes("mikrotik")) {
+    return "MikroTik Device";
+  }
   if (!d.trim()) return "Unknown";
   if (/\b1910\b/.test(d) || d.includes("v1910") || d.includes("jg538a")) return "HP 1910";
   if (/\b1810\b/.test(d) || d.includes("j9450a") || d.includes("j9660a")) return "HP 1810";
@@ -684,8 +704,13 @@ const uptimeOidProfiles: Array<{ oid: string; multiplier: number }> = [
 function detectCategoryFromSnmp(sysDescr: string, sysObjectId: string): string {
   const d = (sysDescr || "").toLowerCase();
   const oid = (sysObjectId || "").toLowerCase();
+  const model = detectModelFromSnmp(sysDescr, sysObjectId).toLowerCase();
   if (d.includes("ups") || d.includes("apc") || d.includes("eaton") || oid.startsWith("1.3.6.1.4.1.318")) {
     return "UPS";
+  }
+  if (oid.startsWith("1.3.6.1.4.1.14988")) {
+    if (model.startsWith("crs") || model.startsWith("css")) return "Switch";
+    return "Router";
   }
   if (d.includes("router")) return "Router";
   if (d.includes("firewall") || d.includes("fortigate") || d.includes("palo alto")) return "Firewall";
@@ -1141,7 +1166,9 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
 
 function rebuildTopologyFromInventory() {
   const existing = new Set(inventory.map((i) => i.id));
-  topologyLinks = topologyLinks.filter((l) => existing.has(l.source) && existing.has(l.target));
+  topologyLinks = topologyLinks
+    .filter((l) => existing.has(l.source) && existing.has(l.target))
+    .map((l) => ensureTopologyLinkId(l));
 }
 
 function testLdapServiceBind(profile: LdapRoleProfile): Promise<{ ok: boolean; message: string }> {
@@ -1493,7 +1520,7 @@ async function startServer() {
           };
         }
         const nextVendor = probe.sysDescr ? detectVendorFromSnmp(probe.sysDescr, probe.sysObjectId || "") : item.vendor;
-        const nextModel = probe.sysDescr ? detectModelFromSnmp(probe.sysDescr) : item.model;
+        const nextModel = detectModelFromSnmp(probe.sysDescr || "", probe.sysObjectId || "", probe.sysName || "") || item.model;
         const nextName = probe.sysName?.trim() ? probe.sysName.trim() : item.name;
         const nextCategory = detectCategoryFromSnmp(probe.sysDescr || "", probe.sysObjectId || "");
         const uptimeSeconds = probe.uptimeSeconds ?? item.uptimeSeconds ?? 0;
@@ -1800,6 +1827,7 @@ async function startServer() {
   });
 
   app.get("/api/topology/links", (_req, res) => {
+    topologyLinks = topologyLinks.map((l) => ensureTopologyLinkId(l));
     res.json({ links: topologyLinks, layout: topologyLayout });
   });
 
@@ -1961,13 +1989,14 @@ async function startServer() {
         (l.source === target && l.target === source && l.portA === portB && l.portB === portA)
     );
     if (!exists) {
-      topologyLinks.push({ source, target, portA: portA || "N/A", portB: portB || "N/A", manual: true });
+      topologyLinks.push(ensureTopologyLinkId({ source, target, portA: portA || "N/A", portB: portB || "N/A", manual: true }));
     }
     res.json({ success: true, links: topologyLinks });
   });
 
   app.post("/api/topology/links/rename", checkRole(["admin", "operator"]), (req, res) => {
     const body = req.body as {
+      id?: string;
       source?: string;
       target?: string;
       portA?: string;
@@ -1977,6 +2006,7 @@ async function startServer() {
     };
     const source = String(body.source || "").trim();
     const target = String(body.target || "").trim();
+    const id = String(body.id || "").trim();
     const portA = String(body.portA || "").trim();
     const portB = String(body.portB || "").trim();
     const newPortA = String(body.newPortA || "").trim();
@@ -1984,41 +2014,46 @@ async function startServer() {
     if (!source || !target || !portA || !portB) return res.status(400).json({ error: "Invalid link" });
     if (!newPortA && !newPortB) return res.status(400).json({ error: "newPortA/newPortB required" });
 
-    const idx = topologyLinks.findIndex(
-      (l) => l.source === source && l.target === target && l.portA === portA && l.portB === portB
-    );
-    const revIdx = topologyLinks.findIndex(
-      (l) => l.source === target && l.target === source && l.portA === portB && l.portB === portA
-    );
+    const idx = id
+      ? topologyLinks.findIndex((l) => l.id === id)
+      : topologyLinks.findIndex(
+          (l) => l.source === source && l.target === target && l.portA === portA && l.portB === portB
+        );
+    const revIdx = idx >= 0 || id
+      ? -1
+      : topologyLinks.findIndex(
+          (l) => l.source === target && l.target === source && l.portA === portB && l.portB === portA
+        );
     const pick = idx >= 0 ? idx : revIdx;
     if (pick < 0) return res.status(404).json({ error: "Link not found" });
 
     const cur = topologyLinks[pick];
-    topologyLinks[pick] = {
+    topologyLinks[pick] = ensureTopologyLinkId({
       ...cur,
       portA: newPortA || cur.portA,
       portB: newPortB || cur.portB,
       renamed: true,
-    };
+    });
     return res.json({ success: true, links: topologyLinks });
   });
 
   app.delete("/api/topology/links", checkRole(["admin", "operator"]), (req, res) => {
-    const body = req.body as { source?: string; target?: string; portA?: string; portB?: string };
+    const body = req.body as { id?: string; source?: string; target?: string; portA?: string; portB?: string };
+    const id = String(body.id || "").trim();
     const source = String(body.source || "").trim();
     const target = String(body.target || "").trim();
     const portA = String(body.portA || "").trim();
     const portB = String(body.portB || "").trim();
     const before = topologyLinks.length;
-    topologyLinks = topologyLinks.filter(
-      (l) =>
-        !(
-          l.source === source &&
-          l.target === target &&
-          l.portA === portA &&
-          l.portB === portB
-        )
-    );
+    topologyLinks = topologyLinks.filter((l) => {
+      if (id) return l.id !== id;
+      return !(
+        l.source === source &&
+        l.target === target &&
+        l.portA === portA &&
+        l.portB === portB
+      );
+    });
     res.json({ success: true, removed: before - topologyLinks.length, links: topologyLinks });
   });
 
