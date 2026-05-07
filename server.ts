@@ -100,7 +100,14 @@ function legacySshConnectOptions() {
   };
 }
 
-type TopologyLink = { source: string; target: string; portA: string; portB: string };
+type TopologyLink = {
+  source: string;
+  target: string;
+  portA: string;
+  portB: string;
+  manual?: boolean; // created by user
+  renamed?: boolean; // ports were edited by user
+};
 let topologyLinks: TopologyLink[] = [];
 let topologyLayout: Record<string, { x: number; y: number }> = {};
 
@@ -210,6 +217,23 @@ async function getTrunkPortCountFromSnmp(host: string): Promise<number> {
   } catch {
     return 0;
   }
+}
+
+async function classifyInventorySubcategoriesBySnmp(branch?: string) {
+  const filterBranch = String(branch || "").trim();
+  const targets = filterBranch ? inventory.filter((i) => String(i.branch || "").trim() === filterBranch) : inventory;
+  const touched: Array<{ id: string; trunkCount: number; subcategory: string }> = [];
+  await forEachWithLimit(targets, 16, async (item) => {
+    const trunkCount = await getTrunkPortCountFromSnmp(item.ip);
+    const subcategory = trunkCount >= 2 ? "Core" : trunkCount === 1 ? "Distribution" : "Access";
+    if ((item.subcategory || "") !== subcategory) {
+      item.subcategory = subcategory;
+      touched.push({ id: item.id, trunkCount, subcategory });
+    }
+  });
+  // ensure dictionary contains the expected values
+  inventoryMeta.subcategories = Array.from(new Set([...(inventoryMeta.subcategories || []), "Core", "Distribution", "Access"]));
+  return { updated: touched.length, devices: touched };
 }
 
 type SnmpOidDef = {
@@ -1777,12 +1801,75 @@ async function startServer() {
             .filter((item) => String(item.branch || "").trim() === branch)
             .map((item) => item.id)
         );
-        const externalLinks = topologyLinks.filter(
-          (l) => !branchDeviceIds.has(l.source) || !branchDeviceIds.has(l.target)
-        );
-        topologyLinks = [...externalLinks, ...links];
+        const externalLinks = topologyLinks.filter((l) => !branchDeviceIds.has(l.source) || !branchDeviceIds.has(l.target));
+        const existingBranchLinks = topologyLinks.filter((l) => branchDeviceIds.has(l.source) && branchDeviceIds.has(l.target));
+
+        const keyOf = (l: { source: string; target: string }) => [l.source, l.target].sort().join("::");
+
+        // Build inferred links map (by undirected pair key).
+        const inferredByPair = new Map<string, TopologyLink>();
+        (links || []).forEach((l) => inferredByPair.set(keyOf(l), { ...l, manual: false }));
+
+        // 1) Preserve user-renamed port labels by overriding inferred labels.
+        existingBranchLinks
+          .filter((l) => l.renamed)
+          .forEach((l) => {
+            const k = keyOf(l);
+            const inf = inferredByPair.get(k);
+            if (inf) {
+              inferredByPair.set(k, { ...inf, portA: l.portA, portB: l.portB, renamed: true });
+            }
+          });
+
+        // 2) Preserve truly manual links (not removed by rebuild).
+        const manualLinks = existingBranchLinks.filter((l) => l.manual);
+
+        // Avoid exact duplicates.
+        const dedupe = new Set<string>();
+        const outBranch: TopologyLink[] = [];
+        Array.from(inferredByPair.values()).forEach((l) => {
+          const dk = `${l.source}::${l.target}::${l.portA}::${l.portB}`;
+          if (dedupe.has(dk)) return;
+          dedupe.add(dk);
+          outBranch.push(l);
+        });
+        manualLinks.forEach((l) => {
+          const dk = `${l.source}::${l.target}::${l.portA}::${l.portB}`;
+          if (dedupe.has(dk)) return;
+          dedupe.add(dk);
+          outBranch.push(l);
+        });
+
+        topologyLinks = [...externalLinks, ...outBranch];
       } else {
-        topologyLinks = links;
+        // Global rebuild: keep all manual links + keep renamed labels where possible.
+        const keyOf = (l: { source: string; target: string }) => [l.source, l.target].sort().join("::");
+        const inferredByPair = new Map<string, TopologyLink>();
+        (links || []).forEach((l) => inferredByPair.set(keyOf(l), { ...l, manual: false }));
+
+        topologyLinks
+          .filter((l) => l.renamed)
+          .forEach((l) => {
+            const inf = inferredByPair.get(keyOf(l));
+            if (inf) inferredByPair.set(keyOf(l), { ...inf, portA: l.portA, portB: l.portB, renamed: true });
+          });
+
+        const manualLinks = topologyLinks.filter((l) => l.manual);
+        const dedupe = new Set<string>();
+        const out: TopologyLink[] = [];
+        Array.from(inferredByPair.values()).forEach((l) => {
+          const dk = `${l.source}::${l.target}::${l.portA}::${l.portB}`;
+          if (dedupe.has(dk)) return;
+          dedupe.add(dk);
+          out.push(l);
+        });
+        manualLinks.forEach((l) => {
+          const dk = `${l.source}::${l.target}::${l.portA}::${l.portB}`;
+          if (dedupe.has(dk)) return;
+          dedupe.add(dk);
+          out.push(l);
+        });
+        topologyLinks = out;
       }
       rebuildTopologyFromInventory();
       const actor = (req.headers["x-user-name"] as string) || "unknown";
@@ -1793,6 +1880,24 @@ async function startServer() {
         "inventory"
       );
       return res.json({ success: true, links: topologyLinks, layout: topologyLayout });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return res.status(500).json({ success: false, error: msg });
+    }
+  });
+
+  app.post("/api/topology/classify-subcategories", checkRole(["admin", "operator"]), async (req, res) => {
+    try {
+      const branch = String(req.body?.branch || "").trim();
+      const out = await classifyInventorySubcategoriesBySnmp(branch || undefined);
+      const actor = (req.headers["x-user-name"] as string) || "unknown";
+      logAction(
+        actor,
+        "Classify Subcategories",
+        `Updated: ${out.updated}${branch ? ` (branch: ${branch})` : ""}`,
+        "inventory"
+      );
+      return res.json({ success: true, ...out });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       return res.status(500).json({ success: false, error: msg });
@@ -1844,9 +1949,46 @@ async function startServer() {
         (l.source === target && l.target === source && l.portA === portB && l.portB === portA)
     );
     if (!exists) {
-      topologyLinks.push({ source, target, portA: portA || "N/A", portB: portB || "N/A" });
+      topologyLinks.push({ source, target, portA: portA || "N/A", portB: portB || "N/A", manual: true });
     }
     res.json({ success: true, links: topologyLinks });
+  });
+
+  app.post("/api/topology/links/rename", checkRole(["admin", "operator"]), (req, res) => {
+    const body = req.body as {
+      source?: string;
+      target?: string;
+      portA?: string;
+      portB?: string;
+      newPortA?: string;
+      newPortB?: string;
+    };
+    const source = String(body.source || "").trim();
+    const target = String(body.target || "").trim();
+    const portA = String(body.portA || "").trim();
+    const portB = String(body.portB || "").trim();
+    const newPortA = String(body.newPortA || "").trim();
+    const newPortB = String(body.newPortB || "").trim();
+    if (!source || !target || !portA || !portB) return res.status(400).json({ error: "Invalid link" });
+    if (!newPortA && !newPortB) return res.status(400).json({ error: "newPortA/newPortB required" });
+
+    const idx = topologyLinks.findIndex(
+      (l) => l.source === source && l.target === target && l.portA === portA && l.portB === portB
+    );
+    const revIdx = topologyLinks.findIndex(
+      (l) => l.source === target && l.target === source && l.portA === portB && l.portB === portA
+    );
+    const pick = idx >= 0 ? idx : revIdx;
+    if (pick < 0) return res.status(404).json({ error: "Link not found" });
+
+    const cur = topologyLinks[pick];
+    topologyLinks[pick] = {
+      ...cur,
+      portA: newPortA || cur.portA,
+      portB: newPortB || cur.portB,
+      renamed: true,
+    };
+    return res.json({ success: true, links: topologyLinks });
   });
 
   app.delete("/api/topology/links", checkRole(["admin", "operator"]), (req, res) => {

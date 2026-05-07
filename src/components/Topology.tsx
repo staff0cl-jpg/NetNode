@@ -11,7 +11,7 @@ interface TopologyProps {
   onOpenSSH?: (sw: Switch) => void;
 }
 
-type TopoLink = { source: string; target: string; portA: string; portB: string };
+type TopoLink = { source: string; target: string; portA: string; portB: string; manual?: boolean; renamed?: boolean };
 
 type NodeWithPos = Switch & { x: number; y: number };
 
@@ -210,6 +210,8 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   const [selectedRegion, setSelectedRegion] = useState<string>('');
   const [newRegion, setNewRegion] = useState('');
   const [regionEditor, setRegionEditor] = useState({ from: '', to: '' });
+  const [editingLinkKey, setEditingLinkKey] = useState<string | null>(null);
+  const [editingLinkValue, setEditingLinkValue] = useState<{ portA: string; portB: string }>({ portA: '', portB: '' });
   const topologySwitches = React.useMemo(() => {
     const allowed = new Set(['switch', 'router', 'коммутатор', 'маршрутизатор']);
     return switches.filter((s) => allowed.has(String(s.category || '').trim().toLowerCase()));
@@ -297,6 +299,21 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       const data: { links: TopoLink[]; layout?: Record<string, { x: number; y: number }> } = await response.json();
       setLinks(data.links || []);
       setSavedLayout(data.layout || {});
+
+      // After rebuilding topology for this tab, classify inventory subcategories by trunk count (SNMP).
+      try {
+        await fetch('/api/topology/classify-subcategories', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-user-role': role || 'viewer',
+            'x-user-name': username || 'unknown'
+          },
+          body: JSON.stringify({ branch: selectedRegion })
+        });
+      } catch {
+        // ignore classification errors
+      }
       const w = containerRef.current?.offsetWidth || canvasSize.width;
       const h = containerRef.current?.offsetHeight || canvasSize.height;
       const visibleLinks = (data.links || []).filter((l) => topologySwitchIds.has(l.source) && topologySwitchIds.has(l.target));
@@ -399,6 +416,22 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       }
     } catch (error) {
       console.error('Failed to delete link:', error);
+    }
+  };
+
+  const handleRenameLink = async (link: TopoLink, next: { portA: string; portB: string }) => {
+    try {
+      const res = await fetch('/api/topology/links/rename', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...link, newPortA: next.portA, newPortB: next.portB }),
+      });
+      const data = await res.json();
+      if (res.ok && Array.isArray(data.links)) {
+        setLinks(data.links);
+      }
+    } catch (error) {
+      console.error('Failed to rename link:', error);
     }
   };
 
@@ -610,6 +643,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
             {links.filter((l) => topologySwitchIds.has(l.source) && topologySwitchIds.has(l.target)).map((link, i) => {
               const start = getNodeCenter(link.source);
               const end = getNodeCenter(link.target);
+              const linkKey = `${link.source}::${link.target}::${link.portA}::${link.portB}::${i}`;
               return (
                 <React.Fragment key={`link-${link.source}-${link.target}-${i}`}>
                   <Line
@@ -625,6 +659,10 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                     fill="#5c5f66"
                     fontSize={8}
                     align="center"
+                    onClick={() => {
+                      setEditingLinkKey(linkKey);
+                      setEditingLinkValue({ portA: link.portA, portB: link.portB });
+                    }}
                   />
                 </React.Fragment>
               );
@@ -702,7 +740,56 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           <div className="space-y-1 max-h-40 overflow-auto">
             {links.map((l, i) => (
               <div key={`${l.source}-${l.target}-${i}`} className="flex items-center justify-between gap-2">
-                <span>{l.portA} - {l.portB}</span>
+                {(() => {
+                  const key = `${l.source}::${l.target}::${l.portA}::${l.portB}::${i}`;
+                  const isEditing = editingLinkKey === key;
+                  if (!isEditing) {
+                    return (
+                      <span
+                        className="cursor-text"
+                        title="Click to rename"
+                        onClick={() => {
+                          setEditingLinkKey(key);
+                          setEditingLinkValue({ portA: l.portA, portB: l.portB });
+                        }}
+                      >
+                        {l.portA} - {l.portB}
+                      </span>
+                    );
+                  }
+                  return (
+                    <span className="flex items-center gap-1">
+                      <input
+                        value={editingLinkValue.portA}
+                        onChange={(e) => setEditingLinkValue((p) => ({ ...p, portA: e.target.value }))}
+                        className="bg-[#141517] border border-[#373a40] rounded px-1 py-0.5 text-[10px] text-white w-20"
+                      />
+                      <span>-</span>
+                      <input
+                        value={editingLinkValue.portB}
+                        onChange={(e) => setEditingLinkValue((p) => ({ ...p, portB: e.target.value }))}
+                        className="bg-[#141517] border border-[#373a40] rounded px-1 py-0.5 text-[10px] text-white w-20"
+                      />
+                      <button
+                        className="text-[#40c057] px-1"
+                        onClick={() => {
+                          handleRenameLink(l, editingLinkValue);
+                          setEditingLinkKey(null);
+                        }}
+                        title="Save"
+                      >
+                        ok
+                      </button>
+                      <button
+                        className="text-[#fa5252] px-1"
+                        onClick={() => setEditingLinkKey(null)}
+                        title="Cancel"
+                      >
+                        x
+                      </button>
+                    </span>
+                  );
+                })()}
                 <button onClick={() => handleDeleteLink(l)} className="text-red-400">x</button>
               </div>
             ))}
