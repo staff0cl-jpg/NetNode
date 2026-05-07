@@ -1189,7 +1189,7 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
   };
   const looksLikeFcPort = (ifName: string, alias: string, descr: string): boolean => {
     const v = `${ifName} ${alias} ${descr}`.toLowerCase();
-    return /\b(fc\d+\/\d+|fibre|fiber|san|port\s*\d+)\b/.test(v);
+    return /\b(fc\d+\/\d+|fc\d+|\d+\/\d+|fibre|fiber|san|port\s*\d+|port\d+|sfp)\b/.test(v);
   };
   const norm = (v: string) => v.toLowerCase().replace(/\s+/g, " ").trim();
   const genericDevices = devices.filter((d) => !isFcSwitch(d));
@@ -1294,6 +1294,31 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
     }
   });
 
+  // Generic fallback: infer links from interface comments/aliases that mention peer devices.
+  // Useful for MikroTik and other platforms where trunk keywords are absent but comments are present.
+  await forEachWithLimit(genericDevices, 12, async (dev) => {
+    try {
+      const [ifNameMap, ifAliasMap, ifDescrMap] = await Promise.all([
+        snmpWalk(dev.ip, "1.3.6.1.2.1.31.1.1.1.1"), // ifName
+        snmpWalk(dev.ip, "1.3.6.1.2.1.31.1.1.1.18"), // ifAlias / comment
+        snmpWalk(dev.ip, "1.3.6.1.2.1.2.2.1.2"), // ifDescr
+      ]);
+      const indexes = new Set([...Object.keys(ifNameMap), ...Object.keys(ifAliasMap), ...Object.keys(ifDescrMap)]);
+      for (const ifIndex of indexes) {
+        const ifName = String(ifNameMap[ifIndex] || `if${ifIndex}`).trim();
+        const alias = String(ifAliasMap[ifIndex] || "").trim();
+        const descr = String(ifDescrMap[ifIndex] || "").trim();
+        const hintRaw = `${alias} ${descr}`.trim();
+        if (!hintRaw || hintRaw.length < 3) continue;
+        const peer = findDeviceByNameHint(hintRaw, dev.id);
+        if (!peer || isFcSwitch(peer)) continue;
+        directed.push({ source: dev.id, target: peer.id, portA: ifName || `if${ifIndex}`, raw: `IF-COMMENT:${hintRaw}` });
+      }
+    } catch {
+      // continue
+    }
+  });
+
   // FC-specific path: LLDP correlation with CORE<->EDGE pairing by switch naming.
   const fcDevices = devices.filter((d) => isFcSwitch(d));
   await forEachWithLimit(fcDevices, 10, async (dev) => {
@@ -1351,8 +1376,9 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
         const ifName = String(ifNameMap[ifIndex] || `if${ifIndex}`).trim();
         const alias = String(ifAliasMap[ifIndex] || "").trim();
         const descr = String(ifDescrMap[ifIndex] || "").trim();
-        if (!looksLikeFcPort(ifName, alias, descr)) continue;
-        const hint = norm(`${alias} ${descr}`);
+        const hintRaw = `${alias} ${descr}`.trim();
+        if (!hintRaw && !looksLikeFcPort(ifName, alias, descr)) continue;
+        const hint = norm(hintRaw || ifName);
         const peer = findDeviceByNameHint(hint, dev.id);
         if (!peer || !isFcSwitch(peer)) continue;
         const peerRole = detectFcRole(peer);
@@ -1368,6 +1394,74 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
       // continue
     }
   });
+
+  // FC hard fallback: if peer hints are absent, still build CORE<->EDGE links using active FC-like ports.
+  // This is intentionally simple to provide a visible SAN topology even on devices without LLDP/comments.
+  const existingFcPair = new Set(
+    directed
+      .filter((d) => {
+        const s = byId.get(d.source);
+        const t = byId.get(d.target);
+        return !!s && !!t && isFcSwitch(s) && isFcSwitch(t);
+      })
+      .map((d) => [d.source, d.target].sort().join("::"))
+  );
+  const getActiveFcPorts = async (dev: InventoryItem): Promise<string[]> => {
+    try {
+      const [ifNameMap, ifAliasMap, ifDescrMap, ifOperMap] = await Promise.all([
+        snmpWalk(dev.ip, "1.3.6.1.2.1.31.1.1.1.1"), // ifName
+        snmpWalk(dev.ip, "1.3.6.1.2.1.31.1.1.1.18"), // ifAlias
+        snmpWalk(dev.ip, "1.3.6.1.2.1.2.2.1.2"), // ifDescr
+        snmpWalk(dev.ip, "1.3.6.1.2.1.2.2.1.8"), // ifOperStatus
+      ]);
+      const indexes = new Set([...Object.keys(ifNameMap), ...Object.keys(ifAliasMap), ...Object.keys(ifDescrMap), ...Object.keys(ifOperMap)]);
+      const ports: string[] = [];
+      for (const ifIndex of indexes) {
+        const ifName = String(ifNameMap[ifIndex] || `if${ifIndex}`).trim();
+        const alias = String(ifAliasMap[ifIndex] || "").trim();
+        const descr = String(ifDescrMap[ifIndex] || "").trim();
+        const oper = Number(ifOperMap[ifIndex] || 0);
+        if (oper !== 1) continue;
+        if (!looksLikeFcPort(ifName, alias, descr)) continue;
+        ports.push(ifName || `if${ifIndex}`);
+      }
+      return ports;
+    } catch {
+      return [];
+    }
+  };
+  if (fcDevices.length >= 2) {
+    const cores = fcDevices.filter((d) => detectFcRole(d) === "core");
+    const edges = fcDevices.filter((d) => detectFcRole(d) === "edge");
+    if (cores.length > 0 && edges.length > 0) {
+      const portsByDevice = new Map<string, string[]>();
+      await forEachWithLimit([...cores, ...edges], 8, async (d) => {
+        portsByDevice.set(d.id, await getActiveFcPorts(d));
+      });
+      const usedPort = new Set<string>();
+      const pickPort = (devId: string) => {
+        const ports = portsByDevice.get(devId) || [];
+        const p = ports.find((x) => !usedPort.has(`${devId}:${x}`));
+        if (!p) return "fc-port";
+        usedPort.add(`${devId}:${p}`);
+        return p;
+      };
+      for (const edge of edges) {
+        // Prefer at least one core link for each edge.
+        const preferredCores = [...cores];
+        for (const core of preferredCores) {
+          const pairKey = [core.id, edge.id].sort().join("::");
+          if (existingFcPair.has(pairKey)) continue;
+          const corePort = pickPort(core.id);
+          const edgePort = pickPort(edge.id);
+          directed.push({ source: core.id, target: edge.id, portA: corePort, raw: "FC-SYNTHETIC" });
+          directed.push({ source: edge.id, target: core.id, portA: edgePort, raw: "FC-SYNTHETIC" });
+          existingFcPair.add(pairKey);
+          break;
+        }
+      }
+    }
+  }
 
   const used = new Set<string>();
   const out: TopologyLink[] = [];

@@ -35,6 +35,121 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
     degree.set(l.target, (degree.get(l.target) || 0) + 1);
   });
 
+  const lower = (v?: string) => String(v || '').trim().toLowerCase();
+  const isRouterLike = (s: Switch) =>
+    lower(s.category) === 'router' ||
+    lower(s.category) === 'маршрутизатор' ||
+    lower(s.vendor) === 'mikrotik';
+  const isCoreLike = (s: Switch) =>
+    lower(s.subcategory) === 'core' ||
+    lower(s.vendor) === 'cisco';
+  const isAccessLike = (s: Switch) =>
+    lower(s.vendor) === 'hpe' ||
+    lower(s.vendor) === 'aruba' ||
+    lower(s.subcategory) === 'access' ||
+    lower(s.subcategory) === 'distribution';
+
+  // Preferred L2/L3 hierarchy layout:
+  // Router/MikroTik -> Cisco Core -> HPE/Aruba Access (star-like per core).
+  const routers = switches.filter(isRouterLike);
+  const cores = switches.filter((s) => !isRouterLike(s) && isCoreLike(s));
+  const access = switches.filter((s) => !isRouterLike(s) && !isCoreLike(s) && isAccessLike(s));
+  const others = switches.filter((s) => !routers.includes(s) && !cores.includes(s) && !access.includes(s));
+  if (routers.length > 0 && cores.length > 0) {
+    const pos = new Map<string, { x: number; y: number }>();
+    const minX = 120;
+    const maxX = width - 280;
+    const span = Math.max(300, maxX - minX);
+    const placeRow = (items: Switch[], y: number) => {
+      if (!items.length) return;
+      if (items.length === 1) {
+        pos.set(items[0].id, { x: minX + span / 2, y });
+        return;
+      }
+      items.forEach((s, i) => {
+        const x = minX + (span * i) / (items.length - 1);
+        pos.set(s.id, { x, y });
+      });
+    };
+
+    placeRow(routers, 90);
+    placeRow(cores, Math.min(height * 0.42, 320));
+
+    const coreById = new Map(cores.map((c) => [c.id, c]));
+    const assignCore = (nodeId: string) => {
+      const direct = Array.from(adj.get(nodeId) || []).find((id) => coreById.has(id));
+      if (direct) return direct;
+      const queue = [nodeId];
+      const visited = new Set<string>([nodeId]);
+      while (queue.length) {
+        const u = queue.shift()!;
+        for (const v of adj.get(u) || []) {
+          if (visited.has(v)) continue;
+          visited.add(v);
+          if (coreById.has(v)) return v;
+          queue.push(v);
+        }
+      }
+      const idx = Math.abs(nodeId.split('').reduce((a, ch) => a + ch.charCodeAt(0), 0)) % cores.length;
+      return cores[idx].id;
+    };
+    const byCore = new Map<string, Switch[]>();
+    [...access, ...others].forEach((s) => {
+      const coreId = assignCore(s.id);
+      if (!byCore.has(coreId)) byCore.set(coreId, []);
+      byCore.get(coreId)!.push(s);
+    });
+
+    cores.forEach((core) => {
+      const center = pos.get(core.id) || { x: minX + span / 2, y: Math.min(height * 0.42, 320) };
+      const members = byCore.get(core.id) || [];
+      members.sort((a, b) => (degree.get(b.id) || 0) - (degree.get(a.id) || 0));
+      const baseRadius = 170;
+      members.forEach((m, i) => {
+        const ring = Math.floor(i / 8);
+        const slot = i % 8;
+        const radius = baseRadius + ring * 95;
+        const angle = Math.PI * (0.1 + (slot / Math.max(1, Math.min(8, members.length))) * 0.8); // bottom arc
+        pos.set(m.id, {
+          x: center.x + Math.cos(angle) * radius,
+          y: center.y + Math.sin(angle) * radius + 70,
+        });
+      });
+    });
+
+    const points = switches.map((s) => ({ id: s.id, ...(pos.get(s.id) || { x: width / 2, y: height / 2 }) }));
+    const minDx = 220;
+    const minDy = 120;
+    for (let iter = 0; iter < 110; iter++) {
+      let moved = false;
+      for (let i = 0; i < points.length; i++) {
+        for (let j = i + 1; j < points.length; j++) {
+          const a = points[i];
+          const b = points[j];
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          if (Math.abs(dx) < minDx && Math.abs(dy) < minDy) {
+            const pushX = (minDx - Math.abs(dx)) * 0.2 * (dx >= 0 ? 1 : -1);
+            const pushY = (minDy - Math.abs(dy)) * 0.2 * (dy >= 0 ? 1 : -1);
+            a.x -= pushX; b.x += pushX;
+            a.y -= pushY; b.y += pushY;
+            moved = true;
+          }
+        }
+      }
+      if (!moved) break;
+    }
+
+    return switches.map((s) => {
+      const p = points.find((x) => x.id === s.id);
+      return {
+        ...s,
+        x: Math.min(width - 220, Math.max(40, p?.x ?? width / 2)),
+        y: Math.min(height - 120, Math.max(40, p?.y ?? height / 2)),
+      };
+    });
+  }
+
   const seen = new Set<string>();
   const components: string[][] = [];
   for (const s of switches) {
