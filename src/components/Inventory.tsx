@@ -38,11 +38,10 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
   
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
-  const [zoneFilter, setZoneFilter] = useState<string>('all');
   const [subcategoryFilter, setSubcategoryFilter] = useState<string>('all');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [isBulkProcessing, setIsBulkProcessing] = useState(false);
-  const [sortConfig, setSortConfig] = useState<{ key: keyof Switch | 'vendorModel' | 'location'; direction: 'asc' | 'desc' } | null>(null);
+  const [sortConfig, setSortConfig] = useState<{ key: keyof Switch | 'vendorModel'; direction: 'asc' | 'desc' } | null>(null);
   const [isAdding, setIsAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [newSwitch, setNewSwitch] = useState<Partial<Switch>>({
@@ -174,7 +173,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
         ip: (newSwitch.ip || '').trim(),
         model: (newSwitch.model || '').trim() || 'Unknown',
         city: (newSwitch.city || '').trim(),
-        zone: (newSwitch.zone || '').trim() || (meta.zones[0] || 'Core'),
+        zone: (newSwitch.zone || '').trim() || String(newSwitch.subcategory || '').trim() || (meta.zones[0] || 'Core'),
         status: newSwitch.status || 'online',
         uptime: newSwitch.uptime || '0d 0h',
         customOids: customOidsText
@@ -249,8 +248,8 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
   };
 
   const handleExport = () => {
-    const headers = ['Name', 'Vendor', 'Model', 'Category', 'Branch', 'IP', 'City', 'Zone', 'Status', 'Uptime'];
-    const rows = switches.map(s => [s.name, s.vendor, s.model, s.category || 'Switch', s.branch || 'ULN', s.ip, s.city, s.zone, s.status, s.uptime]);
+    const headers = ['Name', 'Vendor', 'Model', 'Category', 'Branch', 'IP', 'City', 'Status', 'Uptime'];
+    const rows = switches.map(s => [s.name, s.vendor, s.model, s.category || 'Switch', s.branch || 'ULN', s.ip, s.city, s.status, s.uptime]);
     const csvContent = [headers, ...rows].map(e => e.join(",")).join("\n");
     const blob = new Blob([csvContent], { type: 'text/csv' });
     const url = window.URL.createObjectURL(blob);
@@ -260,7 +259,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
     a.click();
   };
 
-  const handleSort = (key: keyof Switch | 'vendorModel' | 'location') => {
+  const handleSort = (key: keyof Switch | 'vendorModel') => {
     let direction: 'asc' | 'desc' = 'asc';
     if (sortConfig && sortConfig.key === key && sortConfig.direction === 'asc') {
       direction = 'desc';
@@ -315,7 +314,6 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
         s.ip.includes(searchTerm);
       
       const matchesStatus = statusFilter === 'all' || s.status === statusFilter;
-      const matchesZone = zoneFilter === 'all' || s.zone === zoneFilter;
       const matchesSubcategory = subcategoryFilter === 'all' || (s.subcategory || '') === subcategoryFilter;
       const matchesBranchTab = activeBranchTab === 'all' || (s.branch || '') === activeBranchTab;
       const catKey = categoryKey(s.category);
@@ -324,7 +322,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
           ? catKey !== 'other'
           : activeCategoryTab === catKey;
 
-      return matchesSearch && matchesStatus && matchesZone && matchesSubcategory && matchesBranchTab && matchesCategoryTab;
+      return matchesSearch && matchesStatus && matchesSubcategory && matchesBranchTab && matchesCategoryTab;
     })
     .sort((a, b) => {
       if (!sortConfig) return 0;
@@ -335,9 +333,6 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
       if (sortConfig.key === 'vendorModel') {
         aValue = `${a.vendor} ${a.model}`.toLowerCase();
         bValue = `${b.vendor} ${b.model}`.toLowerCase();
-      } else if (sortConfig.key === 'location') {
-        aValue = `${a.city} ${a.zone}`.toLowerCase();
-        bValue = `${b.city} ${b.zone}`.toLowerCase();
       } else if (sortConfig.key === 'ip') {
         aValue = parseIpv4(a.ip) ?? Number.MAX_SAFE_INTEGER;
         bValue = parseIpv4(b.ip) ?? Number.MAX_SAFE_INTEGER;
@@ -505,14 +500,6 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
               <option value="warning">Warning</option>
             </select>
             <select
-              value={zoneFilter}
-              onChange={(e) => setZoneFilter(e.target.value)}
-              className="px-4 py-2 bg-[#141517] border border-[#373a40] rounded text-sm text-white focus:outline-none focus:border-[#228be6] appearance-none"
-            >
-              <option value="all">All Zones</option>
-              {meta.zones.map((z) => <option key={z} value={z}>{z}</option>)}
-            </select>
-            <select
               value={subcategoryFilter}
               onChange={(e) => setSubcategoryFilter(e.target.value)}
               className="px-4 py-2 bg-[#141517] border border-[#373a40] rounded text-sm text-white focus:outline-none focus:border-[#228be6] appearance-none"
@@ -603,10 +590,10 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                   <SortIcon active={sortConfig?.key === 'ip'} direction={sortConfig?.direction} />
                 </div>
               </th>
-              <th onClick={() => handleSort('location')} className="cursor-pointer hover:text-white transition-colors">
+              <th onClick={() => handleSort('city')} className="cursor-pointer hover:text-white transition-colors">
                 <div className="flex items-center gap-2">
-                  {t('location')}
-                  <SortIcon active={sortConfig?.key === 'location'} direction={sortConfig?.direction} />
+                  {t('city')}
+                  <SortIcon active={sortConfig?.key === 'city'} direction={sortConfig?.direction} />
                 </div>
               </th>
               <th onClick={() => handleSort('uptime')} className="cursor-pointer hover:text-white transition-colors">
@@ -649,10 +636,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                 <td className="text-xs">{sw.branch || 'ULN'}</td>
                 <td className="font-mono text-xs text-[#228be6]">{sw.ip}</td>
                 <td>
-                  <div className="flex flex-col">
-                    <span className="text-xs">{sw.city}</span>
-                    <span className="text-[10px] text-[#909296] uppercase tracking-wider">{sw.zone}</span>
-                  </div>
+                  <span className="text-xs">{sw.city}</span>
                 </td>
                 <td className="text-xs text-[#909296] font-mono">{sw.uptime}</td>
                 <td className="text-right">
@@ -724,7 +708,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                           <button
                             className="w-full px-3 py-2 text-xs text-[#c1c2c5] hover:bg-[#25262b] hover:text-white"
                             onClick={() => {
-                              alert(`Node: ${sw.name}\nBranch: ${sw.branch || '-'}\nZone: ${sw.zone}\nIP: ${sw.ip}`);
+                              alert(`Node: ${sw.name}\nBranch: ${sw.branch || '-'}\nIP: ${sw.ip}`);
                               setOpenRowMenuId(null);
                             }}
                           >
@@ -857,16 +841,6 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                   onChange={e => setNewSwitch({...newSwitch, city: e.target.value})}
                 >
                   {meta.cities.map(c => <option key={c} value={c}>{c}</option>)}
-                </select>
-              </div>
-              <div className="space-y-2">
-                <label className="text-[10px] font-bold text-[#909296] uppercase">{t('zone')}</label>
-                <select
-                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:outline-none focus:border-[#228be6]"
-                  value={newSwitch.zone || ''}
-                  onChange={e => setNewSwitch({...newSwitch, zone: e.target.value})}
-                >
-                  {meta.zones.map(z => <option key={z} value={z}>{z}</option>)}
                 </select>
               </div>
             </div>

@@ -24,7 +24,7 @@ const CategoryIcon = ({ category }: { category: AuditLog['category'] }) => {
 };
 
 const AuditLogs: React.FC<{ role?: string, username?: string }> = ({ role, username }) => {
-  const { t } = useTranslation();
+  const { t, language } = useTranslation();
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
@@ -61,6 +61,74 @@ const AuditLogs: React.FC<{ role?: string, username?: string }> = ({ role, usern
     return matchesSearch && matchesCategory;
   });
 
+  const localizeCategory = (category: AuditLog['category']) => {
+    switch (category) {
+      case 'auth': return t('auditCategoryAuth');
+      case 'inventory': return t('auditCategoryInventory');
+      case 'config': return t('auditCategoryConfig');
+      case 'user_mgmt': return t('auditCategoryUserMgmt');
+      case 'system': return t('auditCategorySystem');
+      default: return category;
+    }
+  };
+
+  const localizeAction = (action: string) => {
+    if (language !== 'ru') return action;
+    const map: Record<string, string> = {
+      'Start Discovery': 'Запуск автообнаружения',
+      'Discovery Complete': 'Автообнаружение завершено',
+      'Discovery Watch Scheduled Run': 'Плановый запуск профилей автообнаружения',
+      'Discovery Watch Scheduler Start': 'Планировщик автообнаружения запущен',
+      'Discovery Watch Manual Run': 'Ручной запуск профилей автообнаружения',
+      'System Config Update': 'Обновление системной конфигурации',
+      'LDAP Config Update': 'Обновление LDAP-конфигурации',
+      'LDAP Test': 'Проверка LDAP',
+      'Bulk Action': 'Массовое действие',
+      'Add Device': 'Добавление устройства',
+      'Update Device': 'Обновление устройства',
+      'Remove Device': 'Удаление устройства',
+      'Rename Branch': 'Переименование филиала',
+      'Login Success': 'Успешный вход',
+      'Login Failure': 'Ошибка входа',
+      'Logout': 'Выход из системы',
+      'Create User': 'Создание пользователя',
+      'Update User Role': 'Изменение роли пользователя',
+      'Reset Password': 'Сброс пароля',
+      'Delete User': 'Удаление пользователя',
+      'SNMP Config Update': 'Обновление SNMP-конфигурации',
+      'Trap Receiver Update': 'Обновление Trap Receiver',
+      'SSH Readonly Profile Set': 'Сохранение read-only SSH профиля',
+      'Topology Rebuild': 'Перестроение топологии',
+      'Topology Manual Link Add': 'Добавление ручной связи',
+      'Topology Manual Link Delete': 'Удаление ручной связи',
+      'Topology Link Rename': 'Переименование подписи связи',
+    };
+    return map[action] || action;
+  };
+
+  const localizeDetails = (details: string) => {
+    if (language !== 'ru') return details;
+    return details
+      .replace('Profiles processed:', 'Профилей обработано:')
+      .replace('Updated system settings', 'Системные настройки обновлены')
+      .replace('Updated LDAP authentication profiles', 'Профили LDAP-аутентификации обновлены')
+      .replace('Performed reboot on', 'Выполнена команда reboot для')
+      .replace('Performed delete on', 'Выполнено удаление для')
+      .replace('devices', 'устройств')
+      .replace('Registered new switch:', 'Зарегистрировано новое устройство:')
+      .replace('Updated device configurations for:', 'Обновлена конфигурация устройства:')
+      .replace('Deleted switch:', 'Удалено устройство:')
+      .replace('User authenticated successfully', 'Пользователь успешно аутентифицирован')
+      .replace('Failed login attempt for username:', 'Неуспешная попытка входа для пользователя:')
+      .replace('Created new user:', 'Создан новый пользователь:')
+      .replace('with role', 'с ролью')
+      .replace('Reset password for user:', 'Сброшен пароль пользователя:')
+      .replace('Deleted user:', 'Удален пользователь:')
+      .replace('TTL', 'TTL')
+      .replace('metrics fallback: on', 'fallback метрик: включен')
+      .replace('metrics fallback: off', 'fallback метрик: выключен');
+  };
+
   return (
     <div className="flex-1 flex flex-col min-h-0 bg-[#25262b]">
       <header className="p-6 border-b border-[#373a40] bg-[#1c1d21] flex justify-between items-center shrink-0">
@@ -89,18 +157,18 @@ const AuditLogs: React.FC<{ role?: string, username?: string }> = ({ role, usern
             onChange={(e) => setFilterCategory(e.target.value)}
             className="px-4 py-2 bg-[#1c1d21] border border-[#373a40] rounded text-sm text-white focus:outline-none focus:border-[#228be6]"
           >
-            <option value="all">All Categories</option>
-            <option value="auth">Authentication</option>
-            <option value="inventory">Inventory</option>
-            <option value="config">Configuration</option>
-            <option value="user_mgmt">User Management</option>
-            <option value="system">System</option>
+            <option value="all">{t('auditAllCategories')}</option>
+            <option value="auth">{t('auditCategoryAuth')}</option>
+            <option value="inventory">{t('auditCategoryInventory')}</option>
+            <option value="config">{t('auditCategoryConfig')}</option>
+            <option value="user_mgmt">{t('auditCategoryUserMgmt')}</option>
+            <option value="system">{t('auditCategorySystem')}</option>
           </select>
 
           <button 
             onClick={fetchLogs}
             className="p-2 hover:bg-[#373a40] rounded transition-colors text-[#228be6]"
-            title="Refresh"
+            title={t('refresh')}
           >
             <History size={18} />
           </button>
@@ -121,11 +189,11 @@ const AuditLogs: React.FC<{ role?: string, username?: string }> = ({ role, usern
           <tbody className="divide-y divide-[#373a40]">
             {loading && logs.length === 0 ? (
               <tr>
-                <td colSpan={5} className="p-8 text-center text-[#909296] italic">Loading logs...</td>
+                <td colSpan={5} className="p-8 text-center text-[#909296] italic">{t('loadingLogs')}</td>
               </tr>
             ) : filteredLogs.length === 0 ? (
               <tr>
-                <td colSpan={5} className="p-8 text-center text-[#909296] italic">No logs found matching your criteria.</td>
+                <td colSpan={5} className="p-8 text-center text-[#909296] italic">{t('noLogsFound')}</td>
               </tr>
             ) : filteredLogs.map((log) => (
               <tr key={log.id} className="hover:bg-white/5 transition-colors group">
@@ -143,14 +211,14 @@ const AuditLogs: React.FC<{ role?: string, username?: string }> = ({ role, usern
                 <td className="p-4">
                   <div className="flex items-center gap-2 px-2 py-1 rounded bg-[#2c2e33] w-fit">
                     <CategoryIcon category={log.category} />
-                    <span className="text-[10px] uppercase font-bold text-[#909296] tracking-wider">{log.category}</span>
+                    <span className="text-[10px] uppercase font-bold text-[#909296] tracking-wider">{localizeCategory(log.category)}</span>
                   </div>
                 </td>
                 <td className="p-4 text-sm font-bold text-white">
-                  {log.action}
+                  {localizeAction(log.action)}
                 </td>
                 <td className="p-4 text-sm text-[#909296]">
-                  {log.details}
+                  {localizeDetails(log.details)}
                 </td>
               </tr>
             ))}

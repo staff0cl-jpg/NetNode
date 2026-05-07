@@ -225,6 +225,15 @@ async function classifyInventorySubcategoriesBySnmp(branch?: string) {
   const targets = filterBranch ? inventory.filter((i) => String(i.branch || "").trim() === filterBranch) : inventory;
   const touched: Array<{ id: string; trunkCount: number; subcategory: string }> = [];
   await forEachWithLimit(targets, 16, async (item) => {
+    const category = String(item.category || "").toLowerCase();
+    if (category === "fc switch" || category === "fibre channel switch" || category === "fiber channel switch") {
+      const subcategory = deriveFcSubcategoryByName(item.name || "");
+      if ((item.subcategory || "") !== subcategory) {
+        item.subcategory = subcategory;
+        touched.push({ id: item.id, trunkCount: 0, subcategory });
+      }
+      return;
+    }
     const trunkCount = await getTrunkPortCountFromSnmp(item.ip);
     const subcategory = trunkCount >= 2 ? "Core" : trunkCount === 1 ? "Distribution" : "Access";
     if ((item.subcategory || "") !== subcategory) {
@@ -547,7 +556,13 @@ async function runDiscoveryScan(input: DiscoveryScanInput): Promise<DiscoverySca
       const model = detectModelFromSnmp(probe.sysDescr || "", probe.sysObjectId || "", probe.sysName || "");
       const category = detectCategoryFromSnmp(probe.sysDescr || "", probe.sysObjectId || "", probe.sysName || "");
       const trunkCount = await getTrunkPortCountFromSnmp(ip);
-      const subcategory = trunkCount >= 2 ? "Core" : trunkCount === 1 ? "Distribution" : "Access";
+      const subcategory = category === "FC Switch"
+        ? deriveFcSubcategoryByName(probe.sysName || model || "")
+        : trunkCount >= 2
+          ? "Core"
+          : trunkCount === 1
+            ? "Distribution"
+            : "Access";
       const uptimeSeconds = probe.uptimeSeconds ?? 0;
       discovered.push({
         id: `d-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -739,6 +754,13 @@ function detectCategoryFromSnmp(sysDescr: string, sysObjectId: string, sysName =
   if (d.includes("firewall") || d.includes("fortigate") || d.includes("palo alto")) return "Firewall";
   if (d.includes("switch") || d.includes("catalyst") || d.includes("aruba") || d.includes("nexus")) return "Switch";
   return "Other";
+}
+
+function deriveFcSubcategoryByName(name: string): "Core" | "Access" {
+  const n = String(name || "").toLowerCase();
+  if (/(^|[\s\-_])(core|san-core|fc-core|director)([\s\-_]|$)/.test(n)) return "Core";
+  if (/(^|[\s\-_])(edge|leaf|access|san-edge)([\s\-_]|$)/.test(n)) return "Access";
+  return "Access";
 }
 
 function getSnmpProbe(host: string, timeout = snmpConfig.timeoutMs): Promise<SnmpProbe> {
@@ -1075,7 +1097,21 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
 
   const byId = new Map(devices.map((d) => [d.id, d]));
   const directed: Array<{ source: string; target: string; portA: string; raw: string }> = [];
+  const isFcSwitch = (item: InventoryItem) => {
+    const category = String(item.category || "").toLowerCase();
+    return category === "fc switch" || category === "fibre channel switch" || category === "fiber channel switch";
+  };
+  const detectFcRole = (item: InventoryItem): "core" | "edge" | "unknown" => {
+    const n = String(item.name || "").toLowerCase();
+    if (/(^|[\s\-_])(core|san-core|fc-core|director)([\s\-_]|$)/.test(n)) return "core";
+    if (/(^|[\s\-_])(edge|leaf|access|san-edge)([\s\-_]|$)/.test(n)) return "edge";
+    const s = String(item.subcategory || "").toLowerCase();
+    if (s === "core") return "core";
+    if (s === "access") return "edge";
+    return "unknown";
+  };
   const norm = (v: string) => v.toLowerCase().replace(/\s+/g, " ").trim();
+  const genericDevices = devices.filter((d) => !isFcSwitch(d));
   const findDeviceByNameHint = (hint: string, selfId: string): InventoryItem | undefined => {
     const h = norm(hint);
     if (!h) return undefined;
@@ -1096,7 +1132,7 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
     return candidates[0]?.d;
   };
 
-  await forEachWithLimit(devices, 12, async (dev) => {
+  await forEachWithLimit(genericDevices, 12, async (dev) => {
     try {
       const [ifNameMap, ifAliasMap, ifDescrMap, ifTypeMap] = await Promise.all([
         snmpWalk(dev.ip, "1.3.6.1.2.1.31.1.1.1.1"), // ifName
@@ -1122,7 +1158,7 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
   });
 
   // Fallback path: LLDP neighbor correlation for trunk-like local ports.
-  await forEachWithLimit(devices, 10, async (dev) => {
+  await forEachWithLimit(genericDevices, 10, async (dev) => {
     try {
       const [ifNameMap, ifAliasMap, ifDescrMap, ifTypeMap, basePortIfIndex, lldpLocPortId, lldpRemSysName] = await Promise.all([
         snmpWalk(dev.ip, "1.3.6.1.2.1.31.1.1.1.1"), // ifName
@@ -1174,6 +1210,47 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
       }
     } catch {
       // Skip device-level LLDP errors and continue.
+    }
+  });
+
+  // FC-specific path: LLDP correlation with CORE<->EDGE pairing by switch naming.
+  const fcDevices = devices.filter((d) => isFcSwitch(d));
+  await forEachWithLimit(fcDevices, 10, async (dev) => {
+    try {
+      const [ifNameMap, basePortIfIndex, lldpLocPortId, lldpRemSysName] = await Promise.all([
+        snmpWalk(dev.ip, "1.3.6.1.2.1.31.1.1.1.1"), // ifName
+        snmpWalk(dev.ip, "1.3.6.1.2.1.17.1.4.1.2"), // dot1dBasePortIfIndex
+        snmpWalk(dev.ip, "1.0.8802.1.1.2.1.3.7.1.3"), // lldpLocPortId
+        snmpWalk(dev.ip, "1.0.8802.1.1.2.1.4.1.1.9"), // lldpRemSysName
+      ]);
+      const selfRole = detectFcRole(dev);
+      for (const [suffix, sysNameRaw] of Object.entries(lldpRemSysName)) {
+        const sysName = String(sysNameRaw || "").trim();
+        if (!sysName) continue;
+        const peer = findDeviceByNameHint(sysName, dev.id);
+        if (!peer || !isFcSwitch(peer)) continue;
+        const peerRole = detectFcRole(peer);
+        if (
+          (selfRole === "core" && peerRole === "edge") ||
+          (selfRole === "edge" && peerRole === "core")
+        ) {
+          const parts = suffix.split(".").filter(Boolean);
+          if (parts.length < 3) continue;
+          const localPortNum = parts[1];
+          const ifIndex = String(basePortIfIndex[localPortNum] || "").trim();
+          let localIfName = ifIndex ? String(ifNameMap[ifIndex] || `if${ifIndex}`).trim() : "";
+          if (!localIfName) {
+            const localPortId = String(lldpLocPortId[localPortNum] || "").trim().toLowerCase();
+            if (localPortId) {
+              const matched = Object.entries(ifNameMap).find(([, name]) => String(name || "").trim().toLowerCase() === localPortId);
+              if (matched) localIfName = String(matched[1] || "").trim();
+            }
+          }
+          directed.push({ source: dev.id, target: peer.id, portA: localIfName || "fc-port", raw: `FC-LLDP:${sysName}` });
+        }
+      }
+    } catch {
+      // continue
     }
   });
 
@@ -1579,10 +1656,18 @@ async function startServer() {
   app.post("/api/inventory", checkRole(['admin', 'operator']), (req, res) => {
     const sw = req.body;
     const actor = req.headers["x-user-name"] as string || "unknown";
+    const category = String(sw.category || "Switch");
+    const normalizedCategory = category.toLowerCase();
+    const fcSubcategory = (
+      normalizedCategory === "fc switch" ||
+      normalizedCategory === "fibre channel switch" ||
+      normalizedCategory === "fiber channel switch"
+    ) ? deriveFcSubcategoryByName(String(sw.name || "")) : undefined;
     const newSwitch = {
       ...sw,
       id: Date.now().toString(),
-      category: sw.category || "Switch",
+      category,
+      subcategory: fcSubcategory || sw.subcategory || "Core",
       branch: sw.branch || "ULN",
       city: sw.city || "Ульяновск",
       zone: sw.zone || "Core",
@@ -1601,6 +1686,10 @@ async function startServer() {
     
     const oldName = inventory[index].name;
     inventory[index] = { ...inventory[index], ...req.body } as InventoryItem;
+    const category = String(inventory[index].category || "").toLowerCase();
+    if (category === "fc switch" || category === "fibre channel switch" || category === "fiber channel switch") {
+      inventory[index].subcategory = deriveFcSubcategoryByName(inventory[index].name || "");
+    }
     upsertInventoryMetaFromItem(inventory[index]);
     rebuildTopologyFromInventory();
     logAction(actor, 'Update Device', `Updated device configurations for: ${oldName}`, 'inventory');
