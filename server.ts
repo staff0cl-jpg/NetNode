@@ -72,7 +72,21 @@ type DiscoveryWatchProfile = {
   lastResult: DiscoveryScanSummary | { success: false; error: string } | null;
 };
 
-let discoveryWatchProfiles: DiscoveryWatchProfile[] = [];
+const DEFAULT_DISCOVERY_WATCH_PROFILE: DiscoveryWatchProfile = {
+  id: "default-uln-10-0-94-0-24",
+  name: "ULN Default Discovery",
+  subnets: "10.0.94.0/24",
+  protocol: "snmp",
+  city: "Ульяновск",
+  zone: "Core",
+  branch: "ULN",
+  enabled: true,
+  intervalHours: 3,
+  lastRunAt: null,
+  lastResult: null,
+};
+
+let discoveryWatchProfiles: DiscoveryWatchProfile[] = [{ ...DEFAULT_DISCOVERY_WATCH_PROFILE }];
 let discoveryScheduler: NodeJS.Timeout | null = null;
 let discoveryRunLock = false;
 let discoverySchedulerLastTickAt: string | null = null;
