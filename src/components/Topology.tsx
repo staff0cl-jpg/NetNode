@@ -89,6 +89,7 @@ type GroupDragState = {
 
 type NodeWithPos = Switch & { x: number; y: number };
 type TopologyMode = 'ip' | 'fc';
+type AutoLayoutState = 'idle' | 'running' | 'timed_out';
 
 const TOPO_NODE_WIDTH = 160;
 const TOPO_NODE_HEIGHT = 80;
@@ -111,8 +112,10 @@ const TOPO_MAX_ZONE_COLUMNS_PER_ROW = 10;
 const TOPO_STAGE_SIDE_PADDING = 35;
 const TOPO_LAYOUT_MAX_WIDTH = 3200;
 const TOPO_LAYOUT_FIT_SCALE = 0.82;
+const TOPO_LOWER_LAYOUT_FIT_SCALE = 0.72;
 const TOPO_BARYCENTER_ITERATIONS = 6;
 const TOPO_AUTO_LAYOUT_TIMEOUT_MS = 30000;
+const TOPO_AUTO_LAYOUT_FOLLOWUP_TIMEOUT_MS = 12000;
 
 const TOPO_TRUNK_STROKE = '#ff922b';
 const TOPO_TRUNK_LABEL_FILL = 'rgba(255, 146, 43, 0.18)';
@@ -178,6 +181,15 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
     TOPO_LAYOUT_MAX_WIDTH,
     Math.max(1100, (stageWidth - TOPO_STAGE_SIDE_PADDING * 2) / TOPO_LAYOUT_FIT_SCALE)
   );
+  const lowerLayoutWidth = Math.min(
+    TOPO_LAYOUT_MAX_WIDTH,
+    Math.max(1300, (stageWidth - TOPO_STAGE_SIDE_PADDING * 2) / TOPO_LOWER_LAYOUT_FIT_SCALE)
+  );
+  const maxColumnsForWidth = (targetWidth: number) => {
+    const gap = TOPO_COLUMN_GAP - TOPO_NODE_WIDTH;
+    const usable = Math.max(TOPO_NODE_WIDTH, targetWidth - TOPO_ZONE_PAD_X * 2);
+    return Math.max(1, Math.floor((usable + gap) / TOPO_COLUMN_GAP));
+  };
   const priorityMikroTik = switches.filter(isMikroTikSwitch).sort(sortSwitchesByNameThenId);
   const priorityCisco = switches
     .filter((sw) => !isMikroTikSwitch(sw) && isCiscoSwitch(sw))
@@ -297,7 +309,10 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
         if (aCenter !== bCenter) return aCenter - bCenter;
         return sortSwitchesByNameThenId(a, b);
       });
-      const otherCols = Math.max(1, Math.min(TOPO_MAX_COLUMNS, others.length || 1));
+      const otherCols = Math.max(
+        1,
+        Math.min(others.length || 1, Math.min(TOPO_MAX_COLUMNS, maxColumnsForWidth(lowerLayoutWidth)))
+      );
       const rowWidth = otherCols * TOPO_NODE_WIDTH + Math.max(0, otherCols - 1) * (TOPO_COLUMN_GAP - TOPO_NODE_WIDTH);
       const otherRows = Math.max(1, Math.ceil(others.length / otherCols));
       const contentBottom = TOPO_ROW_TOP_Y + (otherRows - 1) * TOPO_ROW_HEIGHT + TOPO_NODE_HEIGHT;
@@ -352,7 +367,7 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
     const nextWidth = currentRow.width === 0 ? plan.width : currentRow.width + TOPO_ZONE_GAP_X + plan.width;
     if (
       currentRow.plans.length &&
-      (currentRow.plans.length >= TOPO_MAX_ZONE_COLUMNS_PER_ROW || nextWidth > layoutWidth)
+      (currentRow.plans.length >= TOPO_MAX_ZONE_COLUMNS_PER_ROW || nextWidth > lowerLayoutWidth)
     ) {
       rows.push(currentRow);
       currentRow = { plans: [plan], width: plan.width, height: plan.height };
@@ -395,6 +410,8 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
   rows.forEach((row, rowIndex) => {
     const rowOffset = rowIndex % 2 === 1 ? TOPO_ROW_STAGGER_X : 0;
     let zoneX = Math.max(TOPO_STAGE_SIDE_PADDING, stageWidth / 2 - row.width / 2 + rowOffset);
+    const maxStartX = Math.max(TOPO_STAGE_SIDE_PADDING, lowerLayoutWidth - row.width - TOPO_STAGE_SIDE_PADDING);
+    zoneX = Math.min(zoneX, maxStartX);
     row.plans.forEach((plan) => {
       placeRow(plan.others, zoneX, plan.width, rowY + TOPO_ROW_TOP_Y, plan.otherCols);
       zoneX += plan.width + TOPO_ZONE_GAP_X;
@@ -492,8 +509,9 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   const [selectionDraft, setSelectionDraft] = useState<SelectionDraft>(null);
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
   const [hoveredLinkId, setHoveredLinkId] = useState<string | null>(null);
-  const [isAutoLayoutRunning, setIsAutoLayoutRunning] = useState(false);
+  const [autoLayoutState, setAutoLayoutState] = useState<AutoLayoutState>('idle');
   const groupDragRef = useRef<GroupDragState>(null);
+  const nodeDragStartRef = useRef<Record<string, { x: number; y: number }>>({});
   const topologySwitches = React.useMemo(() => {
     const ipAllowed = new Set(['switch', 'router', 'коммутатор', 'маршрутизатор']);
     const fcAllowed = new Set(['fc switch', 'fibre channel switch', 'fiber channel switch', 'fc коммутатор']);
@@ -734,15 +752,38 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     return data;
   }, [fetchWithTimeout, role, selectedRegion, topologyMode, username]);
 
+  const refreshLinksScopedWithFallback = React.useCallback(async () => {
+    try {
+      return await refreshLinksScoped();
+    } catch (error) {
+      const isTimeout = error instanceof DOMException && error.name === 'AbortError';
+      if (!isTimeout) throw error;
+      const response = await fetch(`/api/topology/links${topologyScopeQuery(topologyMode, selectedRegion || undefined)}`, {
+        headers: {
+          'x-user-role': role || 'viewer',
+          'x-user-name': username || 'unknown'
+        }
+      });
+      const data: {
+        links?: TopoLink[];
+        layout?: Record<string, { x: number; y: number }>;
+        zoneLabelOverrides?: Record<string, string>;
+        error?: string;
+      } = await readApiPayload(response, 'Topology load timeout');
+      if (!response.ok) throw new Error(operationFailedMessage('Topology load', data, response.status));
+      return data;
+    }
+  }, [refreshLinksScoped, role, selectedRegion, topologyMode, username]);
+
   const handleAutoLayout = async () => {
     if (!canEditTopology) return;
     if (!selectedRegion) {
       alert(t('topologySelectTabFirst'));
       return;
     }
-    if (isAutoLayoutRunning) return;
+    if (autoLayoutState === 'running') return;
     try {
-      setIsAutoLayoutRunning(true);
+      setAutoLayoutState('running');
       notifyInfo('topologyLayoutRunStarted', 'topologyLayoutProgressTitle');
       if (topologyMode !== 'fc') {
         const rebuild = await fetchWithTimeout('/api/topology/links/rebuild', {
@@ -759,18 +800,18 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           console.warn('Topology rebuild failed, using existing links', apiErrorDetailText(err, rebuild.status));
         }
       }
-      let data = await refreshLinksScoped();
+      let data = await refreshLinksScopedWithFallback();
       if (!Array.isArray(data.links) || data.links.length === 0) {
         await new Promise((resolve) => window.setTimeout(resolve, 450));
-        data = await refreshLinksScoped();
+        data = await refreshLinksScopedWithFallback();
       }
       const applied = applyTopologyPayload(data, true);
-      refreshTopologyVersions();
+      await refreshTopologyVersions();
 
       // After rebuilding topology for this tab, classify inventory subcategories by trunk count (SNMP).
       if (topologyMode !== 'fc') {
         try {
-          await fetch('/api/topology/classify-subcategories', {
+          await fetchWithTimeout('/api/topology/classify-subcategories', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -778,7 +819,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
               'x-user-name': username || 'unknown'
             },
             body: JSON.stringify({ branch: selectedRegion })
-          });
+          }, TOPO_AUTO_LAYOUT_FOLLOWUP_TIMEOUT_MS);
         } catch {
           // ignore classification errors
         }
@@ -792,16 +833,16 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       if (applied.trunkCount === 0) {
         notifyInfo('topologyNoTrunksAfterLayout', 'topologyNoTrunksAfterLayoutTitle', 9000);
       }
+      setAutoLayoutState('idle');
     } catch (error) {
       console.error('Failed to refresh topology:', error);
       const isTimeout = error instanceof DOMException && error.name === 'AbortError';
+      setAutoLayoutState(isTimeout ? 'timed_out' : 'idle');
       notifyError(
         isTimeout ? 'topologyLayoutTimeout' : 'topologyLayoutFailedFriendly',
         isTimeout ? 'topologyLayoutTimeoutTitle' : 'topologyLayoutFailedTitle',
         9000
       );
-    } finally {
-      setIsAutoLayoutRunning(false);
     }
   };
 
@@ -1301,11 +1342,15 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
               <button
                 type="button"
                 onClick={handleAutoLayout}
-                disabled={isAutoLayoutRunning}
+                disabled={autoLayoutState === 'running'}
                 className="flex items-center gap-2 px-3 py-1.5 bg-[#2c2e33] text-[#c1c2c5] hover:text-white rounded text-[10px] font-bold uppercase transition-all border border-[#373a40] disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                {isAutoLayoutRunning ? <Loader2 size={14} className="animate-spin" /> : <Box size={14} />}
-                {isAutoLayoutRunning ? t('topologyLayoutRunning') : t('autoLayout')}
+                {autoLayoutState === 'running' ? <Loader2 size={14} className="animate-spin" /> : <Box size={14} />}
+                {autoLayoutState === 'running'
+                  ? t('topologyLayoutRunning')
+                  : autoLayoutState === 'timed_out'
+                    ? t('topologyLayoutTimeout')
+                    : t('autoLayout')}
               </button>
             )}
             {canEditTopology && (
@@ -1753,6 +1798,24 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                       groupDragRef.current = null;
                       return;
                     }
+                    const dragStart = nodeDragStartRef.current[node.id];
+                    if (dragStart) {
+                      delete nodeDragStartRef.current[node.id];
+                      const dropCenter = { x: e.target.x() + TOPO_NODE_WIDTH / 2, y: e.target.y() + TOPO_NODE_HEIGHT / 2 };
+                      const target = nodes.find((n) =>
+                        n.id !== node.id &&
+                        dropCenter.x >= n.x &&
+                        dropCenter.x <= n.x + TOPO_NODE_WIDTH &&
+                        dropCenter.y >= n.y &&
+                        dropCenter.y <= n.y + TOPO_NODE_HEIGHT
+                      );
+                      if (target) {
+                        e.target.position(dragStart);
+                        setNodes((prev) => prev.map((n) => (n.id === node.id ? { ...n, ...dragStart } : n)));
+                        createManualLink(node.id, target.id);
+                        return;
+                      }
+                    }
                     handleDragEnd(node.id, e);
                   }}
                   onDragMove={(e) => {
@@ -1784,9 +1847,11 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                     const evt = e.evt as MouseEvent;
                     if (canEditTopology && evt.button === 2) {
                       evt.preventDefault();
-                      linkDraftPointerStartRef.current = { x: evt.clientX, y: evt.clientY };
-                      const center = getNodeCenter(node.id);
-                      setLinkDraft({ sourceId: node.id, x1: center.x, y1: center.y, x2: center.x, y2: center.y });
+                      openNodeActionMenu(node, evt.clientX, evt.clientY);
+                      return;
+                    }
+                    if (canEditTopology && evt.button === 0) {
+                      nodeDragStartRef.current[node.id] = { x: node.x, y: node.y };
                     }
                   }}
                   onMouseUp={(e) => {
@@ -1800,22 +1865,10 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                       return;
                     }
                   }}
-                  onDblClick={(e) => {
-                    e.cancelBubble = true;
-                    const evt = e.evt as MouseEvent;
-                    if (evt.button !== 0) return;
-                    evt.preventDefault();
-                    openNodeActionMenu(node, evt.clientX, evt.clientY);
-                  }}
-                  onDblTap={(e) => {
-                    e.cancelBubble = true;
-                    const evt = e.evt as TouchEvent;
-                    const touch = evt.changedTouches?.[0] || evt.touches?.[0];
-                    if (!touch) return;
-                    openNodeActionMenu(node, touch.clientX, touch.clientY);
-                  }}
                   onContextMenu={(e) => {
                     e.evt.preventDefault();
+                    const evt = e.evt as MouseEvent;
+                    openNodeActionMenu(node, evt.clientX, evt.clientY);
                   }}
                 />
                 <Text x={node.x + 10} y={node.y + 12} text={node.name} fill="white" fontSize={12} fontStyle="bold" />
