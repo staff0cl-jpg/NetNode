@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
-import { Plus, Search, MoreVertical, Edit2, Trash2, Cpu, Download, ChevronUp, ChevronDown, RefreshCw, Terminal as TerminalIcon, Globe } from 'lucide-react';
+import { Plus, Search, MoreVertical, Edit2, Trash2, Cpu, Download, ChevronUp, ChevronDown, RefreshCw, Terminal as TerminalIcon, Globe, CircleHelp } from 'lucide-react';
 
 const SortIcon = ({ active, direction }: { active: boolean, direction?: 'asc' | 'desc' }) => {
   if (!active) return <div className="w-3" />;
@@ -10,6 +10,7 @@ import { Switch, Vendor } from '../types';
 import { VENDORS } from '../constants';
 import { cn } from '../lib/utils';
 import { useTranslation } from '../lib/i18n';
+import { useNotifications } from '../lib/notifications';
 
 const parseIpv4 = (ip: string): number | null => {
   const parts = ip.split('.').map((x) => Number.parseInt(x, 10));
@@ -33,6 +34,7 @@ interface InventoryProps {
 
 const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, username, onOpenSSH }) => {
   const { t } = useTranslation();
+  const { notifyError, notifySuccess, notifyInfo } = useNotifications();
   const isAdmin = role === 'admin';
   const isOperator = role === 'operator' || isAdmin;
   
@@ -41,7 +43,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
   const [subcategoryFilter, setSubcategoryFilter] = useState<string>('all');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [isBulkProcessing, setIsBulkProcessing] = useState(false);
-  const [sortConfig, setSortConfig] = useState<{ key: keyof Switch | 'vendorModel'; direction: 'asc' | 'desc' } | null>(null);
+  const [sortConfig, setSortConfig] = useState<{ key: keyof Switch | 'vendorModel' | 'warningScore'; direction: 'asc' | 'desc' } | null>(null);
   const [isAdding, setIsAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [newSwitch, setNewSwitch] = useState<Partial<Switch>>({
@@ -224,7 +226,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
       setCustomOidsText('');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error saving device configuration';
-      alert(message);
+      notifyError(message);
     }
   };
 
@@ -239,8 +241,9 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
             'x-user-name': username || 'unknown'
           }
         });
+        notifyInfo('Device removed');
       } catch (error) {
-        alert(t('errorDeletingDevice'));
+        notifyError(t('errorDeletingDevice'));
       }
     }
   };
@@ -264,7 +267,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
     a.click();
   };
 
-  const handleSort = (key: keyof Switch | 'vendorModel') => {
+  const handleSort = (key: keyof Switch | 'vendorModel' | 'warningScore') => {
     let direction: 'asc' | 'desc' = 'asc';
     if (sortConfig && sortConfig.key === key && sortConfig.direction === 'asc') {
       direction = 'desc';
@@ -288,9 +291,10 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
       });
       if (response.ok) {
         setSelectedIds([]);
+        notifySuccess('Bulk action completed');
       }
     } catch (error) {
-      alert('Bulk action failed');
+      notifyError('Bulk action failed');
     } finally {
       setIsBulkProcessing(false);
     }
@@ -339,6 +343,17 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
       if (sortConfig.key === 'vendorModel') {
         aValue = `${a.vendor} ${a.model}`.toLowerCase();
         bValue = `${b.vendor} ${b.model}`.toLowerCase();
+      } else if (sortConfig.key === 'warningScore') {
+        aValue = Number(a.warningScore || 0);
+        bValue = Number(b.warningScore || 0);
+      } else if (sortConfig.key === 'status') {
+        const severityRank = (s: Switch) => {
+          if (s.warningSeverity === 'critical' || s.status === 'offline') return 3;
+          if (s.warningSeverity === 'warning' || s.status === 'warning') return 2;
+          return 1;
+        };
+        aValue = severityRank(a) * 1000 + Number(a.warningScore || 0);
+        bValue = severityRank(b) * 1000 + Number(b.warningScore || 0);
       } else if (sortConfig.key === 'ip') {
         aValue = parseIpv4(a.ip) ?? Number.MAX_SAFE_INTEGER;
         bValue = parseIpv4(b.ip) ?? Number.MAX_SAFE_INTEGER;
@@ -567,6 +582,15 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                   <SortIcon active={sortConfig?.key === 'status'} direction={sortConfig?.direction} />
                 </div>
               </th>
+              <th onClick={() => handleSort('warningScore')} className="cursor-pointer hover:text-white transition-colors">
+                <div className="flex items-center gap-2">
+                  <span>{t('warningsLabel')}</span>
+                  <span title={t('warningsTooltip')} className="inline-flex text-[#909296] hover:text-white">
+                    <CircleHelp size={12} />
+                  </span>
+                  <SortIcon active={sortConfig?.key === 'warningScore'} direction={sortConfig?.direction} />
+                </div>
+              </th>
               <th onClick={() => handleSort('name')} className="cursor-pointer hover:text-white transition-colors">
                 <div className="flex items-center gap-2">
                   {t('name')}
@@ -630,6 +654,27 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                     sw.status === 'warning' ? "z-badge-warning" : "z-badge-error"
                   )}>
                     {sw.status}
+                  </span>
+                </td>
+                <td>
+                  <span
+                    className={cn(
+                      "z-badge",
+                      (sw.warningSeverity === 'critical' || sw.status === 'offline')
+                        ? "z-badge-error"
+                        : (sw.warningSeverity === 'warning' || sw.status === 'warning')
+                          ? "z-badge-warning"
+                          : "z-badge-success"
+                    )}
+                    title={(sw.warningReasons || []).join('; ') || t('warningsTooltip')}
+                  >
+                    {(sw.warningSeverity === 'critical' || sw.status === 'offline')
+                      ? t('warningSeverityCritical')
+                      : (sw.warningSeverity === 'warning' || sw.status === 'warning')
+                        ? t('warningSeverityWarning')
+                        : t('warningSeverityNone')
+                    }
+                    {`: ${Number(sw.warningScore || 0)}`}
                   </span>
                 </td>
                 <td className="font-bold text-white tracking-tight">{sw.name}</td>
@@ -715,7 +760,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                           <button
                             className="w-full px-3 py-2 text-xs text-[#c1c2c5] hover:bg-[#25262b] hover:text-white"
                             onClick={() => {
-                              alert(`Node: ${sw.name}\nBranch: ${sw.branch || '-'}\nIP: ${sw.ip}`);
+                              notifyInfo(`Node: ${sw.name} | Branch: ${sw.branch || '-'} | IP: ${sw.ip}`);
                               setOpenRowMenuId(null);
                             }}
                           >

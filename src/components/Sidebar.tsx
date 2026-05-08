@@ -8,12 +8,24 @@ interface SidebarProps {
   setActiveTab: (tab: string) => void;
   onLogout: () => void;
   user: { username: string, role: string } | null;
+  productName?: string;
+  logoDataUrl?: string;
   isMobile?: boolean;
   isOpen?: boolean;
   onClose?: () => void;
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, onLogout, user, isMobile = false, isOpen = true, onClose }) => {
+const Sidebar: React.FC<SidebarProps> = ({
+  activeTab,
+  setActiveTab,
+  onLogout,
+  user,
+  productName = 'NETNODE',
+  logoDataUrl = '',
+  isMobile = false,
+  isOpen = true,
+  onClose,
+}) => {
   const { t, language, setLanguage } = useTranslation();
   
   const menuItems = [
@@ -36,11 +48,19 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab, onLogout, us
       isMobile && !isOpen && "-translate-x-full"
     )}>
       <div className="p-6 flex items-center gap-3 border-b border-[#373a40]">
-        <div className="w-10 h-10 bg-[#228be6] rounded flex items-center justify-center text-white shadow-lg">
-          <Network size={24} strokeWidth={2.5} />
-        </div>
+        {logoDataUrl ? (
+          <img
+            src={logoDataUrl}
+            alt={productName}
+            className="w-10 h-10 rounded object-contain bg-[#141517] p-1 border border-[#373a40]"
+          />
+        ) : (
+          <div className="w-10 h-10 bg-[#228be6] rounded flex items-center justify-center text-white shadow-lg">
+            <Network size={24} strokeWidth={2.5} />
+          </div>
+        )}
         <div className="flex-1">
-          <h1 className="font-bold text-white tracking-tight text-lg">NETNODE</h1>
+          <h1 className="font-bold text-white tracking-tight text-lg truncate">{productName}</h1>
         </div>
         {isMobile && (
           <button

@@ -16,6 +16,8 @@ import NotificationCenter from './components/NotificationCenter';
 import { APP_VERSION } from './lib/version';
 import { Menu } from 'lucide-react';
 
+type ThemeMode = 'dark' | 'light';
+
 function AppContent() {
   const { t } = useTranslation();
   const [user, setUser] = useState<{ id: string, username: string, role: string } | null>(null);
@@ -24,7 +26,13 @@ function AppContent() {
   const [switches, setSwitches] = useState<Switch[]>([]);
   const [loading, setLoading] = useState(true);
   const [sshTarget, setSshTarget] = useState<Switch | null>(null);
-  const [banner, setBanner] = useState({ siteLabel: 'UNSET', appUptime: '0d 0h 0m' });
+  const [banner, setBanner] = useState({
+    siteLabel: 'UNSET',
+    productName: 'NETNODE',
+    logoDataUrl: '',
+    theme: 'dark' as ThemeMode,
+    appUptime: '0d 0h 0m',
+  });
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   const fetchInventory = async () => {
@@ -100,7 +108,10 @@ function AppContent() {
         const data = await response.json();
         setBanner({
           siteLabel: data.siteLabel || 'UNSET',
-          appUptime: data.appUptime || '0d 0h 0m'
+          productName: data.productName || 'NETNODE',
+          logoDataUrl: data.logoDataUrl || '',
+          theme: data.theme === 'light' ? 'light' : 'dark',
+          appUptime: data.appUptime || '0d 0h 0m',
         });
       } catch {
         /* ignore */
@@ -110,6 +121,11 @@ function AppContent() {
     const timer = setInterval(fetchBanner, 10000);
     return () => clearInterval(timer);
   }, [user]);
+
+  React.useEffect(() => {
+    document.documentElement.setAttribute('data-theme', banner.theme === 'light' ? 'light' : 'dark');
+    document.body.setAttribute('data-theme', banner.theme === 'light' ? 'light' : 'dark');
+  }, [banner.theme]);
 
   const handleLogout = async () => {
     try {
@@ -203,6 +219,8 @@ function AppContent() {
           setActiveTab={setActiveTab}
           onLogout={handleLogout}
           user={user}
+          productName={banner.productName}
+          logoDataUrl={banner.logoDataUrl}
         />
       </div>
       <div className="md:hidden">
@@ -211,6 +229,8 @@ function AppContent() {
           setActiveTab={setActiveTab}
           onLogout={handleLogout}
           user={user}
+          productName={banner.productName}
+          logoDataUrl={banner.logoDataUrl}
           isMobile
           isOpen={mobileSidebarOpen}
           onClose={() => setMobileSidebarOpen(false)}
@@ -239,12 +259,9 @@ function AppContent() {
               <div className="w-1.5 h-1.5 bg-[#40c057] rounded-full" />
               <span className="text-[10px] font-mono text-[#909296] uppercase tracking-wider whitespace-nowrap">{t('syncStatusRealtime')}</span>
             </div>
-            <div className="h-3 w-px bg-[#373a40] hidden sm:block" />
-            <span className="text-[10px] font-mono text-[#5c5f66] uppercase tracking-wider hidden lg:block">{t('sessionSecure')}</span>
           </div>
           <div className="flex items-center gap-2 md:gap-4 text-[10px] font-mono text-[#909296] min-w-0">
             <span className="whitespace-nowrap text-[#5c5f66]">v{APP_VERSION}</span>
-            <span className="truncate max-w-[120px] sm:max-w-[180px]">{banner.siteLabel}</span>
             <span className="whitespace-nowrap">{t('uptimeLabel')}: {banner.appUptime}</span>
           </div>
         </header>

@@ -3,6 +3,7 @@ import { motion } from 'motion/react';
 import { UserPlus, Shield, User, Trash2, Edit2, Key, Check, X } from 'lucide-react';
 import { useTranslation } from '../lib/i18n';
 import { cn } from '../lib/utils';
+import { useNotifications } from '../lib/notifications';
 
 interface LocalUser {
   id: string;
@@ -18,6 +19,7 @@ interface UserManagementProps {
 
 const UserManagement: React.FC<UserManagementProps> = ({ role, username }) => {
   const { t } = useTranslation();
+  const { notifySuccess, notifyError } = useNotifications();
   const [users, setUsers] = useState<LocalUser[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -67,7 +69,7 @@ const UserManagement: React.FC<UserManagementProps> = ({ role, username }) => {
         setNewUser({ username: '', password: '', role: 'operator' });
       }
     } catch (error) {
-      alert('Error adding user');
+      notifyError('Error adding user');
     }
   };
 
@@ -83,7 +85,7 @@ const UserManagement: React.FC<UserManagementProps> = ({ role, username }) => {
       });
       await fetchUsers();
     } catch (error) {
-      alert('Error deleting user');
+      notifyError('Error deleting user');
     }
   };
 
@@ -100,9 +102,9 @@ const UserManagement: React.FC<UserManagementProps> = ({ role, username }) => {
       });
       await fetchUsers();
       setEditingUser(null);
-      alert(t('roleUpdated'));
+      notifySuccess(t('roleUpdated'));
     } catch (error) {
-      alert('Error updating role');
+      notifyError('Error updating role');
     }
   };
 
@@ -121,10 +123,10 @@ const UserManagement: React.FC<UserManagementProps> = ({ role, username }) => {
       if (response.ok) {
         setChangingPasswordUser(null);
         setNewPassword('');
-        alert(t('passwordUpdated'));
+        notifySuccess(t('passwordUpdated'));
       }
     } catch (error) {
-      alert('Error updating password');
+      notifyError('Error updating password');
     }
   };
 

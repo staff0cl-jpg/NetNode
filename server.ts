@@ -31,7 +31,73 @@ type InventoryItem = {
   status: "online" | "offline" | "warning";
   uptime: string;
   uptimeSeconds?: number;
+  warningScore?: number;
+  warningSeverity?: "none" | "warning" | "critical";
+  warningReasons?: string[];
+  cpuLoad?: number | null;
+  trunkDownCount?: number;
 };
+
+const parseNumberEnv = (value: string | undefined, fallback: number): number => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const INVENTORY_WARNING_RULES = {
+  // Keep defaults conservative to avoid alert noise in mixed hardware fleets.
+  cpuHighThreshold: parseNumberEnv(process.env.WARNING_CPU_HIGH_THRESHOLD, 85),
+  trunkDownWarnCount: parseNumberEnv(process.env.WARNING_TRUNK_DOWN_COUNT, 1),
+  cpuWarnScore: 40,
+  trunkWarnScore: 30,
+  offlineCriticalScore: 100,
+};
+
+type InventoryWarningAssessment = {
+  severity: "none" | "warning" | "critical";
+  score: number;
+  reasons: string[];
+};
+
+function evaluateInventoryWarnings(input: {
+  isReachable: boolean;
+  cpuLoad: number | null;
+  trunkDownCount: number;
+}): InventoryWarningAssessment {
+  if (!input.isReachable) {
+    return {
+      severity: "critical",
+      score: INVENTORY_WARNING_RULES.offlineCriticalScore,
+      reasons: ["Device is unreachable/offline"],
+    };
+  }
+
+  const reasons: string[] = [];
+  let score = 0;
+
+  if (Number.isFinite(input.cpuLoad) && Number(input.cpuLoad) >= INVENTORY_WARNING_RULES.cpuHighThreshold) {
+    score += INVENTORY_WARNING_RULES.cpuWarnScore;
+    reasons.push(`High CPU load (${Math.round(Number(input.cpuLoad))}% >= ${INVENTORY_WARNING_RULES.cpuHighThreshold}%)`);
+  }
+
+  if (input.trunkDownCount >= INVENTORY_WARNING_RULES.trunkDownWarnCount) {
+    score += INVENTORY_WARNING_RULES.trunkWarnScore;
+    reasons.push(`Detected ${input.trunkDownCount} down trunk port(s)`);
+  }
+
+  if (!reasons.length) {
+    return {
+      severity: "none",
+      score: 0,
+      reasons: [],
+    };
+  }
+
+  return {
+    severity: "warning",
+    score: Math.min(99, score),
+    reasons,
+  };
+}
 
 // In-memory state (empty by default; devices come from discovery or manual registration)
 let inventory: InventoryItem[] = [];
@@ -574,6 +640,9 @@ let auditLogs: AuditLog[] = [];
 let systemConfig = {
   defaultLanguage: 'ru',
   siteLabel: 'UNSET',
+  productName: 'NETNODE',
+  theme: 'dark' as 'dark' | 'light',
+  logoDataUrl: '',
   automationDefaults: {
     batchSize: 10,
     timeoutMs: 15000,
@@ -711,10 +780,22 @@ function clientErrorPayload(source: string, error: unknown, extra: Record<string
   };
 }
 
+function isPlaceholderTrunkName(value: string): boolean {
+  return /^\s*trk(?:[\s_-]*\d+)?\s*$/i.test(String(value || ""));
+}
+
+function hasDescriptiveTrunkLabel(...values: string[]): boolean {
+  return values.some((value) => {
+    const trimmed = String(value || "").trim();
+    return Boolean(trimmed) && !isPlaceholderTrunkName(trimmed);
+  });
+}
+
 function isLikelyTrunkPort(name: string, alias: string, descr: string, ifType?: string): boolean {
   const v = `${name} ${alias} ${descr}`.trim().toLowerCase();
   const t = Number(ifType || 0);
   if (t === 161) return true; // ieee8023adLag
+  if (!hasDescriptiveTrunkLabel(name, alias, descr)) return false;
   if (!v) return false;
   return /\b(trunk|trk[\s_-]*\d*|lag[\s_-]*\d*|port[\s_-]*channel[\s_-]*\d*|po[\s_-]*\d+|bundle[\s_-]*ether[\s_-]*\d+|be[\s_-]*\d+|etherchannel|bond[\s_-]*\d*|bridge[\s_-]*aggregation[\s_-]*\d*|ae[\s_-]*\d+|lacp)\b/.test(v);
 }
@@ -723,6 +804,7 @@ function isLikelyLagInterface(name: string, alias: string, descr: string, ifType
   const v = `${name} ${alias} ${descr}`.trim().toLowerCase();
   const t = Number(ifType || 0);
   if (t === 161) return true; // ieee8023adLag
+  if (!hasDescriptiveTrunkLabel(name, alias, descr)) return false;
   return /\b(trk[\s_-]*\d*|lag[\s_-]*\d*|port[\s_-]*channel[\s_-]*\d*|po[\s_-]*\d+|bundle[\s_-]*ether[\s_-]*\d+|be[\s_-]*\d+|etherchannel|bond[\s_-]*\d*|bridge[\s_-]*aggregation[\s_-]*\d*|ae[\s_-]*\d+|lacp)\b/.test(v);
 }
 
@@ -953,6 +1035,14 @@ function decideTopologyTrunkCandidate(input: {
   ciscoVtpHint?: boolean;
   ciscoAggHint?: boolean;
 }): { isTrunk: boolean; reason: string; flags: TopologyTrunkDecisionFlags } {
+  const hasDescriptiveLabel = hasDescriptiveTrunkLabel(
+    input.ifName,
+    input.alias,
+    input.descr,
+    input.rawName || "",
+    input.rawAlias || "",
+    input.rawDescr || ""
+  );
   const logicalNameMatch = isLikelyTrunkPort(input.ifName, input.alias, input.descr, input.ifType);
   const rawNameMatch = isLikelyTrunkPort(input.rawName || "", input.rawAlias || "", input.rawDescr || "", input.ifType);
   const explicitTrunkKeyword =
@@ -981,6 +1071,7 @@ function decideTopologyTrunkCandidate(input: {
     explicitHostHint,
   };
 
+  if (!hasDescriptiveLabel) return { isTrunk: false, reason: "placeholderTrunkName", flags };
   if (flags.adminDown) return { isTrunk: false, reason: "adminDown", flags };
   if (flags.ciscoVtpHint) return { isTrunk: true, reason: "ciscoVtpHint", flags };
   if (flags.ciscoAggHint) return { isTrunk: true, reason: "ciscoAggregateVtpHint", flags };
@@ -1089,6 +1180,7 @@ async function getTrunkPortCountFromSnmp(host: string): Promise<number> {
       const ifName = String(ifNames[ifIndex] || `if${ifIndex}`).trim();
       const alias = String(ifAlias[ifIndex] || "").trim();
       const descr = String(ifDescr[ifIndex] || "").trim();
+      if (!hasDescriptiveTrunkLabel(ifName, alias, descr)) continue;
       const isLag = isLikelyLagInterface(ifName, alias, descr, ifType[ifIndex]) || lag.aggIndexes.has(ifIndex);
       if (isLikelyTrunkPort(ifName, alias, descr, ifType[ifIndex]) || isLag || ciscoHints.has(ifIndex) || ciscoAggHints.has(ifIndex)) count += 1;
     }
@@ -1463,7 +1555,10 @@ function normalizeProtocol(_mode?: string): DiscoveryProtocol {
 function deriveZoneKeyFromDeviceName(deviceName: string): string {
   const trimmed = String(deviceName || "").trim();
   if (!trimmed) return "";
-  const normalized = trimmed.replace(/[\s_-]+\d+$/, "").trim();
+  const normalized = trimmed
+    .replace(/(?:[\s._-]*\d+)+$/, "")
+    .replace(/[\s._-]+$/, "")
+    .trim();
   return normalized || trimmed;
 }
 
@@ -2225,6 +2320,7 @@ async function collectTrunkMetrics(host: string): Promise<TrunkMetric[]> {
     const alias = String(ifAlias[idx] || "").trim();
     const descr = String(ifDescr[idx] || "").trim();
     const ifName = String(ifNames[idx] || `if${idx}`).trim();
+    if (!hasDescriptiveTrunkLabel(ifName, alias, descr)) continue;
     const isLag = isLikelyLagInterface(ifName, alias, descr, ifType[idx]) || lag.aggIndexes.has(idx);
     if (!isLikelyTrunkPort(ifName, alias, descr, ifType[idx]) && !isLag && !ciscoHints.has(idx) && !ciscoAggHints.has(idx)) continue;
     const desc = alias || descr || ifName;
@@ -2478,6 +2574,7 @@ function parseTrunksFromSshText(text: string): TrunkMetric[] {
     if (!/(trunk|trk|lag|bridge-aggregation|port-channel|\bpo\d+\b)/i.test(line)) continue;
     const ifMatch = line.match(/(bridge-aggregation\d+|port-channel\d+|\bpo\d+\b|trunk\s*\d+|trk\d+|lag\d+)/i);
     const ifName = ifMatch ? ifMatch[1].replace(/\s+/g, "") : line.split(/\s+/)[0];
+    if (isPlaceholderTrunkName(ifName)) continue;
     const isUp = /\bup\b|forward|selected|active/i.test(line) && !/\bdown\b|disabled|inactive/i.test(line);
     out.push({
       ifIndex: String(out.length + 1),
@@ -3979,19 +4076,57 @@ type MacSearchEvent = {
     return String(value || "").trim().toUpperCase();
   }
 
-  function traceCandidatePriority(hit: MacHit): number {
+  function traceCandidatePriority(
+    hit: MacHit,
+    options?: {
+      preferDeviceIds?: Set<string>;
+      hasTransitCandidate?: boolean;
+    }
+  ): number {
     const portType = detectPortType(hit);
-    // Access/edge candidates are globally preferred for deterministic endpoint-first tracing.
-    if (portType === "access") return 1000;
-    if (portType === "trunk") return 300;
-    if (portType === "lag") return 250;
-    if (portType === "unknown") return 100;
-    return 0;
+    const preferDeviceIds = options?.preferDeviceIds;
+    const hasTransitCandidate = options?.hasTransitCandidate === true;
+    const onPreferredDevice = Boolean(preferDeviceIds && preferDeviceIds.has(hit.deviceId));
+    const neighbors = findTopologyNeighbors(hit.deviceId, String(hit.interface || ""));
+    const hasTopologyNeighbor = neighbors.length > 0;
+
+    let score = 0;
+    // If transit candidates exist, bias away from immediate edge termination without topology evidence.
+    if (hasTransitCandidate) {
+      if (portType === "trunk") score += 520;
+      else if (portType === "lag") score += 480;
+      else if (portType === "access") score += 340;
+      else score += 160;
+    } else {
+      if (portType === "access") score += 620;
+      else if (portType === "trunk") score += 360;
+      else if (portType === "lag") score += 320;
+      else score += 160;
+    }
+    if (onPreferredDevice) score += 220;
+    if (hasTopologyNeighbor) score += 120;
+    if (hit.vlan !== undefined && hit.vlan !== null) score += 20;
+    return score;
   }
 
-  function rankTraceCandidates(hits: MacHit[]): MacHit[] {
+  function rankTraceCandidates(
+    hits: MacHit[],
+    options?: {
+      preferDeviceIds?: Set<string>;
+    }
+  ): MacHit[] {
+    const hasTransitCandidate = hits.some((hit) => {
+      const portType = detectPortType(hit);
+      return portType === "trunk" || portType === "lag";
+    });
     return [...hits].sort((a, b) => {
-      const priorityDiff = traceCandidatePriority(b) - traceCandidatePriority(a);
+      const priorityDiff = traceCandidatePriority(b, {
+        preferDeviceIds: options?.preferDeviceIds,
+        hasTransitCandidate,
+      }) - traceCandidatePriority(a, {
+        preferDeviceIds: options?.preferDeviceIds,
+        hasTransitCandidate,
+      });
       if (priorityDiff !== 0) return priorityDiff;
       const aPortType = detectPortType(a);
       const bPortType = detectPortType(b);
@@ -4172,7 +4307,7 @@ type MacSearchEvent = {
       return res.status(400).json({ error: macMatcher.error });
     }
     const requestedIds = Array.isArray(req.body?.deviceIds)
-      ? new Set(req.body.deviceIds.map((x: unknown) => String(x)))
+      ? new Set<string>(req.body.deviceIds.map((x: unknown) => String(x)))
       : null;
     const baseTargets = requestedIds ? inventory.filter((d) => requestedIds.has(d.id)) : [...inventory];
     const branchCode = normalizeBranchCode(req.body?.branch || req.body?.regionPrefix);
@@ -4244,7 +4379,10 @@ type MacSearchEvent = {
       });
     }
 
-    const rankedStarts = rankTraceCandidates(results);
+    const preferredTraceDeviceIds = requestedIds && requestedIds.size > 0 ? requestedIds : undefined;
+    const rankedStarts = rankTraceCandidates(results, {
+      preferDeviceIds: preferredTraceDeviceIds,
+    });
     const traceStarts = rankedStarts.slice(0, Math.min(4, rankedStarts.length));
     if (results.length > traceStarts.length) {
       ambiguityNotes.push(`Initial search returned ${results.length} candidates; tracing top ${traceStarts.length} edge-priority candidates.`);
@@ -4282,7 +4420,23 @@ type MacSearchEvent = {
     const chosen = [...attempts].sort((a, b) => {
       const statusDiff = statusRank[a.finalStatus] - statusRank[b.finalStatus];
       if (statusDiff !== 0) return statusDiff;
-      return traceCandidatePriority(b.start) - traceCandidatePriority(a.start);
+      const aFinalHop = a.hops[a.hops.length - 1];
+      const bFinalHop = b.hops[b.hops.length - 1];
+      const aPenalty =
+        a.finalStatus === "found_access" &&
+        a.hops.length <= 1 &&
+        (!aFinalHop || !findTopologyNeighbors(a.start.deviceId, String(aFinalHop.inPort || a.start.interface || "")).length)
+          ? 120
+          : 0;
+      const bPenalty =
+        b.finalStatus === "found_access" &&
+        b.hops.length <= 1 &&
+        (!bFinalHop || !findTopologyNeighbors(b.start.deviceId, String(bFinalHop.inPort || b.start.interface || "")).length)
+          ? 120
+          : 0;
+      const priorityA = traceCandidatePriority(a.start, { preferDeviceIds: preferredTraceDeviceIds }) - aPenalty;
+      const priorityB = traceCandidatePriority(b.start, { preferDeviceIds: preferredTraceDeviceIds }) - bPenalty;
+      return priorityB - priorityA;
     })[0];
     const finalStatus: MacTraceStatus = chosen?.finalStatus || "not_found";
     hops.push(...(chosen?.hops || []));
@@ -4331,12 +4485,28 @@ type MacSearchEvent = {
     res.json({
       defaultLanguage: systemConfig.defaultLanguage || "ru",
       siteLabel: systemConfig.siteLabel || "UNSET",
+      productName: systemConfig.productName || "NETNODE",
+      theme: systemConfig.theme === "light" ? "light" : "dark",
+      logoDataUrl: typeof systemConfig.logoDataUrl === "string" ? systemConfig.logoDataUrl : "",
     });
   });
 
   app.post("/api/config/system", checkRole(['admin']), (req, res) => {
     const actor = actorName(req);
-    systemConfig = { ...systemConfig, ...req.body };
+    const incoming = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
+    const patch: Record<string, unknown> = { ...incoming };
+    if (typeof incoming.productName === 'string') {
+      patch.productName = incoming.productName.trim().slice(0, 64) || 'NETNODE';
+    }
+    if (incoming.theme !== undefined) {
+      patch.theme = incoming.theme === 'light' ? 'light' : 'dark';
+    }
+    if (incoming.logoDataUrl !== undefined) {
+      const logo = typeof incoming.logoDataUrl === 'string' ? incoming.logoDataUrl.trim() : '';
+      // Keep payload bounded to reduce memory risk.
+      patch.logoDataUrl = logo.length <= 2_000_000 ? logo : '';
+    }
+    systemConfig = { ...systemConfig, ...patch };
     logAction(actor, 'System Config Update', `Updated system settings`, 'config');
     res.json({ success: true, config: systemConfig });
   });
@@ -4344,6 +4514,9 @@ type MacSearchEvent = {
   app.get("/api/system/banner", checkRole(['admin', 'operator', 'viewer']), (_req, res) => {
     res.json({
       siteLabel: systemConfig.siteLabel || "UNSET",
+      productName: systemConfig.productName || "NETNODE",
+      logoDataUrl: typeof systemConfig.logoDataUrl === "string" ? systemConfig.logoDataUrl : "",
+      theme: systemConfig.theme === "light" ? "light" : "dark",
       appUptime: formatDuration(process.uptime()),
     });
   });
@@ -4476,9 +4649,19 @@ type MacSearchEvent = {
       inventory.map(async (item) => {
         const probe = await getSnmpProbe(item.ip, 900);
         if (!probe.ok) {
+          const warning = evaluateInventoryWarnings({
+            isReachable: false,
+            cpuLoad: null,
+            trunkDownCount: 0,
+          });
           return {
             ...item,
             status: "offline" as const,
+            warningScore: warning.score,
+            warningSeverity: warning.severity,
+            warningReasons: warning.reasons,
+            cpuLoad: null,
+            trunkDownCount: 0,
           };
         }
         const nextVendor = probe.sysDescr ? detectVendorFromSnmp(probe.sysDescr, probe.sysObjectId || "") : item.vendor;
@@ -4486,6 +4669,38 @@ type MacSearchEvent = {
         const nextName = probe.sysName?.trim() ? probe.sysName.trim() : item.name;
         const nextCategory = detectCategoryFromSnmp(probe.sysDescr || "", probe.sysObjectId || "", probe.sysName || "");
         const uptimeSeconds = probe.uptimeSeconds ?? item.uptimeSeconds ?? 0;
+        const template = pickTemplate(item);
+        const defs = template?.metrics || [];
+        let cpuLoad: number | null = null;
+        try {
+          if (defs.length > 0) {
+            const map = await snmpGetMap(item.ip, defs.map((d) => d.oid));
+            const cpuCandidates: number[] = [];
+            for (const def of defs) {
+              if (!isCpuMetricDef(def)) continue;
+              const value = await resolveMetricValue(item.ip, def, map);
+              const numeric = Number(value);
+              if (Number.isFinite(numeric)) cpuCandidates.push(numeric);
+            }
+            if (cpuCandidates.length > 0) {
+              cpuLoad = Math.round((cpuCandidates.reduce((a, b) => a + b, 0) / cpuCandidates.length) * 100) / 100;
+            }
+          }
+        } catch {
+          cpuLoad = null;
+        }
+        let trunkDownCount = 0;
+        try {
+          const trunks = await collectTrunkMetrics(item.ip);
+          trunkDownCount = trunks.filter((t) => t.isDown === true).length;
+        } catch {
+          trunkDownCount = 0;
+        }
+        const warning = evaluateInventoryWarnings({
+          isReachable: true,
+          cpuLoad,
+          trunkDownCount,
+        });
         return {
           ...item,
           name: nextName,
@@ -4495,9 +4710,14 @@ type MacSearchEvent = {
           category: item.category || nextCategory,
           branch: item.branch || "ULN",
           zone: resolveDeviceZone(nextName, item.zone),
-          status: "online" as const,
+          status: warning.severity === "warning" ? ("warning" as const) : ("online" as const),
           uptimeSeconds,
           uptime: formatDuration(uptimeSeconds),
+          warningScore: warning.score,
+          warningSeverity: warning.severity,
+          warningReasons: warning.reasons,
+          cpuLoad,
+          trunkDownCount,
         };
       })
     )
@@ -4508,6 +4728,11 @@ type MacSearchEvent = {
             ...item,
             zoneKey: deriveZoneKeyFromDeviceName(item.name || ""),
             status: item.status ?? ("offline" as const),
+            warningScore: item.warningScore ?? 0,
+            warningSeverity: item.warningSeverity ?? "none",
+            warningReasons: item.warningReasons ?? [],
+            cpuLoad: Number.isFinite(Number(item.cpuLoad)) ? Number(item.cpuLoad) : null,
+            trunkDownCount: Number.isFinite(Number(item.trunkDownCount)) ? Number(item.trunkDownCount) : 0,
           }))
         )
       );

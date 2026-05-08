@@ -27,6 +27,27 @@ body {
   font-family: var(--font-sans);
 }
 
+[data-theme="light"] {
+  --bg-main: #f3f4f6;
+  --bg-sidebar: #ffffff;
+  --bg-card: #ffffff;
+  --bg-hover: #eef2f7;
+  --text-main: #1f2937;
+  --text-dim: #4b5563;
+  --border: #d1d5db;
+}
+
+[data-theme="light"] .bg-\[\#1a1b1e\] { background-color: #f3f4f6 !important; }
+[data-theme="light"] .bg-\[\#141517\] { background-color: #ffffff !important; }
+[data-theme="light"] .bg-\[\#25262b\] { background-color: #ffffff !important; }
+[data-theme="light"] .bg-\[\#1c1d21\] { background-color: #f9fafb !important; }
+[data-theme="light"] .bg-\[\#2c2e33\] { background-color: #eef2f7 !important; }
+[data-theme="light"] .border-\[\#373a40\] { border-color: #d1d5db !important; }
+[data-theme="light"] .text-white { color: #111827 !important; }
+[data-theme="light"] .text-\[\#c1c2c5\] { color: #1f2937 !important; }
+[data-theme="light"] .text-\[\#909296\] { color: #4b5563 !important; }
+[data-theme="light"] .text-\[\#5c5f66\] { color: #6b7280 !important; }
+
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;

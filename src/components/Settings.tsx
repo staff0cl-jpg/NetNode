@@ -3,6 +3,7 @@ import { Key, Shield, HardDrive, Database } from 'lucide-react';
 import { useTranslation } from '../lib/i18n';
 import { useNotifications } from '../lib/notifications';
 import { cn } from '../lib/utils';
+import { MAX_LOGO_SIZE_BYTES, processLogoWhiteToTransparent, validatePngFile } from '../lib/logo';
 
 type LdapProfileForm = {
   enabled: boolean;
@@ -140,6 +141,11 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
   } | null>(null);
   const [defaultLanguage, setDefaultLanguage] = React.useState('ru');
   const [siteLabel, setSiteLabel] = React.useState('UNSET');
+  const [productName, setProductName] = React.useState('NETNODE');
+  const [theme, setTheme] = React.useState<'dark' | 'light'>('dark');
+  const [logoDataUrl, setLogoDataUrl] = React.useState('');
+  const [logoThreshold, setLogoThreshold] = React.useState(245);
+  const [logoProcessing, setLogoProcessing] = React.useState(false);
   const [automationDefaults, setAutomationDefaults] = React.useState({
     batchSize: 10,
     timeoutMs: 15000,
@@ -210,6 +216,15 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         }
         if (data.config && data.config.siteLabel) {
           setSiteLabel(data.config.siteLabel);
+        }
+        if (data.config && typeof data.config.productName === 'string') {
+          setProductName(data.config.productName || 'NETNODE');
+        }
+        if (data.config && data.config.theme) {
+          setTheme(data.config.theme === 'light' ? 'light' : 'dark');
+        }
+        if (data.config && typeof data.config.logoDataUrl === 'string') {
+          setLogoDataUrl(data.config.logoDataUrl);
         }
         if (data.config && data.config.automationDefaults) {
           setAutomationDefaults({
@@ -399,7 +414,14 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
     }
   };
 
-  const saveSystemConfig = async (payload: { defaultLanguage?: string; siteLabel?: string; automationDefaults?: any }) => {
+  const saveSystemConfig = async (payload: {
+    defaultLanguage?: string;
+    siteLabel?: string;
+    productName?: string;
+    theme?: 'dark' | 'light';
+    logoDataUrl?: string;
+    automationDefaults?: any;
+  }) => {
     try {
       await fetch('/api/config/system', {
         method: 'POST',
@@ -412,6 +434,42 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       });
     } catch (err) {
       notifyError('Failed to save config');
+    }
+  };
+
+  const handleLogoUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    setLogoProcessing(true);
+    try {
+      await validatePngFile(file);
+      const { originalDataUrl, processedDataUrl } = await processLogoWhiteToTransparent(file, logoThreshold);
+      const safeLogo = processedDataUrl || originalDataUrl;
+      setLogoDataUrl(safeLogo);
+      await saveSystemConfig({ logoDataUrl: safeLogo });
+      notifySuccess(t('settingsLogoSaved'));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t('settingsLogoUploadFailed');
+      notifyError(message);
+    } finally {
+      setLogoProcessing(false);
+    }
+  };
+
+  const applyLogoThreshold = async () => {
+    if (!logoDataUrl) return;
+    try {
+      const response = await fetch(logoDataUrl);
+      const blob = await response.blob();
+      const logoFile = new File([blob], 'logo.png', { type: 'image/png' });
+      const { originalDataUrl, processedDataUrl } = await processLogoWhiteToTransparent(logoFile, logoThreshold);
+      const safeLogo = processedDataUrl || originalDataUrl;
+      setLogoDataUrl(safeLogo);
+      await saveSystemConfig({ logoDataUrl: safeLogo });
+      notifySuccess(t('settingsLogoSaved'));
+    } catch {
+      notifyError(t('settingsLogoProcessFailed'));
     }
   };
 
@@ -854,6 +912,99 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                 <option value="en">{t('englishLanguage')}</option>
               </select>
               <p className="text-[9px] text-[#5c5f66] mt-1 font-medium">{t('defaultLanguageHelp')}</p>
+            </div>
+            <div className="max-w-xl space-y-2 mt-6 min-w-0">
+              <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('settingsProductNameLabel')}</label>
+              <div className="flex flex-col sm:flex-row gap-3">
+                <input
+                  value={productName}
+                  onChange={(e) => setProductName(e.target.value)}
+                  className="flex-1 min-w-0 bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none"
+                  placeholder="NETNODE"
+                />
+                <button
+                  type="button"
+                  onClick={() => saveSystemConfig({ productName: productName.trim() || 'NETNODE' })}
+                  className="px-4 py-2 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-[10px] font-bold uppercase tracking-widest transition-all"
+                >
+                  {t('save')}
+                </button>
+              </div>
+            </div>
+            <div className="max-w-xl space-y-2 mt-6 min-w-0">
+              <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('settingsThemeLabel')}</label>
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTheme('dark');
+                    saveSystemConfig({ theme: 'dark' });
+                  }}
+                  className={cn(
+                    'px-4 py-2 rounded text-[10px] font-bold uppercase tracking-widest border transition-all',
+                    theme === 'dark'
+                      ? 'bg-[#228be6] border-[#228be6] text-white'
+                      : 'bg-[#141517] border-[#373a40] text-[#909296]'
+                  )}
+                >
+                  {t('settingsThemeDark')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTheme('light');
+                    saveSystemConfig({ theme: 'light' });
+                  }}
+                  className={cn(
+                    'px-4 py-2 rounded text-[10px] font-bold uppercase tracking-widest border transition-all',
+                    theme === 'light'
+                      ? 'bg-[#228be6] border-[#228be6] text-white'
+                      : 'bg-[#141517] border-[#373a40] text-[#909296]'
+                  )}
+                >
+                  {t('settingsThemeLight')}
+                </button>
+              </div>
+            </div>
+            <div className="max-w-xl space-y-3 mt-6 min-w-0">
+              <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('settingsLogoLabel')}</label>
+              {logoDataUrl ? (
+                <div className="w-16 h-16 rounded border border-[#373a40] bg-[#141517] p-1">
+                  <img src={logoDataUrl} alt="App logo" className="w-full h-full object-contain" />
+                </div>
+              ) : null}
+              <input
+                type="file"
+                accept="image/png"
+                onChange={handleLogoUpload}
+                className="block text-xs text-[#c1c2c5] file:mr-3 file:px-3 file:py-1.5 file:text-[10px] file:font-bold file:uppercase file:tracking-widest file:border file:border-[#373a40] file:bg-[#25262b] file:text-[#c1c2c5] file:rounded"
+                disabled={logoProcessing}
+              />
+              <p className="text-[9px] text-[#5c5f66]">
+                {t('settingsLogoHelp')} ({Math.floor(MAX_LOGO_SIZE_BYTES / 1024 / 1024)}MB max)
+              </p>
+              <div className="space-y-1">
+                <label className="text-[10px] text-[#909296]">{t('settingsLogoThreshold')}</label>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="range"
+                    min={220}
+                    max={255}
+                    value={logoThreshold}
+                    onChange={(e) => setLogoThreshold(Number(e.target.value))}
+                    className="w-full"
+                  />
+                  <span className="text-xs text-[#909296]">{logoThreshold}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={applyLogoThreshold}
+                  disabled={!logoDataUrl}
+                  className="px-3 py-1.5 bg-[#25262b] border border-[#373a40] text-[#c1c2c5] hover:text-white rounded text-[10px] font-bold uppercase tracking-widest transition-all disabled:opacity-40 disabled:pointer-events-none"
+                >
+                  {t('settingsLogoApplyThreshold')}
+                </button>
+              </div>
             </div>
             <div className="max-w-xl space-y-2 mt-6 min-w-0">
               <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('dcLabel')}</label>

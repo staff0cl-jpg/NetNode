@@ -16,6 +16,11 @@ export interface Switch {
   ip: string;
   status: 'online' | 'offline' | 'warning';
   uptime: string;
+  warningScore?: number;
+  warningSeverity?: 'none' | 'warning' | 'critical';
+  warningReasons?: string[];
+  cpuLoad?: number | null;
+  trunkDownCount?: number;
 }
 
 export interface SiteZone {
