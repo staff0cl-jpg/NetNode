@@ -26,6 +26,9 @@ interface TerminalSession {
   autoReconnect: boolean;
 }
 
+const TERMINAL_SCROLLBACK_LINES = 100_000;
+const TERMINAL_INITIAL_ROWS = 36;
+
 const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onClearTarget }) => {
   const { t } = useTranslation();
   const isAdmin = role === 'admin';
@@ -45,6 +48,7 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
   const socket = useRef<Socket | null>(null);
   const terminalContainers = useRef<Map<string, HTMLDivElement>>(new Map());
   const reconnectTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
+  const resizeObservers = useRef<Map<string, ResizeObserver>>(new Map());
   const handleConnectRef = useRef<(s: TerminalSession, pwd?: string) => void>(() => {});
   const sessionsRef = useRef<TerminalSession[]>([]);
 
@@ -173,8 +177,25 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
       socket.current?.disconnect();
       xterms.current.forEach(te => te.xterm.dispose());
       reconnectTimers.current.forEach(t => clearTimeout(t));
+      resizeObservers.current.forEach(observer => observer.disconnect());
     };
   }, []);
+
+  useEffect(() => {
+    const fitAll = () => {
+      xterms.current.forEach(({ fitAddon }) => fitAddon.fit());
+    };
+    window.addEventListener('resize', fitAll);
+    return () => window.removeEventListener('resize', fitAll);
+  }, []);
+
+  useEffect(() => {
+    if (!activeSessionId) return;
+    const active = xterms.current.get(activeSessionId);
+    if (!active) return;
+    const timer = setTimeout(() => active.fitAddon.fit(), 30);
+    return () => clearTimeout(timer);
+  }, [activeSessionId]);
 
   const createXTerm = (sessionId: string, container: HTMLDivElement) => {
     if (xterms.current.has(sessionId)) return;
@@ -189,7 +210,8 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
       fontFamily: 'JetBrains Mono, monospace',
       fontSize: 13,
       cursorBlink: true,
-      rows: 30,
+      rows: TERMINAL_INITIAL_ROWS,
+      scrollback: TERMINAL_SCROLLBACK_LINES,
     });
 
     const fitAddon = new FitAddon();
@@ -205,6 +227,10 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
     });
 
     xterms.current.set(sessionId, { xterm: term, fitAddon });
+
+    const observer = new ResizeObserver(() => fitAddon.fit());
+    observer.observe(container);
+    resizeObservers.current.set(sessionId, observer);
     
     // Fit after a short delay
     setTimeout(() => fitAddon.fit(), 50);
@@ -286,6 +312,11 @@ const Terminal: React.FC<TerminalProps> = ({ switches, role, targetDevice, onCle
     if (te) {
       te.xterm.dispose();
       xterms.current.delete(id);
+    }
+    const observer = resizeObservers.current.get(id);
+    if (observer) {
+      observer.disconnect();
+      resizeObservers.current.delete(id);
     }
   };
 

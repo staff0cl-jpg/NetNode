@@ -155,6 +155,7 @@ export const translations: Translations = {
   topologyZoneRenameHint: { ru: 'Двойной клик или двойной тап по зоне для переименования отображаемой метки.', en: 'Double-click or double-tap a zone to rename its display label.' },
   topologyZoneRenamePlaceholder: { ru: 'Метка зоны (пусто = авто)', en: 'Zone label (empty = auto)' },
   topologyZoneRenameFailed: { ru: 'Не удалось переименовать отображаемую метку зоны.', en: 'Failed to rename zone display label.' },
+  topologyUnzonedZone: { ru: 'Без зоны', en: 'Unzoned' },
 
   // Login
   authGateway: { ru: 'Шлюз управления инфраструктурой', en: 'Infrastructure Control Gateway' },
@@ -212,8 +213,8 @@ export const translations: Translations = {
   ldapTestPasswordField: { ru: 'Пароль для проверки', en: 'Test account password' },
   autoLayout: { ru: 'Авторазметка', en: 'Auto layout' },
   topologyCanvasHint: {
-    ru: 'Авторазметка активной вкладки строит слои Gateway/Core/Distribution/Access, группирует узлы вокруг Core и выносит unknown/orphan отдельно. Подпись связи редактируется двойным кликом по линии; ручные позиции сохраняются.',
-    en: 'Auto layout for the active tab builds Gateway/Core/Distribution/Access layers, groups nodes around each core, and isolates unknown/orphan devices. Edit a link label with double-click on the link; manual node positions stay persisted.',
+    ru: 'Авторазметка активной вкладки строит слои Gateway/Core/Distribution/Access, группирует узлы по зонам в rack-боксы и выносит unknown/orphan отдельно. Подпись связи редактируется двойным кликом по линии; ручные позиции сохраняются.',
+    en: 'Auto layout for the active tab builds Gateway/Core/Distribution/Access layers, groups nodes into rack-like zone boxes, and isolates unknown/orphan devices. Edit a link label with double-click on the link; manual node positions stay persisted.',
   },
   discoveryScanExplain: {
     ru: 'SNMP-сканирование по указанным IPv4-подсетям (до 1024 адресов за запуск). Уже известные IP пропускаются.',

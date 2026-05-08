@@ -14,6 +14,9 @@ import crypto from "crypto";
 // Load environment variables
 dotenv.config();
 
+// Keep terminal traffic bounded but generous for large command output.
+const SOCKET_IO_MAX_PACKET_BYTES = 5 * 1024 * 1024;
+
 type InventoryItem = {
   id: string;
   name: string;
@@ -1103,6 +1106,18 @@ async function classifyInventorySubcategoriesBySnmp(branch?: string) {
   const touched: Array<{ id: string; trunkCount: number; subcategory: string }> = [];
   await forEachWithLimit(targets, 16, async (item) => {
     const category = String(item.category || "").toLowerCase();
+    if (isCiscoL3CoreModel(item.model || "", "", item.name || "")) {
+      const nextCategory = "Router";
+      const nextSubcategory = "Core";
+      const categoryChanged = (item.category || "") !== nextCategory;
+      const subcategoryChanged = (item.subcategory || "") !== nextSubcategory;
+      if (categoryChanged) item.category = nextCategory;
+      if (subcategoryChanged) item.subcategory = nextSubcategory;
+      if (categoryChanged || subcategoryChanged) {
+        touched.push({ id: item.id, trunkCount: 0, subcategory: nextSubcategory });
+      }
+      return;
+    }
     if (category === "fc switch" || category === "fibre channel switch" || category === "fiber channel switch") {
       const subcategory = deriveFcSubcategoryByName(item.name || "");
       if ((item.subcategory || "") !== subcategory) {
@@ -1545,6 +1560,8 @@ async function runDiscoveryScan(input: DiscoveryScanInput): Promise<DiscoverySca
       const category = detectCategoryFromSnmp(probe.sysDescr || "", probe.sysObjectId || "", probe.sysName || "");
       const subcategory = category === "FC Switch"
         ? deriveFcSubcategoryByName(probe.sysName || model || "")
+        : isCiscoL3CoreModel(probe.sysDescr || "", probe.sysObjectId || "", probe.sysName || "")
+          ? "Core"
         : "Access";
       const uptimeSeconds = probe.uptimeSeconds ?? 0;
       discovered.push({
@@ -1691,6 +1708,17 @@ function detectModelFromSnmp(sysDescr: string, sysObjectId = "", sysName = ""): 
   return parseModelFromDescr(sysDescr);
 }
 
+function isCiscoL3CoreModel(sysDescr: string, sysObjectId: string, sysName = ""): boolean {
+  const d = String(sysDescr || "").toLowerCase();
+  const oid = String(sysObjectId || "").toLowerCase();
+  const n = String(sysName || "").toLowerCase();
+  const model = detectModelFromSnmp(sysDescr, sysObjectId, sysName).toLowerCase();
+  const signal = `${d} ${n} ${model}`;
+  const isCiscoSignal = oid.startsWith("1.3.6.1.4.1.9") || signal.includes("cisco") || signal.includes("catalyst");
+  if (!isCiscoSignal) return false;
+  return /\b(c9500|c9500x|c95\d{2}(?:x)?|catalyst[\s\-_]*95\d{2}(?:x)?)\b/i.test(signal);
+}
+
 function snmpVersionsFromConfig(): snmp.Version[] {
   const preferred = snmpConfig.version.includes("v1") ? snmp.Version1 : snmp.Version2c;
   const fallback = preferred === snmp.Version1 ? snmp.Version2c : snmp.Version1;
@@ -1748,6 +1776,7 @@ function detectCategoryFromSnmp(sysDescr: string, sysObjectId: string, sysName =
     return "FC Switch";
   }
   if (d.includes("router")) return "Router";
+  if (isCiscoL3CoreModel(sysDescr, sysObjectId, sysName)) return "Router";
   if (d.includes("firewall") || d.includes("fortigate") || d.includes("palo alto")) return "Firewall";
   if (d.includes("switch") || d.includes("catalyst") || d.includes("aruba") || d.includes("nexus")) return "Switch";
   return "Other";
@@ -3334,7 +3363,9 @@ function actorRole(req: express.Request): string {
 async function startServer() {
   const app = express();
   const server = http.createServer(app);
-  const io = new Server(server);
+  const io = new Server(server, {
+    maxHttpBufferSize: SOCKET_IO_MAX_PACKET_BYTES,
+  });
   const PORT = process.env.PORT || 3000;
   const isProd = process.env.NODE_ENV === "production";
 
