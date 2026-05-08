@@ -664,12 +664,12 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
       });
       const data = await response.json();
       if (!response.ok) {
-        notifyError(data?.error || 'Failed to save SNMP config.');
+        notifyError(data?.error || t('settingsSnmpConfigSaveFailed'));
         return;
       }
-      notifySuccess(data?.message || 'SNMP config saved.');
+      notifySuccess(data?.message || t('settingsSnmpConfigSaved'));
     } catch {
-      notifyError('Failed to save SNMP config.');
+      notifyError(t('settingsSnmpConfigSaveFailed'));
     }
   };
 
@@ -742,13 +742,13 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
       });
       const data = await response.json();
       if (!response.ok) {
-        notifyError(data.error || 'Backup config save failed');
+        notifyError(data.error || t('automationBackupConfigSaveFailed'));
         return;
       }
-      notifySuccess('Backup config saved');
+      notifySuccess(t('automationBackupConfigSaved'));
       setBackupConfig((prev) => ({ ...prev, password: '' }));
     } catch {
-      notifyError('Backup config save failed');
+      notifyError(t('automationBackupConfigSaveFailed'));
     }
   };
 
@@ -764,13 +764,13 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
         notifyError(friendlyErrorMessage({ t, httpStatus: response.status, detail: data }));
         return;
       }
-      notifyInfo('Backup job started');
+      notifyInfo(t('automationBackupJobStarted'));
       const historyResp = await fetch('/api/backup/history', { headers });
       if (historyResp.ok) {
         const historyData = await historyResp.json();
         setBackupRuns(Array.isArray(historyData.runs) ? historyData.runs : []);
       }
-      notifySuccess('Backup run completed');
+      notifySuccess(t('automationBackupRunCompleted'));
     } catch (e) {
       logTechnicalError('Backup run request failed', e);
       notifyError(friendlyErrorMessage({ t, detail: e }));

@@ -90,23 +90,29 @@ const TOPO_ZONE_PAD_TOP = 34;
 const TOPO_ZONE_PAD_BOTTOM = 30;
 const TOPO_ROW_TOP_Y = 90;
 const TOPO_ROW_SECOND_Y = 300;
+const TOPO_ROW_THIRD_Y = 510;
 const TOPO_ROW_HEIGHT = TOPO_NODE_HEIGHT + 52;
 const TOPO_COLUMN_GAP = TOPO_NODE_WIDTH + 66;
+const TOPO_ZONE_GAP_X = 100;
+const TOPO_ZONE_MIN_WIDTH = TOPO_NODE_WIDTH + TOPO_ZONE_PAD_X * 2;
 const TOPO_MAX_COLUMNS = 7;
 
-function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: number): NodeWithPos[] {
+const sortSwitchesByNameThenId = (a: Switch, b: Switch) => {
+  const an = String(a.name || '').toLowerCase();
+  const bn = String(b.name || '').toLowerCase();
+  if (an !== bn) return an.localeCompare(bn);
+  return String(a.id).localeCompare(String(b.id));
+};
+
+const isMikroTikSwitch = (sw: Switch) => String(sw.vendor || '').trim().toLowerCase().includes('mikrotik');
+const isCiscoSwitch = (sw: Switch) => String(sw.vendor || '').trim().toLowerCase().includes('cisco');
+
+function computeLegacyFlatLayout(switches: Switch[], links: TopoLink[], cw: number, ch: number): NodeWithPos[] {
   if (switches.length === 0) return [];
   void links;
   void ch;
-  const sortByNameThenId = (a: Switch, b: Switch) => {
-    const an = String(a.name || '').toLowerCase();
-    const bn = String(b.name || '').toLowerCase();
-    if (an !== bn) return an.localeCompare(bn);
-    return String(a.id).localeCompare(String(b.id));
-  };
-  const isMikroTik = (sw: Switch) => String(sw.vendor || '').trim().toLowerCase() === 'mikrotik';
-  const topRow = [...switches].filter(isMikroTik).sort(sortByNameThenId);
-  const lowerRow = [...switches].filter((sw) => !isMikroTik(sw)).sort(sortByNameThenId);
+  const topRow = [...switches].filter(isMikroTikSwitch).sort(sortSwitchesByNameThenId);
+  const lowerRow = [...switches].filter((sw) => !isMikroTikSwitch(sw)).sort(sortSwitchesByNameThenId);
   const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
   const stageWidth = Math.max(cw, 1200);
   const placeRow = (items: Switch[], baseY: number, maxCols: number) => {
@@ -136,10 +142,95 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
   });
 }
 
-const isMikroTikSwitch = (sw: Switch) => String(sw.vendor || '').trim().toLowerCase() === 'mikrotik';
+function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: number): NodeWithPos[] {
+  if (switches.length === 0) return [];
+  void links;
+  void ch;
+  const stageWidth = Math.max(cw, 1200);
+  const zones = new Map<string, Switch[]>();
+  switches.forEach((sw) => {
+    const zoneKey = deriveZoneKey(sw.name) || '__ungrouped__';
+    if (!zones.has(zoneKey)) zones.set(zoneKey, []);
+    zones.get(zoneKey)!.push(sw);
+  });
 
-const isSavedYWithinRowBand = (sw: Switch, y: number) =>
-  isMikroTikSwitch(sw) ? y <= TOPO_ROW_SECOND_Y - 40 : y >= TOPO_ROW_SECOND_Y - 40;
+  const zonePlans = Array.from(zones.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([zoneKey, zoneSwitches]) => {
+      const mikrotik = zoneSwitches.filter(isMikroTikSwitch).sort(sortSwitchesByNameThenId);
+      const cisco = zoneSwitches.filter((sw) => !isMikroTikSwitch(sw) && isCiscoSwitch(sw)).sort(sortSwitchesByNameThenId);
+      const others = zoneSwitches.filter((sw) => !isMikroTikSwitch(sw) && !isCiscoSwitch(sw)).sort(sortSwitchesByNameThenId);
+      const otherCols = Math.max(1, Math.min(TOPO_MAX_COLUMNS, others.length || 1));
+      const rowWidths = [
+        Math.max(1, mikrotik.length) * TOPO_NODE_WIDTH + Math.max(0, mikrotik.length - 1) * (TOPO_COLUMN_GAP - TOPO_NODE_WIDTH),
+        Math.max(1, cisco.length) * TOPO_NODE_WIDTH + Math.max(0, cisco.length - 1) * (TOPO_COLUMN_GAP - TOPO_NODE_WIDTH),
+        otherCols * TOPO_NODE_WIDTH + Math.max(0, otherCols - 1) * (TOPO_COLUMN_GAP - TOPO_NODE_WIDTH),
+      ];
+      return {
+        zoneKey,
+        mikrotik,
+        cisco,
+        others,
+        otherCols,
+        width: Math.max(TOPO_ZONE_MIN_WIDTH, Math.max(...rowWidths) + TOPO_ZONE_PAD_X * 2),
+      };
+    });
+
+  const totalWidth = zonePlans.reduce((sum, plan) => sum + plan.width, 0) + Math.max(0, zonePlans.length - 1) * TOPO_ZONE_GAP_X;
+  let nextZoneX = Math.max(35, stageWidth / 2 - totalWidth / 2);
+  const pos = new Map<string, { x: number; y: number }>();
+
+  const placeRow = (items: Switch[], zoneX: number, zoneWidth: number, baseY: number, maxCols: number) => {
+    if (!items.length) return;
+    const cols = Math.max(1, Math.min(maxCols, items.length));
+    for (let r = 0; r < Math.ceil(items.length / cols); r++) {
+      const rowItems = items.slice(r * cols, r * cols + cols);
+      const rowWidth = rowItems.length * TOPO_NODE_WIDTH + Math.max(0, rowItems.length - 1) * (TOPO_COLUMN_GAP - TOPO_NODE_WIDTH);
+      const startX = zoneX + zoneWidth / 2 - rowWidth / 2;
+      rowItems.forEach((sw, idx) => {
+        pos.set(sw.id, {
+          x: startX + idx * TOPO_COLUMN_GAP,
+          y: baseY + r * TOPO_ROW_HEIGHT,
+        });
+      });
+    }
+  };
+
+  zonePlans.forEach((plan) => {
+    placeRow(plan.mikrotik, nextZoneX, plan.width, TOPO_ROW_TOP_Y, Math.max(1, plan.mikrotik.length || 1));
+    placeRow(plan.cisco, nextZoneX, plan.width, TOPO_ROW_SECOND_Y, Math.max(1, plan.cisco.length || 1));
+    placeRow(plan.others, nextZoneX, plan.width, TOPO_ROW_THIRD_Y, plan.otherCols);
+    nextZoneX += plan.width + TOPO_ZONE_GAP_X;
+  });
+
+  return switches.map((sw) => {
+    const p = pos.get(sw.id) || { x: 35, y: TOPO_ROW_THIRD_Y };
+    return { ...sw, x: p.x, y: p.y };
+  });
+}
+
+const isLikelyLegacyAutoPosition = (
+  sw: Switch,
+  saved: { x: number; y: number },
+  legacyPositions: Map<string, { x: number; y: number }>
+) => {
+  const legacy = legacyPositions.get(sw.id);
+  if (!legacy) return false;
+  return Math.abs(Number(saved.x) - legacy.x) <= 0.5 && Math.abs(Number(saved.y) - legacy.y) <= 0.5;
+};
+
+const mergeManualAnchors = (
+  computed: NodeWithPos[],
+  savedLayout: Record<string, { x: number; y: number }>,
+  legacyPositions: Map<string, { x: number; y: number }>
+) =>
+  computed.map((n) => {
+    const saved = savedLayout[n.id];
+    if (!saved) return n;
+    if (!Number.isFinite(saved.x) || !Number.isFinite(saved.y)) return n;
+    if (isLikelyLegacyAutoPosition(n, saved, legacyPositions)) return n;
+    return { ...n, x: Number(saved.x), y: Number(saved.y) };
+  });
 
 const getNodeSeverity = (sw: Switch): 'online' | 'warning' | 'critical' => {
   if (sw.warningSeverity === 'critical' || sw.status === 'offline') return 'critical';
@@ -370,14 +461,9 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     const visibleLinks = links.filter((l) => topologySwitchIds.has(l.source) && topologySwitchIds.has(l.target));
     const timer = window.setTimeout(() => {
       const computed = computeLayout(zoneSwitches, visibleLinks, w, h);
-      setNodes(
-        computed.map((n) => {
-          const saved = savedLayout[n.id];
-          if (!saved) return n;
-          if (!isSavedYWithinRowBand(n, saved.y)) return n;
-          return { ...n, x: saved.x, y: saved.y };
-        })
-      );
+      const legacy = computeLegacyFlatLayout(zoneSwitches, visibleLinks, w, h);
+      const legacyPositions = new Map(legacy.map((n) => [n.id, { x: n.x, y: n.y }]));
+      setNodes(mergeManualAnchors(computed, savedLayout, legacyPositions));
     }, 80);
     return () => window.clearTimeout(timer);
   }, [zoneSwitches, topologySwitchIds, links, canvasSize.width, canvasSize.height, savedLayout]);
@@ -442,40 +528,12 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       const h = containerRef.current?.offsetHeight || canvasSize.height;
       const visibleLinks = (data.links || []).filter((l) => topologySwitchIds.has(l.source) && topologySwitchIds.has(l.target));
       const computed = computeLayout(zoneSwitches, visibleLinks, w, h);
-      const merged = computed.map((n) => {
-        const saved = savedLayout[n.id];
-        if (!saved) return n;
-        if (!isSavedYWithinRowBand(n, saved.y)) return n;
-        return { ...n, x: saved.x, y: saved.y };
-      });
+      const freshLayout = data.layout || {};
+      const legacy = computeLegacyFlatLayout(zoneSwitches, visibleLinks, w, h);
+      const legacyPositions = new Map(legacy.map((n) => [n.id, { x: n.x, y: n.y }]));
+      const merged = mergeManualAnchors(computed, freshLayout, legacyPositions);
       setNodes(merged);
-      const nextPositions = computed.reduce<Record<string, { x: number; y: number }>>((acc, n) => {
-        const saved = savedLayout[n.id];
-        if (saved && isSavedYWithinRowBand(n, saved.y)) {
-          acc[n.id] = { x: saved.x, y: saved.y };
-        } else {
-          acc[n.id] = { x: n.x, y: n.y };
-        }
-        return acc;
-      }, {});
-      setSavedLayout(nextPositions);
-      try {
-        const layoutResp = await fetch('/api/topology/layout', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-user-role': role || 'viewer',
-            'x-user-name': username || 'unknown'
-          },
-          body: JSON.stringify({ positions: nextPositions, branch: selectedRegion || undefined, topologyMode, replace: true }),
-        });
-        if (!layoutResp.ok) {
-          const err = await readApiPayload(layoutResp, 'Topology layout save failed').catch(() => null);
-          throw new Error(operationFailedMessage('Topology layout save', err, layoutResp.status));
-        }
-      } catch {
-        // Keep the calculated layout visible even if persistence fails.
-      }
+      setSavedLayout(freshLayout);
     } catch (error) {
       console.error('Failed to refresh topology:', error);
       alert(operationFailedMessage('Topology auto-layout', error instanceof Error ? error.message : error));
@@ -723,8 +781,8 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           label: zoneLabel(zoneKey),
           x: minX - TOPO_ZONE_PAD_X,
           y: minY - TOPO_ZONE_PAD_TOP,
-          width: maxX - minX + TOPO_ZONE_PAD_X * 2,
-          height: maxY - minY + TOPO_ZONE_PAD_TOP + TOPO_ZONE_PAD_BOTTOM,
+          width: Math.max(TOPO_ZONE_MIN_WIDTH, maxX - minX + TOPO_ZONE_PAD_X * 2),
+          height: Math.max(TOPO_NODE_HEIGHT + TOPO_ZONE_PAD_TOP + TOPO_ZONE_PAD_BOTTOM, maxY - minY + TOPO_ZONE_PAD_TOP + TOPO_ZONE_PAD_BOTTOM),
         };
       })
       .sort((a, b) => a.zoneKey.localeCompare(b.zoneKey));
@@ -1126,9 +1184,9 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                 height={zone.height}
                 cornerRadius={10}
                 stroke="#12b886"
-                strokeWidth={1}
-                fill="#12b886"
-                opacity={0.08}
+                strokeWidth={1.5}
+                dash={[10, 7]}
+                fill="rgba(18, 184, 134, 0.08)"
                 listening={false}
               />
             ))}

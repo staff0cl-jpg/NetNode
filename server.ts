@@ -34,6 +34,7 @@ type InventoryItem = {
   warningScore?: number;
   warningSeverity?: "none" | "warning" | "critical";
   warningReasons?: string[];
+  warningReasonDetails?: InventoryWarningReasonDetail[];
   cpuLoad?: number | null;
   trunkDownCount?: number;
 };
@@ -56,6 +57,13 @@ type InventoryWarningAssessment = {
   severity: "none" | "warning" | "critical";
   score: number;
   reasons: string[];
+  reasonDetails: InventoryWarningReasonDetail[];
+};
+
+type InventoryWarningReasonCode = "device_unreachable" | "high_cpu_load" | "down_trunk_ports";
+type InventoryWarningReasonDetail = {
+  code: InventoryWarningReasonCode;
+  params?: Record<string, number | string>;
 };
 
 function evaluateInventoryWarnings(input: {
@@ -67,21 +75,37 @@ function evaluateInventoryWarnings(input: {
     return {
       severity: "critical",
       score: INVENTORY_WARNING_RULES.offlineCriticalScore,
-      reasons: ["Device is unreachable/offline"],
+      reasons: ["device_unreachable"],
+      reasonDetails: [{ code: "device_unreachable" }],
     };
   }
 
   const reasons: string[] = [];
+  const reasonDetails: InventoryWarningReasonDetail[] = [];
   let score = 0;
 
   if (Number.isFinite(input.cpuLoad) && Number(input.cpuLoad) >= INVENTORY_WARNING_RULES.cpuHighThreshold) {
+    const roundedCpuLoad = Math.round(Number(input.cpuLoad));
     score += INVENTORY_WARNING_RULES.cpuWarnScore;
-    reasons.push(`High CPU load (${Math.round(Number(input.cpuLoad))}% >= ${INVENTORY_WARNING_RULES.cpuHighThreshold}%)`);
+    reasons.push("high_cpu_load");
+    reasonDetails.push({
+      code: "high_cpu_load",
+      params: {
+        cpuLoad: roundedCpuLoad,
+        threshold: INVENTORY_WARNING_RULES.cpuHighThreshold,
+      },
+    });
   }
 
   if (input.trunkDownCount >= INVENTORY_WARNING_RULES.trunkDownWarnCount) {
     score += INVENTORY_WARNING_RULES.trunkWarnScore;
-    reasons.push(`Detected ${input.trunkDownCount} down trunk port(s)`);
+    reasons.push("down_trunk_ports");
+    reasonDetails.push({
+      code: "down_trunk_ports",
+      params: {
+        count: input.trunkDownCount,
+      },
+    });
   }
 
   if (!reasons.length) {
@@ -89,6 +113,7 @@ function evaluateInventoryWarnings(input: {
       severity: "none",
       score: 0,
       reasons: [],
+      reasonDetails: [],
     };
   }
 
@@ -96,6 +121,7 @@ function evaluateInventoryWarnings(input: {
     severity: "warning",
     score: Math.min(99, score),
     reasons,
+    reasonDetails,
   };
 }
 
@@ -4665,6 +4691,7 @@ type MacSearchEvent = {
             warningScore: warning.score,
             warningSeverity: warning.severity,
             warningReasons: warning.reasons,
+            warningReasonDetails: warning.reasonDetails,
             cpuLoad: null,
             trunkDownCount: 0,
           };
@@ -4721,6 +4748,7 @@ type MacSearchEvent = {
           warningScore: warning.score,
           warningSeverity: warning.severity,
           warningReasons: warning.reasons,
+          warningReasonDetails: warning.reasonDetails,
           cpuLoad,
           trunkDownCount,
         };
@@ -4736,6 +4764,7 @@ type MacSearchEvent = {
             warningScore: item.warningScore ?? 0,
             warningSeverity: item.warningSeverity ?? "none",
             warningReasons: item.warningReasons ?? [],
+            warningReasonDetails: item.warningReasonDetails ?? [],
             cpuLoad: Number.isFinite(Number(item.cpuLoad)) ? Number(item.cpuLoad) : null,
             trunkDownCount: Number.isFinite(Number(item.trunkDownCount)) ? Number(item.trunkDownCount) : 0,
           }))

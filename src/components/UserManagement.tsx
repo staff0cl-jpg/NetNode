@@ -69,7 +69,7 @@ const UserManagement: React.FC<UserManagementProps> = ({ role, username }) => {
         setNewUser({ username: '', password: '', role: 'operator' });
       }
     } catch (error) {
-      notifyError('Error adding user');
+      notifyError(t('userMgmtAddUserError'));
     }
   };
 
@@ -85,7 +85,7 @@ const UserManagement: React.FC<UserManagementProps> = ({ role, username }) => {
       });
       await fetchUsers();
     } catch (error) {
-      notifyError('Error deleting user');
+      notifyError(t('userMgmtDeleteUserError'));
     }
   };
 
@@ -104,7 +104,7 @@ const UserManagement: React.FC<UserManagementProps> = ({ role, username }) => {
       setEditingUser(null);
       notifySuccess(t('roleUpdated'));
     } catch (error) {
-      notifyError('Error updating role');
+      notifyError(t('userMgmtUpdateRoleError'));
     }
   };
 
@@ -126,7 +126,7 @@ const UserManagement: React.FC<UserManagementProps> = ({ role, username }) => {
         notifySuccess(t('passwordUpdated'));
       }
     } catch (error) {
-      notifyError('Error updating password');
+      notifyError(t('userMgmtUpdatePasswordError'));
     }
   };
 

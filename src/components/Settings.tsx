@@ -357,7 +357,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       }
       notifySuccess(t('ldapSaved'));
     } catch {
-      notifyError('LDAP save failed');
+      notifyError(t('settingsLdapSaveFailed'));
     }
   };
 
@@ -380,7 +380,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       });
       return true;
     } catch (err) {
-      notifyError('Failed to save config');
+      notifyError(t('settingsSaveConfigFailed'));
       return false;
     }
   };
@@ -467,12 +467,12 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       });
       const data = await response.json();
       if (data.ok) {
-        notifySuccess(`OK: ${data.message}`);
+        notifySuccess(`${t('settingsLdapTestOk')}: ${data.message}`);
       } else {
-        notifyError(`${data.message || 'LDAP test failed'}`);
+        notifyError(`${data.message || t('settingsLdapTestFailed')}`);
       }
     } catch {
-      notifyError('LDAP test request failed');
+      notifyError(t('settingsLdapTestRequestFailed'));
     }
   };
 
@@ -505,7 +505,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         notifyError(t('friendlyErrorJobStartNoId'));
         return;
       }
-      notifyInfo('Discovery started');
+      notifyInfo(t('settingsDiscoveryStarted'));
       let attempts = 0;
       const maxAttempts = 180; // ~6 minutes at 2s polling
       const poll = async () => {
@@ -522,7 +522,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         }
         if (statusData.status === 'running') {
           if (attempts >= maxAttempts) {
-            notifyInfo('Discovery is still running. Check status in a minute.');
+            notifyInfo(t('settingsDiscoveryStillRunning'));
             return;
           }
           window.setTimeout(() => {
@@ -570,13 +570,13 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       });
       const data = await response.json();
       if (!response.ok) {
-        notifyError(data.error || 'Failed to save watch profiles');
+        notifyError(data.error || t('settingsDiscoveryWatchProfilesSaveFailed'));
         return;
       }
       setWatchProfiles(data.profiles || []);
-      notifySuccess('Discovery watch profiles saved');
+      notifySuccess(t('settingsDiscoveryWatchProfilesSaved'));
     } catch {
-      notifyError('Failed to save watch profiles');
+      notifyError(t('settingsDiscoveryWatchProfilesSaveFailed'));
     }
   };
 
@@ -603,7 +603,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         notifyError(t('friendlyErrorJobStartNoId'));
         return;
       }
-      notifyInfo('Discovery watch run started');
+      notifyInfo(t('settingsDiscoveryWatchRunStarted'));
 
       let attempts = 0;
       const maxAttempts = 180; // ~6 minutes at 2s polling
@@ -635,7 +635,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
 
         if (statusData.status === 'running') {
           if (attempts >= maxAttempts) {
-            notifyInfo('Discovery watch run is still running. Check status again in a minute.');
+            notifyInfo(t('settingsDiscoveryWatchRunStillRunning'));
             return;
           }
           window.setTimeout(() => {
@@ -655,7 +655,9 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
           return;
         }
 
-        notifySuccess(`Profiles run: ${(statusData.runs || []).length}`);
+        notifySuccess(
+          t('settingsDiscoveryWatchRunCompleted').replace('{count}', String((statusData.runs || []).length))
+        );
       };
 
       poll().catch((e) => {
@@ -694,12 +696,12 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       });
       const data = await response.json();
       if (response.ok) {
-        notifySuccess(data.message || 'SNMP config saved');
+        notifySuccess(data.message || t('settingsSnmpConfigSaved'));
       } else {
-        notifyError(data.message || 'Failed to save SNMP config.');
+        notifyError(data.message || t('settingsSnmpConfigSaveFailed'));
       }
     } catch (error) {
-      notifyError('Failed to save SNMP config.');
+      notifyError(t('settingsSnmpConfigSaveFailed'));
     }
   };
 
@@ -722,7 +724,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       });
       const data = await response.json();
       if (!response.ok) {
-        notifyError(data.error || 'Failed to save SSH readonly profile');
+        notifyError(data.error || t('settingsSshReadonlySaveFailed'));
         return;
       }
       setSshReadonlyConfig((prev) => ({
@@ -732,9 +734,9 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         expiresAt: data.expiresAt || '',
         password: '',
       }));
-      notifySuccess('SSH readonly profile saved in memory');
+      notifySuccess(t('settingsSshReadonlySaved'));
     } catch {
-      notifyError('Failed to save SSH readonly profile');
+      notifyError(t('settingsSshReadonlySaveFailed'));
     }
   };
 
@@ -750,12 +752,12 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       });
       const data = await response.json();
       if (!response.ok) {
-        notifyError(data.error || 'Template delete failed');
+        notifyError(data.error || t('settingsTemplateDeleteFailed'));
         return;
       }
       setSnmpTemplates(data.templates || []);
     } catch {
-      notifyError('Template delete failed');
+      notifyError(t('settingsTemplateDeleteFailed'));
     }
   };
 
@@ -787,12 +789,12 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       });
       const data = await response.json();
       if (!response.ok) {
-        notifyError(data.error || 'Inventory dictionaries save failed');
+        notifyError(data.error || t('settingsInventoryDictionariesSaveFailed'));
         return;
       }
-      notifySuccess('Inventory dictionaries saved');
+      notifySuccess(t('settingsInventoryDictionariesSaved'));
     } catch {
-      notifyError('Inventory dictionaries save failed: check models JSON');
+      notifyError(t('settingsInventoryDictionariesSaveFailedInvalidJson'));
     }
   };
 
@@ -822,7 +824,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       .filter((m) => m.key && m.oid);
 
     if (!templateEditor.id.trim() || !templateEditor.name.trim() || metrics.length === 0) {
-      notifyError('Template id/name and at least one metric are required');
+      notifyError(t('settingsTemplateValidationError'));
       return;
     }
 
@@ -844,13 +846,13 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       });
       const data = await response.json();
       if (!response.ok) {
-        notifyError(data.error || 'Template save failed');
+        notifyError(data.error || t('settingsTemplateSaveFailed'));
         return;
       }
       setSnmpTemplates(data.templates || []);
-      notifySuccess('SNMP template saved');
+      notifySuccess(t('settingsSnmpTemplateSaved'));
     } catch {
-      notifyError('Template save failed');
+      notifyError(t('settingsTemplateSaveFailed'));
     }
   };
 

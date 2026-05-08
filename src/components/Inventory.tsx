@@ -6,7 +6,7 @@ const SortIcon = ({ active, direction }: { active: boolean, direction?: 'asc' | 
   if (!active) return <div className="w-3" />;
   return direction === 'asc' ? <ChevronUp size={12} className="text-[#228be6]" /> : <ChevronDown size={12} className="text-[#228be6]" />;
 };
-import { Switch, Vendor } from '../types';
+import { Switch, Vendor, WarningReasonCode, WarningReasonDetail } from '../types';
 import { VENDORS } from '../constants';
 import { cn } from '../lib/utils';
 import { useTranslation } from '../lib/i18n';
@@ -29,6 +29,13 @@ const getSwitchSeverity = (sw: Switch): 'online' | 'warning' | 'critical' => {
   if (sw.warningSeverity === 'warning' || sw.status === 'warning') return 'warning';
   return 'online';
 };
+
+const LEGACY_HIGH_CPU_REGEX = /high cpu load \((\d+)%\s*>=\s*(\d+)%\)/i;
+const LEGACY_DOWN_TRUNK_REGEX = /detected\s+(\d+)\s+down trunk port\(s\)/i;
+
+const interpolateTranslation = (template: string, params: Record<string, string | number> = {}): string => (
+  template.replace(/\{(\w+)\}/g, (_m, key) => String(params[key] ?? `{${key}}`))
+);
 
 interface InventoryProps {
   switches: Switch[];
@@ -83,6 +90,60 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
   const [activeCategoryTab, setActiveCategoryTab] = useState<'switch' | 'router' | 'fc' | 'ups' | 'all'>('switch');
   const [openRowMenuId, setOpenRowMenuId] = useState<string | null>(null);
   const rowMenuRef = React.useRef<HTMLDivElement | null>(null);
+
+  const localizeWarningReason = React.useCallback((reason: string, detail?: WarningReasonDetail): string => {
+    const code = detail?.code || (reason as WarningReasonCode);
+    const params = detail?.params || {};
+
+    if (code === 'device_unreachable') {
+      return t('warningReasonDeviceUnreachable');
+    }
+    if (code === 'high_cpu_load') {
+      const cpuLoad = Number(params.cpuLoad);
+      const threshold = Number(params.threshold);
+      return interpolateTranslation(t('warningReasonHighCpuLoad'), {
+        cpuLoad: Number.isFinite(cpuLoad) ? Math.round(cpuLoad) : '?',
+        threshold: Number.isFinite(threshold) ? Math.round(threshold) : '?'
+      });
+    }
+    if (code === 'down_trunk_ports') {
+      const count = Number(params.count);
+      return interpolateTranslation(t('warningReasonDownTrunkPorts'), {
+        count: Number.isFinite(count) ? count : '?'
+      });
+    }
+
+    const highCpuMatch = reason.match(LEGACY_HIGH_CPU_REGEX);
+    if (highCpuMatch) {
+      return interpolateTranslation(t('warningReasonHighCpuLoad'), {
+        cpuLoad: highCpuMatch[1],
+        threshold: highCpuMatch[2]
+      });
+    }
+    const trunkMatch = reason.match(LEGACY_DOWN_TRUNK_REGEX);
+    if (trunkMatch) {
+      return interpolateTranslation(t('warningReasonDownTrunkPorts'), {
+        count: trunkMatch[1]
+      });
+    }
+    if (/device is unreachable\/offline/i.test(reason)) {
+      return t('warningReasonDeviceUnreachable');
+    }
+    return reason;
+  }, [t]);
+
+  const getLocalizedWarningReasons = React.useCallback((sw: Switch): string[] => {
+    const details = sw.warningReasonDetails || [];
+    if (details.length > 0) {
+      return details.map((detail) => localizeWarningReason(detail.code, detail));
+    }
+    return (sw.warningReasons || []).map((reason) => localizeWarningReason(reason));
+  }, [localizeWarningReason]);
+
+  const getWarningCount = React.useCallback((sw: Switch): number => {
+    if ((sw.warningReasonDetails || []).length > 0) return (sw.warningReasonDetails || []).length;
+    return (sw.warningReasons || []).length;
+  }, []);
   const makeDefaultSwitch = React.useCallback(
     (): Partial<Switch> => ({
       vendor: 'HPE',
@@ -247,7 +308,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
             'x-user-name': username || 'unknown'
           }
         });
-        notifyInfo('Device removed');
+        notifyInfo(t('inventoryDeviceRemoved'));
       } catch (error) {
         notifyError(t('errorDeletingDevice'));
       }
@@ -297,10 +358,10 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
       });
       if (response.ok) {
         setSelectedIds([]);
-        notifySuccess('Bulk action completed');
+        notifySuccess(t('inventoryBulkActionCompleted'));
       }
     } catch (error) {
-      notifyError('Bulk action failed');
+      notifyError(t('inventoryBulkActionFailed'));
     } finally {
       setIsBulkProcessing(false);
     }
@@ -682,9 +743,9 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                           ? "z-badge-warning"
                           : "z-badge-success"
                     )}
-                    title={`${(sw.warningReasons || []).length} ${t('warningsCountLabel')}${(sw.warningReasons || []).length > 0 ? `: ${(sw.warningReasons || []).join('; ')}` : ''}`}
+                    title={`${getWarningCount(sw)} ${t('warningsCountLabel')}${getWarningCount(sw) > 0 ? `: ${getLocalizedWarningReasons(sw).join('; ')}` : ''}`}
                   >
-                    {(sw.warningReasons || []).length}
+                    {getWarningCount(sw)}
                   </span>
                 </td>
                 <td className="font-bold text-white tracking-tight">{sw.name}</td>
@@ -770,7 +831,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                           <button
                             className="w-full px-3 py-2 text-xs text-[#c1c2c5] hover:bg-[#25262b] hover:text-white"
                             onClick={() => {
-                              notifyInfo(`Node: ${sw.name} | Branch: ${sw.branch || '-'} | IP: ${sw.ip}`);
+                              notifyInfo(`${t('inventoryDeviceInfoPrefix')}: ${sw.name} | ${t('branchLabel')}: ${sw.branch || '-'} | IP: ${sw.ip}`);
                               setOpenRowMenuId(null);
                             }}
                           >
