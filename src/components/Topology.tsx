@@ -13,23 +13,31 @@ interface TopologyProps {
 
 type TopoLink = { id?: string; source: string; target: string; portA: string; portB: string; manual?: boolean; renamed?: boolean };
 type TopologyVersion = { id: string; createdAt: string; actor: string; reason: string; branch?: string };
+type TopologyVersionPreview = {
+  addedLinks: number;
+  removedLinks: number;
+  changedLinkLabels: number;
+  movedNodes: number;
+  totalCurrentLinks: number;
+  totalTargetLinks: number;
+};
 type LinkDraft = { sourceId: string; x1: number; y1: number; x2: number; y2: number } | null;
 
 type NodeWithPos = Switch & { x: number; y: number };
 
 const TOPO_NODE_WIDTH = 160;
 const TOPO_NODE_HEIGHT = 80;
-const TOPO_LAYER_GAP = 170;
-const TOPO_CLUSTER_STEP_X = 430;
-const TOPO_RING_STEP = 122;
+const TOPO_LAYER_GAP = 156;
+const TOPO_CLUSTER_STEP_X = 390;
+const TOPO_RING_STEP = 136;
 
 function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: number): NodeWithPos[] {
   if (switches.length === 0) return [];
-  const width = Math.max(1500, Math.floor(cw * 1.45));
-  const height = Math.max(980, Math.floor(ch * 1.4));
+  const width = Math.max(1480, Math.floor(cw * 1.42));
+  const height = Math.max(980, Math.floor(ch * 1.36));
   const margin = 110;
-  const rightLimit = width - TOPO_NODE_WIDTH - 30;
-  const bottomLimit = height - TOPO_NODE_HEIGHT - 30;
+  const rightLimit = width - TOPO_NODE_WIDTH - 26;
+  const bottomLimit = height - TOPO_NODE_HEIGHT - 24;
   const byId = new Map(switches.map((s) => [s.id, s]));
   const adj = new Map<string, Set<string>>();
   const degree = new Map<string, number>();
@@ -46,11 +54,6 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
   });
 
   const lower = (v?: string) => String(v || '').trim().toLowerCase();
-  const stableHash = (value: string) => {
-    let h = 0;
-    for (let i = 0; i < value.length; i++) h = (h * 131 + value.charCodeAt(i)) % 2147483647;
-    return h;
-  };
   const stableSort = (items: Switch[], rank: (s: Switch) => number) =>
     [...items].sort((a, b) => {
       const dr = rank(b) - rank(a);
@@ -60,6 +63,9 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
       if (na !== nb) return na.localeCompare(nb);
       return String(a.id).localeCompare(String(b.id));
     });
+  const byName = (a: string, b: string) => a.localeCompare(b);
+  const toName = (s: Switch) => String(s.name || '').trim().toLowerCase();
+  const byIdStable = (a: string, b: string) => byName(a, b);
 
   const isRouterLike = (s: Switch) =>
     lower(s.category) === 'router' ||
@@ -73,6 +79,25 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
     lower(s.subcategory) === 'access' ||
     lower(s.vendor) === 'hpe' ||
     lower(s.vendor) === 'aruba';
+
+  type Lane = 'router' | 'core' | 'distribution' | 'access' | 'unknown';
+  const laneScore = (s: Switch) => {
+    if (isRouterLike(s)) return { lane: 'router' as Lane, score: 4 };
+    if (isExplicitCore(s)) return { lane: 'core' as Lane, score: 4 };
+    if (isDistribution(s)) return { lane: 'distribution' as Lane, score: 4 };
+    if (isAccess(s)) return { lane: 'access' as Lane, score: 4 };
+    const deg = degree.get(s.id) || 0;
+    if (deg <= 1) return { lane: 'unknown' as Lane, score: 1 };
+    if (deg >= 5) return { lane: 'core' as Lane, score: 2 };
+    if (deg >= 3) return { lane: 'distribution' as Lane, score: 2 };
+    return { lane: 'access' as Lane, score: 2 };
+  };
+  const parentKey = (id: string, parentSet: Set<string>) => {
+    const neighbors = Array.from(adj.get(id) || [])
+      .filter((n) => parentSet.has(n))
+      .sort(byIdStable);
+    return neighbors[0] || `~${id}`;
+  };
 
   const trunkThreshold = Math.max(3, Math.ceil(Math.sqrt(Math.max(2, switches.length)) * 1.4));
   const isTrunkRich = (s: Switch) => (degree.get(s.id) || 0) >= trunkThreshold;
@@ -90,210 +115,315 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
   }
 
   const pos = new Map<string, { x: number; y: number }>();
-  if (!cores.length) {
-    const ranked = stableSort(switches, (s) => degree.get(s.id) || 0);
-    ranked.forEach((s, idx) => {
-      const row = Math.floor(idx / 5);
-      const col = idx % 5;
-      pos.set(s.id, {
-        x: margin + col * (TOPO_NODE_WIDTH + 90),
-        y: margin + row * (TOPO_NODE_HEIGHT + 90),
+  const rankedAll = stableSort(switches, (s) => degree.get(s.id) || 0);
+  const laneMap = new Map<string, Lane>();
+  rankedAll.forEach((s) => laneMap.set(s.id, laneScore(s).lane));
+
+  const sourceCores = stableSort(cores, (s) => degree.get(s.id) || 0);
+  const coreIds = new Set(sourceCores.map((c) => c.id));
+
+  const owners = new Map<string, string>();
+  const dist = new Map<string, number>();
+  const queue: string[] = [];
+  sourceCores.forEach((c) => {
+    owners.set(c.id, c.id);
+    dist.set(c.id, 0);
+    queue.push(c.id);
+  });
+  while (queue.length) {
+    const u = queue.shift()!;
+    for (const v of Array.from(adj.get(u) || []).sort(byIdStable)) {
+      const cand = (dist.get(u) || 0) + 1;
+      const cur = dist.get(v);
+      if (cur === undefined || cand < cur) {
+        dist.set(v, cand);
+        owners.set(v, owners.get(u)!);
+        queue.push(v);
+      } else if (cand === cur) {
+        const currentOwner = owners.get(v) || '';
+        const nextOwner = owners.get(u) || '';
+        if (nextOwner.localeCompare(currentOwner) < 0) owners.set(v, nextOwner);
+      }
+    }
+  }
+
+  const fallbackCore = sourceCores[0];
+  switches.forEach((s) => {
+    if (owners.has(s.id) || !fallbackCore) return;
+    owners.set(s.id, fallbackCore.id);
+  });
+
+  const unknownIds = new Set<string>();
+  switches.forEach((s) => {
+    const meta = laneScore(s);
+    if (meta.lane === 'unknown' || meta.score <= 1) unknownIds.add(s.id);
+  });
+
+  const coreClusterMap = new Map<string, Switch[]>();
+  sourceCores.forEach((c) => coreClusterMap.set(c.id, [c]));
+  rankedAll.forEach((s) => {
+    if (coreIds.has(s.id) || unknownIds.has(s.id)) return;
+    const owner = owners.get(s.id);
+    if (!owner) {
+      unknownIds.add(s.id);
+      return;
+    }
+    const lane = laneMap.get(s.id) || 'unknown';
+    if (lane === 'unknown') {
+      unknownIds.add(s.id);
+      return;
+    }
+    if (!coreClusterMap.has(owner)) coreClusterMap.set(owner, []);
+    coreClusterMap.get(owner)!.push(s);
+  });
+
+  if (!sourceCores.length) {
+    const laneOrder: Lane[] = ['router', 'core', 'distribution', 'access', 'unknown'];
+    const hasRouter = routers.length > 0;
+    const baseY = margin;
+    const laneY = new Map<Lane, number>([
+      ['router', baseY],
+      ['core', baseY + (hasRouter ? TOPO_LAYER_GAP : 0)],
+      ['distribution', baseY + (hasRouter ? TOPO_LAYER_GAP : 0) + TOPO_LAYER_GAP],
+      ['access', baseY + (hasRouter ? TOPO_LAYER_GAP : 0) + TOPO_LAYER_GAP * 2],
+      ['unknown', Math.min(bottomLimit, baseY + (hasRouter ? TOPO_LAYER_GAP : 0) + TOPO_LAYER_GAP * 3 + 48)],
+    ]);
+    const itemsByLane = new Map<Lane, Switch[]>();
+    laneOrder.forEach((lane) => itemsByLane.set(lane, []));
+    rankedAll.forEach((s) => {
+      const lane = laneMap.get(s.id) || 'unknown';
+      itemsByLane.get(lane)?.push(s);
+    });
+    laneOrder.forEach((lane) => {
+      const laneItems = itemsByLane.get(lane) || [];
+      laneItems.forEach((s, idx) => {
+        const row = Math.floor(idx / 6);
+        const col = idx % 6;
+        const laneBaseY = laneY.get(lane) || baseY;
+        pos.set(s.id, {
+          x: margin + col * (TOPO_NODE_WIDTH + 64),
+          y: laneBaseY + row * (TOPO_NODE_HEIGHT + 18),
+        });
       });
     });
   } else {
-    const sourceCores = stableSort(cores, (s) => degree.get(s.id) || 0);
-    const owners = new Map<string, string>();
-    const dist = new Map<string, number>();
-    const queue: string[] = [];
-    sourceCores.forEach((c) => {
-      owners.set(c.id, c.id);
-      dist.set(c.id, 0);
-      queue.push(c.id);
-    });
-    while (queue.length) {
-      const u = queue.shift()!;
-      for (const v of adj.get(u) || []) {
-        const cand = (dist.get(u) || 0) + 1;
-        const cur = dist.get(v);
-        if (cur === undefined || cand < cur) {
-          dist.set(v, cand);
-          owners.set(v, owners.get(u)!);
-          queue.push(v);
-        } else if (cand === cur) {
-          const currentOwner = owners.get(v) || '';
-          const nextOwner = owners.get(u) || '';
-          if (nextOwner.localeCompare(currentOwner) < 0) owners.set(v, nextOwner);
-        }
-      }
-    }
-
-    const unassigned = switches.filter((s) => !owners.has(s.id));
-    unassigned.forEach((s) => {
-      const fallback = sourceCores[stableHash(s.id) % sourceCores.length];
-      owners.set(s.id, fallback.id);
-    });
-
-    const clusterNodes = new Map<string, Switch[]>();
-    sourceCores.forEach((c) => clusterNodes.set(c.id, [c]));
-    stableSort(switches, (s) => degree.get(s.id) || 0).forEach((s) => {
-      if (sourceCores.some((c) => c.id === s.id)) return;
-      const owner = owners.get(s.id)!;
-      if (!clusterNodes.has(owner)) clusterNodes.set(owner, []);
-      clusterNodes.get(owner)!.push(s);
-    });
-
     const hasRouterLayer = routers.length > 0;
     const yRouter = margin;
-    const yCore = margin + (hasRouterLayer ? TOPO_LAYER_GAP : 0) + 30;
+    const yCore = margin + (hasRouterLayer ? TOPO_LAYER_GAP : 0);
     const yDist = yCore + TOPO_LAYER_GAP;
     const yAccess = yDist + TOPO_LAYER_GAP;
-    const yUnknown = Math.min(bottomLimit - 20, yAccess + TOPO_LAYER_GAP + 40);
+    const yUnknown = Math.min(bottomLimit, yAccess + TOPO_LAYER_GAP + 30);
+    const laneY = new Map<Lane, number>([
+      ['router', yRouter],
+      ['core', yCore],
+      ['distribution', yDist],
+      ['access', yAccess],
+      ['unknown', yUnknown],
+    ]);
 
     const left = margin;
-    const availableWidth = Math.max(800, width - margin * 2 - 280);
-    const coreStep = Math.max(TOPO_CLUSTER_STEP_X, availableWidth / Math.max(1, sourceCores.length - 1));
-
-    sourceCores.forEach((core, idx) => {
-      const x = sourceCores.length === 1
+    const unknownZoneWidth = Math.max(290, Math.floor(width * 0.23));
+    const usableRight = width - margin - unknownZoneWidth;
+    const availableWidth = Math.max(700, usableRight - left);
+    const sortedCores = [...sourceCores].sort((a, b) => {
+      const aRouterHits = Array.from(adj.get(a.id) || []).filter((id) => routers.some((r) => r.id === id)).length;
+      const bRouterHits = Array.from(adj.get(b.id) || []).filter((id) => routers.some((r) => r.id === id)).length;
+      if (aRouterHits !== bRouterHits) return bRouterHits - aRouterHits;
+      const aClusterSize = (coreClusterMap.get(a.id) || []).length;
+      const bClusterSize = (coreClusterMap.get(b.id) || []).length;
+      if (aClusterSize !== bClusterSize) return bClusterSize - aClusterSize;
+      const da = degree.get(a.id) || 0;
+      const db = degree.get(b.id) || 0;
+      if (da !== db) return db - da;
+      const na = toName(a);
+      const nb = toName(b);
+      if (na !== nb) return na.localeCompare(nb);
+      return String(a.id).localeCompare(String(b.id));
+    });
+    const coreStep = sortedCores.length === 1
+      ? 0
+      : Math.max(TOPO_CLUSTER_STEP_X, availableWidth / (sortedCores.length - 1));
+    sortedCores.forEach((core, idx) => {
+      const x = sortedCores.length === 1
         ? left + availableWidth / 2
         : left + idx * coreStep;
       pos.set(core.id, { x, y: yCore });
     });
 
-    stableSort(routers, (s) => degree.get(s.id) || 0).forEach((r, idx) => {
-      if (sourceCores.length === 1) {
-        pos.set(r.id, { x: left + availableWidth / 2 + (idx - (routers.length - 1) / 2) * 170, y: yRouter });
-      } else {
-        const targetCore = sourceCores[idx % sourceCores.length];
-        const base = pos.get(targetCore.id)?.x || left + availableWidth / 2;
-        const offset = (Math.floor(idx / sourceCores.length) - 0.5) * 145;
-        pos.set(r.id, { x: base + offset, y: yRouter });
-      }
+    const routerTargets = stableSort(routers, (s) => degree.get(s.id) || 0);
+    routerTargets.forEach((r, idx) => {
+      const neighbors = Array.from(adj.get(r.id) || []).filter((id) => coreIds.has(id)).sort(byIdStable);
+      const anchorCore = neighbors[0] || sortedCores[idx % sortedCores.length]?.id || sortedCores[0]?.id;
+      const baseX = pos.get(anchorCore || '')?.x || left + availableWidth / 2;
+      const spread = Math.floor(idx / Math.max(1, sortedCores.length));
+      pos.set(r.id, { x: baseX + (spread - 0.5) * 136, y: yRouter });
     });
 
-    const unknown: Switch[] = [];
-    sourceCores.forEach((core) => {
-      const center = pos.get(core.id)!;
-      const members = clusterNodes.get(core.id) || [];
-      const distribution = stableSort(
-        members.filter((n) => n.id !== core.id && isDistribution(n)),
-        (n) => degree.get(n.id) || 0
+    sortedCores.forEach((core) => {
+      const coreX = pos.get(core.id)?.x || left + availableWidth / 2;
+      const members = (coreClusterMap.get(core.id) || []).filter((n) => n.id !== core.id);
+      const clusterDist = stableSort(
+        members.filter((s) => {
+          if (unknownIds.has(s.id)) return false;
+          const lane = laneMap.get(s.id) || 'unknown';
+          return lane === 'distribution';
+        }),
+        (s) => degree.get(s.id) || 0
       );
-      const access = stableSort(
-        members.filter((n) => n.id !== core.id && isAccess(n)),
-        (n) => degree.get(n.id) || 0
+      const clusterAccess = stableSort(
+        members.filter((s) => {
+          if (unknownIds.has(s.id)) return false;
+          const lane = laneMap.get(s.id) || 'unknown';
+          return lane === 'access';
+        }),
+        (s) => degree.get(s.id) || 0
       );
-      const rest = stableSort(
-        members.filter((n) => n.id !== core.id && !isDistribution(n) && !isAccess(n)),
-        (n) => degree.get(n.id) || 0
-      );
+      const residue = members.filter((s) => !clusterDist.some((d) => d.id === s.id) && !clusterAccess.some((a) => a.id === s.id));
+      residue.forEach((r) => unknownIds.add(r.id));
 
-      const placeArc = (items: Switch[], radius: number, yBase: number, spread: number) => {
-        if (!items.length) return;
-        const total = items.length;
-        const minAngle = Math.PI * (0.2 + spread);
-        const maxAngle = Math.PI * (0.8 - spread);
-        items.forEach((n, i) => {
-          const t = total === 1 ? 0.5 : i / (total - 1);
-          const angle = minAngle + (maxAngle - minAngle) * t;
-          pos.set(n.id, {
-            x: center.x + Math.cos(angle) * radius,
-            y: yBase + Math.sin(angle) * 34,
-          });
-        });
-      };
-
-      placeArc(distribution, Math.max(145, TOPO_RING_STEP + 28), yDist, 0.06);
-      placeArc(access, Math.max(250, TOPO_RING_STEP * 2), yAccess, 0.02);
-
-      rest.forEach((n) => {
-        const hasNeighborInCluster = Array.from(adj.get(n.id) || []).some((nb) => owners.get(nb) === core.id);
-        if (!hasNeighborInCluster || (degree.get(n.id) || 0) <= 1) unknown.push(n);
+      const clusterDistIds = new Set(clusterDist.map((d) => d.id));
+      const accessByDist = new Map<string, Switch[]>();
+      const distParentSet = new Set<string>([core.id, ...routers.map((r) => r.id)]);
+      const orderedDist = [...clusterDist].sort((a, b) => {
+        const pa = parentKey(a.id, distParentSet);
+        const pb = parentKey(b.id, distParentSet);
+        if (pa !== pb) return pa.localeCompare(pb);
+        const da = degree.get(a.id) || 0;
+        const db = degree.get(b.id) || 0;
+        if (da !== db) return db - da;
+        const na = toName(a);
+        const nb = toName(b);
+        if (na !== nb) return na.localeCompare(nb);
+        return String(a.id).localeCompare(String(b.id));
       });
-      const restKnown = rest.filter((n) => !unknown.some((u) => u.id === n.id));
-      restKnown.forEach((n, idx) => {
-        const row = Math.floor(idx / 4);
-        const col = idx % 4;
-        pos.set(n.id, {
-          x: center.x - 170 + col * 110,
-          y: yAccess + 95 + row * 86,
+
+      const distStep = Math.max(TOPO_RING_STEP, TOPO_NODE_WIDTH + 36);
+      orderedDist.forEach((d, idx) => {
+        const offset = (idx - (orderedDist.length - 1) / 2) * distStep;
+        pos.set(d.id, { x: coreX + offset, y: yDist });
+      });
+
+      clusterAccess.forEach((a) => {
+        const candidates = Array.from(adj.get(a.id) || []).filter((id) => clusterDistIds.has(id)).sort(byIdStable);
+        const parent = candidates[0] || `~${core.id}`;
+        if (!accessByDist.has(parent)) accessByDist.set(parent, []);
+        accessByDist.get(parent)!.push(a);
+      });
+
+      const distOrder = orderedDist.map((d) => d.id);
+      const accessOrdered = [...clusterAccess].sort((a, b) => {
+        const pa = accessByDist.has(parentKey(a.id, clusterDistIds)) ? parentKey(a.id, clusterDistIds) : '~';
+        const pb = accessByDist.has(parentKey(b.id, clusterDistIds)) ? parentKey(b.id, clusterDistIds) : '~';
+        const ia = distOrder.indexOf(pa);
+        const ib = distOrder.indexOf(pb);
+        if (ia !== ib) return ia - ib;
+        const da = degree.get(a.id) || 0;
+        const db = degree.get(b.id) || 0;
+        if (da !== db) return db - da;
+        const na = toName(a);
+        const nb = toName(b);
+        if (na !== nb) return na.localeCompare(nb);
+        return String(a.id).localeCompare(String(b.id));
+      });
+
+      const placedAccess = new Set<string>();
+      orderedDist.forEach((d) => {
+        const group = accessOrdered.filter((a) => {
+          if (placedAccess.has(a.id)) return false;
+          const parents = Array.from(adj.get(a.id) || []).filter((id) => clusterDistIds.has(id)).sort(byIdStable);
+          return (parents[0] || '') === d.id;
         });
+        const step = TOPO_NODE_WIDTH + 28;
+        group.forEach((a, idx) => {
+          const offset = (idx - (group.length - 1) / 2) * step;
+          const base = pos.get(d.id)?.x || coreX;
+          pos.set(a.id, { x: base + offset, y: yAccess });
+          placedAccess.add(a.id);
+        });
+      });
+      accessOrdered.forEach((a, idx) => {
+        if (placedAccess.has(a.id)) return;
+        const fallbackOffset = (idx - (accessOrdered.length - 1) / 2) * (TOPO_NODE_WIDTH + 24);
+        pos.set(a.id, { x: coreX + fallbackOffset, y: yAccess });
       });
     });
 
-    const unknownSet = new Set(unknown.map((n) => n.id));
-    const stillUnplaced = switches.filter((s) => !pos.has(s.id));
-    stillUnplaced.forEach((s) => unknownSet.add(s.id));
     const unknownNodes = stableSort(
-      switches.filter((s) => unknownSet.has(s.id)),
+      switches.filter((s) => unknownIds.has(s.id) || !pos.has(s.id)),
       (s) => degree.get(s.id) || 0
     );
-    const unknownStartX = Math.max(width - 380, margin + Math.min(width * 0.72, availableWidth + margin * 0.4));
+    const unknownStartX = usableRight + 26;
     unknownNodes.forEach((n, idx) => {
       const col = idx % 2;
       const row = Math.floor(idx / 2);
       pos.set(n.id, {
-        x: unknownStartX + col * 185,
-        y: yUnknown + row * 98,
+        x: unknownStartX + col * (TOPO_NODE_WIDTH + 24),
+        y: laneY.get('unknown')! + row * (TOPO_NODE_HEIGHT + 18),
       });
     });
   }
 
   const points = switches.map((s) => {
     const p = pos.get(s.id) || { x: width / 2, y: height / 2 };
-    return { id: s.id, x: p.x, y: p.y };
+    return { id: s.id, x: p.x, y: p.y, lane: (laneMap.get(s.id) || 'unknown') as Lane };
   });
-  const idToIndex = new Map(points.map((p, idx) => [p.id, idx]));
-  const minGapX = TOPO_NODE_WIDTH + 54;
-  const minGapY = TOPO_NODE_HEIGHT + 34;
+  const laneNodes = new Map<Lane, { id: string; x: number; y: number; lane: Lane }[]>();
+  (['router', 'core', 'distribution', 'access', 'unknown'] as Lane[]).forEach((lane) => laneNodes.set(lane, []));
+  points.forEach((p) => laneNodes.get(p.lane)?.push(p));
 
-  for (let iter = 0; iter < 120; iter++) {
-    let moved = false;
-    for (let i = 0; i < points.length; i++) {
-      for (let j = i + 1; j < points.length; j++) {
-        const a = points[i];
-        const b = points[j];
-        const dx = b.x - a.x;
-        const dy = b.y - a.y;
-        if (Math.abs(dx) < minGapX && Math.abs(dy) < minGapY) {
-          const signX = dx === 0 ? (stableHash(a.id) % 2 === 0 ? -1 : 1) : Math.sign(dx);
-          const signY = dy === 0 ? (stableHash(b.id) % 2 === 0 ? -1 : 1) : Math.sign(dy);
-          const pushX = (minGapX - Math.abs(dx)) * 0.22 * signX;
-          const pushY = (minGapY - Math.abs(dy)) * 0.2 * signY;
-          a.x -= pushX;
-          b.x += pushX;
-          a.y -= pushY;
-          b.y += pushY;
-          moved = true;
-        }
-      }
+  const laneGapX = TOPO_NODE_WIDTH + 48;
+  const nodeHalf = TOPO_NODE_WIDTH / 2;
+  const lockLane = (lane: Lane) => {
+    const lanePoints = (laneNodes.get(lane) || []).sort((a, b) => (a.x - b.x) || a.id.localeCompare(b.id));
+    for (let i = 1; i < lanePoints.length; i++) {
+      const prev = lanePoints[i - 1];
+      const cur = lanePoints[i];
+      const minX = prev.x + laneGapX;
+      if (cur.x < minX) cur.x = minX;
     }
+    const center = lanePoints.length
+      ? lanePoints.reduce((acc, p) => acc + p.x, 0) / lanePoints.length
+      : width / 2;
+    const maxRight = rightLimit - nodeHalf;
+    const minLeft = 35 + nodeHalf;
+    let shift = 0;
+    if (lanePoints.length) {
+      const leftMost = lanePoints[0].x;
+      const rightMost = lanePoints[lanePoints.length - 1].x;
+      if (rightMost > maxRight) shift = maxRight - rightMost;
+      if (leftMost + shift < minLeft) shift = minLeft - leftMost;
+      lanePoints.forEach((p) => {
+        p.x += shift;
+        p.x = Math.min(maxRight, Math.max(minLeft, p.x));
+      });
+    } else {
+      void center;
+    }
+  };
+  (['router', 'core', 'distribution', 'access', 'unknown'] as Lane[]).forEach(lockLane);
 
+  const idToPoint = new Map(points.map((p) => [p.id, p]));
+  for (let iter = 0; iter < 4; iter++) {
+    let moved = false;
     links.forEach((l) => {
-      const ai = idToIndex.get(l.source);
-      const bi = idToIndex.get(l.target);
-      if (ai === undefined || bi === undefined) return;
-      const a = points[ai];
-      const b = points[bi];
+      const a = idToPoint.get(l.source);
+      const b = idToPoint.get(l.target);
+      if (!a || !b) return;
+      if (a.lane === b.lane) return;
       const spanX = b.x - a.x;
-      if (Math.abs(spanX) > TOPO_CLUSTER_STEP_X * 1.3) {
-        const pull = (Math.abs(spanX) - TOPO_CLUSTER_STEP_X * 1.3) * 0.03 * Math.sign(spanX);
+      if (Math.abs(spanX) > TOPO_CLUSTER_STEP_X * 1.45) {
+        const pull = (Math.abs(spanX) - TOPO_CLUSTER_STEP_X * 1.45) * 0.02 * Math.sign(spanX);
         a.x += pull;
         b.x -= pull;
         moved = true;
       }
     });
-
-    points.forEach((p) => {
-      p.x = Math.min(rightLimit, Math.max(35, p.x));
-      p.y = Math.min(bottomLimit, Math.max(35, p.y));
-    });
-
+    (['router', 'core', 'distribution', 'access', 'unknown'] as Lane[]).forEach(lockLane);
     if (!moved) break;
   }
 
   return switches.map((s) => {
-    const p = points.find((x) => x.id === s.id) || { x: width / 2, y: height / 2 };
+    const p = idToPoint.get(s.id) || { x: width / 2, y: height / 2, lane: 'unknown' as Lane };
     return {
       ...s,
       x: Math.min(rightLimit, Math.max(35, p.x)),
@@ -317,6 +447,8 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   const [isRightPanning, setIsRightPanning] = useState(false);
   const [isNodeDragging, setIsNodeDragging] = useState(false);
   const panLastPointRef = useRef<{ x: number; y: number } | null>(null);
+  const suppressNodeContextMenuRef = useRef(false);
+  const draftLinkStartedAtRef = useRef(0);
   const [topologyMode, setTopologyMode] = useState<'ip' | 'fc'>('ip');
   const [selectedRegion, setSelectedRegion] = useState<string>('');
   const [newRegion, setNewRegion] = useState('');
@@ -329,6 +461,10 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   const [topologyVersionCount, setTopologyVersionCount] = useState(0);
   const [topologyVersions, setTopologyVersions] = useState<TopologyVersion[]>([]);
   const [versionsOpen, setVersionsOpen] = useState(false);
+  const [selectedVersionId, setSelectedVersionId] = useState<string>('');
+  const [versionPreview, setVersionPreview] = useState<TopologyVersionPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [restoreLoading, setRestoreLoading] = useState(false);
   const [linkDraft, setLinkDraft] = useState<LinkDraft>(null);
   const topologySwitches = React.useMemo(() => {
     const ipAllowed = new Set(['switch', 'router', 'коммутатор', 'маршрутизатор']);
@@ -402,6 +538,59 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     refreshTopologyVersions();
   }, [refreshTopologyVersions]);
   const latestVersion = topologyVersions[0] || null;
+
+  const loadVersionPreview = React.useCallback(async (versionId: string) => {
+    if (!versionId) return;
+    try {
+      setPreviewLoading(true);
+      const query = selectedRegion ? `?branch=${encodeURIComponent(selectedRegion)}` : '';
+      const response = await fetch(`/api/topology/versions/${encodeURIComponent(versionId)}/preview${query}`, {
+        headers: {
+          'x-user-role': role || 'viewer',
+          'x-user-name': username || 'unknown'
+        }
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(data?.error || t('topologyPreviewFailed'));
+      setVersionPreview(data?.summary || null);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : t('topologyPreviewFailed'));
+    } finally {
+      setPreviewLoading(false);
+    }
+  }, [role, username, selectedRegion, t]);
+
+  const handleRestoreSelectedVersion = React.useCallback(async () => {
+    if (!canEditTopology) return;
+    if (!selectedVersionId) {
+      alert(t('topologySelectVersionFirst'));
+      return;
+    }
+    try {
+      setRestoreLoading(true);
+      const response = await fetch('/api/topology/restore', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-user-role': role || 'viewer',
+          'x-user-name': username || 'unknown'
+        },
+        body: JSON.stringify({ versionId: selectedVersionId, branch: selectedRegion || undefined }),
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(data?.error || t('topologyRestoreFailed'));
+      setLinks(data?.links || []);
+      setSavedLayout(data?.layout || {});
+      setVersionPreview(null);
+      setSelectedVersionId('');
+      refreshTopologyVersions();
+      setVersionsOpen(false);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : t('topologyRestoreFailed'));
+    } finally {
+      setRestoreLoading(false);
+    }
+  }, [canEditTopology, role, username, selectedVersionId, selectedRegion, refreshTopologyVersions, t]);
 
   useEffect(() => {
     const w = containerRef.current?.offsetWidth || canvasSize.width;
@@ -579,6 +768,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     if (!canEditTopology) return;
     if (!source || !target || source === target) return;
     try {
+      const isFcMode = topologyMode === 'fc';
       const res = await fetch('/api/topology/links', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -587,6 +777,8 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           target,
           portA: String(comment || '').trim() || t('topologyLinkCommentDefault'),
           portB: '',
+          topologyMode,
+          allowDuplicate: isFcMode,
         }),
       });
       const data = await res.json();
@@ -664,6 +856,12 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     if (!b) return a;
     return `${a} <-> ${b}`;
   }, []);
+  const openLinkEditor = React.useCallback((link: TopoLink) => {
+    if (!canEditTopology) return;
+    if (!link.id) return;
+    setEditingLinkId(link.id);
+    setEditingLinkValue({ comment: getLinkLabel(link) });
+  }, [canEditTopology, getLinkLabel]);
 
   const handleWheelZoom = (e: any) => {
     e.evt.preventDefault();
@@ -757,6 +955,8 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
               type="button"
               onClick={() => {
                 setVersionsOpen(true);
+                setSelectedVersionId('');
+                setVersionPreview(null);
                 refreshTopologyVersions();
               }}
               className="flex items-center gap-2 px-3 py-1.5 bg-[#2c2e33] text-[#c1c2c5] hover:text-white rounded text-[10px] font-bold uppercase transition-all border border-[#373a40]"
@@ -919,11 +1119,13 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           onMouseUp={() => {
             setIsRightPanning(false);
             panLastPointRef.current = null;
+            suppressNodeContextMenuRef.current = false;
             setLinkDraft(null);
           }}
           onMouseLeave={() => {
             setIsRightPanning(false);
             panLastPointRef.current = null;
+            suppressNodeContextMenuRef.current = false;
             setLinkDraft(null);
           }}
           onWheel={handleWheelZoom}
@@ -940,6 +1142,13 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                     stroke="#228be6"
                     strokeWidth={1}
                     opacity={0.5}
+                    onMouseDown={(e) => {
+                      e.cancelBubble = true;
+                    }}
+                    onDblClick={(e) => {
+                      e.cancelBubble = true;
+                      openLinkEditor(link);
+                    }}
                   />
                   <Text
                     x={(start.x + end.x) / 2}
@@ -953,10 +1162,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                     }}
                     onDblClick={(e) => {
                       e.cancelBubble = true;
-                      if (!canEditTopology) return;
-                      if (!link.id) return;
-                      setEditingLinkId(link.id);
-                      setEditingLinkValue({ comment: getLinkLabel(link) });
+                      openLinkEditor(link);
                     }}
                   />
                 </React.Fragment>
@@ -1011,6 +1217,8 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                     const evt = e.evt as MouseEvent;
                     if (canEditTopology && evt.button === 2) {
                       evt.preventDefault();
+                      suppressNodeContextMenuRef.current = true;
+                      draftLinkStartedAtRef.current = Date.now();
                       const center = getNodeCenter(node.id);
                       setLinkDraft({ sourceId: node.id, x1: center.x, y1: center.y, x2: center.x, y2: center.y });
                     }
@@ -1020,14 +1228,19 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                     setIsNodeDragging(false);
                     const evt = e.evt as MouseEvent;
                     if (canEditTopology && evt.button === 2 && linkDraft?.sourceId && linkDraft.sourceId !== node.id) {
+                      draftLinkStartedAtRef.current = Date.now();
                       createManualLink(linkDraft.sourceId, node.id);
                       setLinkDraft(null);
                     }
                   }}
                   onContextMenu={(e) => {
                     e.evt.preventDefault();
+                    const justStartedDraft = Date.now() - draftLinkStartedAtRef.current < 360;
+                    if (suppressNodeContextMenuRef.current || !!linkDraft || justStartedDraft) {
+                      suppressNodeContextMenuRef.current = false;
+                      return;
+                    }
                     if (!canEditTopology) return;
-                    if (linkDraft) return;
                     setContextMenu({
                       node,
                       x: e.evt.clientX,
@@ -1164,7 +1377,11 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                   </thead>
                   <tbody>
                     {topologyVersions.map((v) => (
-                      <tr key={v.id} className="border-t border-[#2c2e33]">
+                      <tr
+                        key={v.id}
+                        className={`border-t border-[#2c2e33] cursor-pointer ${selectedVersionId === v.id ? 'bg-[#1a1b1e]' : ''}`}
+                        onClick={() => setSelectedVersionId(v.id)}
+                      >
                         <td className="px-3 py-2 text-[#c1c2c5]">{new Date(v.createdAt).toLocaleString()}</td>
                         <td className="px-3 py-2 text-[#c1c2c5]">{v.actor || 'unknown'}</td>
                         <td className="px-3 py-2 text-[#c1c2c5]">{v.reason}</td>
@@ -1180,6 +1397,36 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                     )}
                   </tbody>
                 </table>
+              </div>
+              <div className="px-4 py-3 border-t border-[#373a40] space-y-3">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    className="px-3 py-1 bg-[#2c2e33] border border-[#373a40] text-[#c1c2c5] rounded text-xs"
+                    onClick={() => loadVersionPreview(selectedVersionId)}
+                    disabled={!selectedVersionId || previewLoading}
+                  >
+                    {previewLoading ? t('loading') : t('topologyPreview')}
+                  </button>
+                  {canEditTopology && (
+                    <button
+                      className="px-3 py-1 bg-[#228be6] text-white rounded text-xs disabled:opacity-60"
+                      onClick={handleRestoreSelectedVersion}
+                      disabled={!selectedVersionId || restoreLoading}
+                    >
+                      {restoreLoading ? t('loading') : t('topologyRestoreToVersion')}
+                    </button>
+                  )}
+                </div>
+                {versionPreview && (
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs">
+                    <div className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-[#c1c2c5]">{t('topologyPreviewAddedLinks')}: {versionPreview.addedLinks}</div>
+                    <div className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-[#c1c2c5]">{t('topologyPreviewRemovedLinks')}: {versionPreview.removedLinks}</div>
+                    <div className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-[#c1c2c5]">{t('topologyPreviewChangedLabels')}: {versionPreview.changedLinkLabels}</div>
+                    <div className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-[#c1c2c5]">{t('topologyPreviewMovedNodes')}: {versionPreview.movedNodes}</div>
+                    <div className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-[#c1c2c5]">{t('topologyPreviewCurrentLinks')}: {versionPreview.totalCurrentLinks}</div>
+                    <div className="bg-[#141517] border border-[#373a40] rounded px-2 py-1 text-[#c1c2c5]">{t('topologyPreviewTargetLinks')}: {versionPreview.totalTargetLinks}</div>
+                  </div>
+                )}
               </div>
             </div>
           </div>

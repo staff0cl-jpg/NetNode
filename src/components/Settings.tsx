@@ -85,6 +85,14 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
     concurrency: 10,
     errorThreshold: 20,
   });
+  const automationPresets = React.useMemo(
+    () => ({
+      safe: { batchSize: 5, timeoutMs: 20000, retry: 2, concurrency: 3, errorThreshold: 10 },
+      balanced: { batchSize: 10, timeoutMs: 15000, retry: 1, concurrency: 8, errorThreshold: 20 },
+      fast: { batchSize: 20, timeoutMs: 10000, retry: 0, concurrency: 16, errorThreshold: 30 },
+    }),
+    []
+  );
   const [snmpConfig, setSnmpConfig] = React.useState({
     community: 'public',
     communities: 'public',
@@ -729,54 +737,93 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             </div>
             <div className="max-w-3xl space-y-3 mt-6 min-w-0">
               <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('automationDefaultsTitle')}</label>
+              <p className="text-[10px] text-[#5c5f66]">{t('automationDefaultsHelp')}</p>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => setAutomationDefaults(automationPresets.safe)}
+                  className="px-3 py-1.5 text-[10px] uppercase font-bold bg-[#25262b] border border-[#373a40] rounded text-[#c1c2c5] hover:text-white"
+                >
+                  {t('automationPresetSafe')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAutomationDefaults(automationPresets.balanced)}
+                  className="px-3 py-1.5 text-[10px] uppercase font-bold bg-[#25262b] border border-[#373a40] rounded text-[#c1c2c5] hover:text-white"
+                >
+                  {t('automationPresetBalanced')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAutomationDefaults(automationPresets.fast)}
+                  className="px-3 py-1.5 text-[10px] uppercase font-bold bg-[#25262b] border border-[#373a40] rounded text-[#c1c2c5] hover:text-white"
+                >
+                  {t('automationPresetFast')}
+                </button>
+              </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <input
-                  type="number"
-                  min={1}
-                  max={100}
-                  value={automationDefaults.batchSize}
-                  onChange={(e) => setAutomationDefaults({ ...automationDefaults, batchSize: Number(e.target.value) || 1 })}
-                  className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                  placeholder={t('automationBatchSize')}
-                />
-                <input
-                  type="number"
-                  min={1000}
-                  max={60000}
-                  value={automationDefaults.timeoutMs}
-                  onChange={(e) => setAutomationDefaults({ ...automationDefaults, timeoutMs: Number(e.target.value) || 1000 })}
-                  className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                  placeholder={t('automationTimeoutMs')}
-                />
-                <input
-                  type="number"
-                  min={0}
-                  max={5}
-                  value={automationDefaults.retry}
-                  onChange={(e) => setAutomationDefaults({ ...automationDefaults, retry: Number(e.target.value) || 0 })}
-                  className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                  placeholder={t('automationRetry')}
-                />
-                <input
-                  type="number"
-                  min={1}
-                  max={100}
-                  value={automationDefaults.concurrency}
-                  onChange={(e) => setAutomationDefaults({ ...automationDefaults, concurrency: Number(e.target.value) || 1 })}
-                  className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                  placeholder={t('automationConcurrency')}
-                />
+                <label className="space-y-1">
+                  <span className="text-[11px] text-[#c1c2c5]">{t('automationBatchSize')}</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={automationDefaults.batchSize}
+                    onChange={(e) => setAutomationDefaults({ ...automationDefaults, batchSize: Number(e.target.value) || 1 })}
+                    className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                  />
+                  <span className="text-[10px] text-[#5c5f66]">{t('automationBatchSizeHelp')}</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-[11px] text-[#c1c2c5]">{t('automationTimeoutMs')}</span>
+                  <input
+                    type="number"
+                    min={1000}
+                    max={60000}
+                    value={automationDefaults.timeoutMs}
+                    onChange={(e) => setAutomationDefaults({ ...automationDefaults, timeoutMs: Number(e.target.value) || 1000 })}
+                    className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                  />
+                  <span className="text-[10px] text-[#5c5f66]">{t('automationTimeoutMsHelp')}</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-[11px] text-[#c1c2c5]">{t('automationRetry')}</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={5}
+                    value={automationDefaults.retry}
+                    onChange={(e) => setAutomationDefaults({ ...automationDefaults, retry: Number(e.target.value) || 0 })}
+                    className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                  />
+                  <span className="text-[10px] text-[#5c5f66]">{t('automationRetryHelp')}</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-[11px] text-[#c1c2c5]">{t('automationConcurrency')}</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={automationDefaults.concurrency}
+                    onChange={(e) => setAutomationDefaults({ ...automationDefaults, concurrency: Number(e.target.value) || 1 })}
+                    className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                  />
+                  <span className="text-[10px] text-[#5c5f66]">{t('automationConcurrencyHelp')}</span>
+                </label>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3 items-end">
-                <input
-                  type="number"
-                  min={1}
-                  max={10000}
-                  value={automationDefaults.errorThreshold}
-                  onChange={(e) => setAutomationDefaults({ ...automationDefaults, errorThreshold: Number(e.target.value) || 1 })}
-                  className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                  placeholder={t('automationErrorThreshold')}
-                />
+                <label className="space-y-1">
+                  <span className="text-[11px] text-[#c1c2c5]">{t('automationErrorThreshold')}</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={10000}
+                    value={automationDefaults.errorThreshold}
+                    onChange={(e) => setAutomationDefaults({ ...automationDefaults, errorThreshold: Number(e.target.value) || 1 })}
+                    className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                  />
+                  <span className="text-[10px] text-[#5c5f66]">{t('automationErrorThresholdHelp')}</span>
+                </label>
                 <button
                   type="button"
                   onClick={() => saveSystemConfig({ automationDefaults })}

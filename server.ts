@@ -198,6 +198,81 @@ function saveTopologySnapshot(actor: string, reason: string, branch?: string) {
   }
 }
 
+function topologyPairKey(source: string, target: string): string {
+  return [source, target].sort().join("::");
+}
+
+function topologyLinkSignature(link: TopologyLink): string {
+  return `${topologyPairKey(link.source, link.target)}::${String(link.portA || "").trim()}::${String(link.portB || "").trim()}`;
+}
+
+function branchDeviceIdSet(branch: string): Set<string> {
+  return new Set(
+    inventory
+      .filter((item) => String(item.branch || "").trim() === branch)
+      .map((item) => item.id)
+  );
+}
+
+function filterTopologyByBranch(
+  links: TopologyLink[],
+  layout: Record<string, { x: number; y: number }>,
+  branch?: string
+) {
+  if (!branch) {
+    return {
+      links: cloneTopologyLinks(links),
+      layout: cloneTopologyLayout(layout),
+    };
+  }
+  const ids = branchDeviceIdSet(branch);
+  const scopedLinks = links.filter((l) => ids.has(l.source) && ids.has(l.target));
+  const scopedLayout: Record<string, { x: number; y: number }> = {};
+  Object.entries(layout || {}).forEach(([id, p]) => {
+    if (ids.has(id)) scopedLayout[id] = { x: Number(p.x), y: Number(p.y) };
+  });
+  return { links: cloneTopologyLinks(scopedLinks), layout: scopedLayout };
+}
+
+function diffTopologyState(
+  current: { links: TopologyLink[]; layout: Record<string, { x: number; y: number }> },
+  target: { links: TopologyLink[]; layout: Record<string, { x: number; y: number }> }
+) {
+  const curSet = new Set(current.links.map((l) => topologyLinkSignature(l)));
+  const tgtSet = new Set(target.links.map((l) => topologyLinkSignature(l)));
+  const addedLinks = Array.from(tgtSet).filter((k) => !curSet.has(k)).length;
+  const removedLinks = Array.from(curSet).filter((k) => !tgtSet.has(k)).length;
+
+  const curByPair = new Map<string, TopologyLink>();
+  current.links.forEach((l) => curByPair.set(topologyPairKey(l.source, l.target), l));
+  const tgtByPair = new Map<string, TopologyLink>();
+  target.links.forEach((l) => tgtByPair.set(topologyPairKey(l.source, l.target), l));
+  let changedLinkLabels = 0;
+  tgtByPair.forEach((t, k) => {
+    const c = curByPair.get(k);
+    if (!c) return;
+    if (String(c.portA || "") !== String(t.portA || "") || String(c.portB || "") !== String(t.portB || "")) changedLinkLabels += 1;
+  });
+
+  const allNodeIds = new Set<string>([...Object.keys(current.layout || {}), ...Object.keys(target.layout || {})]);
+  let movedNodes = 0;
+  allNodeIds.forEach((id) => {
+    const c = current.layout[id];
+    const t = target.layout[id];
+    if (!c || !t) return;
+    if (Math.abs(Number(c.x) - Number(t.x)) > 0.5 || Math.abs(Number(c.y) - Number(t.y)) > 0.5) movedNodes += 1;
+  });
+
+  return {
+    addedLinks,
+    removedLinks,
+    changedLinkLabels,
+    movedNodes,
+    totalCurrentLinks: current.links.length,
+    totalTargetLinks: target.links.length,
+  };
+}
+
 type AuthUser = { id: string; username: string; role: string };
 type LocalUser = AuthUser & {
   lastLogin: string;
@@ -2941,6 +3016,59 @@ async function startServer() {
     res.json({ versions, total: versions.length });
   });
 
+  app.get("/api/topology/versions/:id/preview", checkRole(["admin", "operator", "viewer"]), (req, res) => {
+    const id = String(req.params.id || "").trim();
+    const branch = String(req.query.branch || "").trim();
+    const snapshot = topologySnapshots.find((v) => v.id === id);
+    if (!snapshot) return res.status(404).json({ success: false, error: "Topology version not found" });
+    const currentScoped = filterTopologyByBranch(topologyLinks, topologyLayout, branch || undefined);
+    const targetScoped = filterTopologyByBranch(snapshot.links, snapshot.layout, branch || undefined);
+    const summary = diffTopologyState(currentScoped, targetScoped);
+    return res.json({
+      success: true,
+      version: {
+        id: snapshot.id,
+        createdAt: snapshot.createdAt,
+        actor: snapshot.actor,
+        reason: snapshot.reason,
+        branch: snapshot.branch,
+      },
+      scope: branch || null,
+      summary,
+    });
+  });
+
+  app.post("/api/topology/restore", checkRole(["admin", "operator"]), (req, res) => {
+    const id = String(req.body?.versionId || "").trim();
+    const branch = String(req.body?.branch || "").trim();
+    const actor = actorName(req);
+    if (!id) return res.status(400).json({ success: false, error: "versionId is required" });
+    const snapshot = topologySnapshots.find((v) => v.id === id);
+    if (!snapshot) return res.status(404).json({ success: false, error: "Topology version not found" });
+
+    saveTopologySnapshot(actor, "topology.restore.pre", branch || undefined);
+    if (!branch) {
+      topologyLinks = cloneTopologyLinks(snapshot.links).map((l) => ensureTopologyLinkId(l));
+      topologyLayout = cloneTopologyLayout(snapshot.layout);
+    } else {
+      const ids = branchDeviceIdSet(branch);
+      const currentExternalLinks = topologyLinks.filter((l) => !(ids.has(l.source) && ids.has(l.target)));
+      const targetBranchLinks = snapshot.links.filter((l) => ids.has(l.source) && ids.has(l.target));
+      topologyLinks = [...currentExternalLinks, ...cloneTopologyLinks(targetBranchLinks).map((l) => ensureTopologyLinkId(l))];
+
+      const nextLayout = cloneTopologyLayout(topologyLayout);
+      Object.keys(nextLayout).forEach((nodeId) => {
+        if (ids.has(nodeId)) delete nextLayout[nodeId];
+      });
+      Object.entries(snapshot.layout || {}).forEach(([nodeId, p]) => {
+        if (ids.has(nodeId)) nextLayout[nodeId] = { x: Number(p.x), y: Number(p.y) };
+      });
+      topologyLayout = nextLayout;
+    }
+    logAction(actor, "Topology Restore", `Restored version ${snapshot.id}${branch ? ` (branch: ${branch})` : ""}`, "inventory");
+    return res.json({ success: true, restored: { id: snapshot.id, createdAt: snapshot.createdAt, reason: snapshot.reason }, links: topologyLinks, layout: topologyLayout });
+  });
+
   app.post("/api/topology/undo", checkRole(["admin", "operator"]), (req, res) => {
     const branch = String(req.body?.branch || "").trim();
     const actor = actorName(req);
@@ -3110,15 +3238,24 @@ async function startServer() {
   });
 
   app.post("/api/topology/links", checkRole(["admin", "operator"]), (req, res) => {
-    const body = req.body as { source?: string; target?: string; portA?: string; portB?: string };
+    const body = req.body as {
+      source?: string;
+      target?: string;
+      portA?: string;
+      portB?: string;
+      topologyMode?: string;
+      allowDuplicate?: boolean;
+    };
     const source = String(body.source || "").trim();
     const target = String(body.target || "").trim();
     const portA = String(body.portA || "").trim();
     const portB = String(body.portB || "").trim();
+    const topologyMode = String(body.topologyMode || "").trim().toLowerCase();
+    const allowDuplicate = Boolean(body.allowDuplicate) || topologyMode === "fc";
     if (!source || !target || source === target) {
       return res.status(400).json({ error: "Invalid link endpoints" });
     }
-    const exists = topologyLinks.some(
+    const exists = !allowDuplicate && topologyLinks.some(
       (l) =>
         (l.source === source && l.target === target && l.portA === portA && l.portB === portB) ||
         (l.source === target && l.target === source && l.portA === portB && l.portB === portA)
