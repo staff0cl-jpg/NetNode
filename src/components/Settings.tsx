@@ -704,21 +704,21 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
   ];
 
   return (
-    <div className="p-4 md:p-8 space-y-8 max-w-4xl animate-in slide-in-from-bottom-5 duration-700">
+    <div className="p-4 md:p-8 space-y-8 w-full max-w-[1600px] animate-in slide-in-from-bottom-5 duration-700">
       <header>
         <h2 className="text-2xl font-bold text-white mb-2 leading-tight">{t('sysConfig')}</h2>
         <p className="text-sm text-[#909296]">{t('manageInfra')}</p>
       </header>
 
       <nav className="border border-[#373a40] rounded bg-[#1c1d21] p-2">
-        <div className="flex gap-2 overflow-x-auto pb-1">
+        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-2">
           {settingsTabs.map((tab) => (
             <button
               key={tab.key}
               type="button"
               onClick={() => setActiveTab(tab.key)}
               className={cn(
-                'shrink-0 px-3 py-2 rounded text-[10px] font-bold uppercase tracking-widest border transition-colors',
+                'w-full px-3 py-2 rounded text-[10px] font-bold uppercase tracking-widest border transition-colors',
                 activeTab === tab.key
                   ? 'bg-[#228be6] border-[#228be6] text-white'
                   : 'bg-[#25262b] border-[#373a40] text-[#c1c2c5] hover:text-white'
