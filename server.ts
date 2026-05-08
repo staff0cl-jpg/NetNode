@@ -14,9 +14,6 @@ import crypto from "crypto";
 // Load environment variables
 dotenv.config();
 
-// Keep terminal traffic bounded but generous for large command output.
-const SOCKET_IO_MAX_PACKET_BYTES = 5 * 1024 * 1024;
-
 type InventoryItem = {
   id: string;
   name: string;
@@ -1106,18 +1103,6 @@ async function classifyInventorySubcategoriesBySnmp(branch?: string) {
   const touched: Array<{ id: string; trunkCount: number; subcategory: string }> = [];
   await forEachWithLimit(targets, 16, async (item) => {
     const category = String(item.category || "").toLowerCase();
-    if (isCiscoL3CoreModel(item.model || "", "", item.name || "")) {
-      const nextCategory = "Router";
-      const nextSubcategory = "Core";
-      const categoryChanged = (item.category || "") !== nextCategory;
-      const subcategoryChanged = (item.subcategory || "") !== nextSubcategory;
-      if (categoryChanged) item.category = nextCategory;
-      if (subcategoryChanged) item.subcategory = nextSubcategory;
-      if (categoryChanged || subcategoryChanged) {
-        touched.push({ id: item.id, trunkCount: 0, subcategory: nextSubcategory });
-      }
-      return;
-    }
     if (category === "fc switch" || category === "fibre channel switch" || category === "fiber channel switch") {
       const subcategory = deriveFcSubcategoryByName(item.name || "");
       if ((item.subcategory || "") !== subcategory) {
@@ -1560,8 +1545,6 @@ async function runDiscoveryScan(input: DiscoveryScanInput): Promise<DiscoverySca
       const category = detectCategoryFromSnmp(probe.sysDescr || "", probe.sysObjectId || "", probe.sysName || "");
       const subcategory = category === "FC Switch"
         ? deriveFcSubcategoryByName(probe.sysName || model || "")
-        : isCiscoL3CoreModel(probe.sysDescr || "", probe.sysObjectId || "", probe.sysName || "")
-          ? "Core"
         : "Access";
       const uptimeSeconds = probe.uptimeSeconds ?? 0;
       discovered.push({
@@ -1708,17 +1691,6 @@ function detectModelFromSnmp(sysDescr: string, sysObjectId = "", sysName = ""): 
   return parseModelFromDescr(sysDescr);
 }
 
-function isCiscoL3CoreModel(sysDescr: string, sysObjectId: string, sysName = ""): boolean {
-  const d = String(sysDescr || "").toLowerCase();
-  const oid = String(sysObjectId || "").toLowerCase();
-  const n = String(sysName || "").toLowerCase();
-  const model = detectModelFromSnmp(sysDescr, sysObjectId, sysName).toLowerCase();
-  const signal = `${d} ${n} ${model}`;
-  const isCiscoSignal = oid.startsWith("1.3.6.1.4.1.9") || signal.includes("cisco") || signal.includes("catalyst");
-  if (!isCiscoSignal) return false;
-  return /\b(c9500|c9500x|c95\d{2}(?:x)?|catalyst[\s\-_]*95\d{2}(?:x)?)\b/i.test(signal);
-}
-
 function snmpVersionsFromConfig(): snmp.Version[] {
   const preferred = snmpConfig.version.includes("v1") ? snmp.Version1 : snmp.Version2c;
   const fallback = preferred === snmp.Version1 ? snmp.Version2c : snmp.Version1;
@@ -1776,7 +1748,6 @@ function detectCategoryFromSnmp(sysDescr: string, sysObjectId: string, sysName =
     return "FC Switch";
   }
   if (d.includes("router")) return "Router";
-  if (isCiscoL3CoreModel(sysDescr, sysObjectId, sysName)) return "Router";
   if (d.includes("firewall") || d.includes("fortigate") || d.includes("palo alto")) return "Firewall";
   if (d.includes("switch") || d.includes("catalyst") || d.includes("aruba") || d.includes("nexus")) return "Switch";
   return "Other";
@@ -3363,9 +3334,7 @@ function actorRole(req: express.Request): string {
 async function startServer() {
   const app = express();
   const server = http.createServer(app);
-  const io = new Server(server, {
-    maxHttpBufferSize: SOCKET_IO_MAX_PACKET_BYTES,
-  });
+  const io = new Server(server);
   const PORT = process.env.PORT || 3000;
   const isProd = process.env.NODE_ENV === "production";
 
@@ -3872,68 +3841,42 @@ type MacSearchEvent = {
     return neighbors.sort((a, b) => `${a.neighborId}|${a.localPort}|${a.remotePort}`.localeCompare(`${b.neighborId}|${b.localPort}|${b.remotePort}`));
   }
 
-  app.post("/api/automation/mac-search", checkRole(["admin", "operator", "viewer"]), async (req, res) => {
-    const rawMac = String(req.body?.mac || "");
-    const macMatcher = buildMacSearchMatcher(rawMac);
-    if (macMatcher.ok === false) {
-      return res.status(400).json({ error: macMatcher.error });
-    }
-    const requestedIds = Array.isArray(req.body?.deviceIds)
-      ? new Set(req.body.deviceIds.map((x: unknown) => String(x)))
-      : null;
-    const targets = requestedIds ? inventory.filter((d) => requestedIds.has(d.id)) : [...inventory];
-    const mode = String(req.body?.mode || "single").trim().toLowerCase() === "trace" ? "trace" : "single";
-    const maxHopsRaw = Number(req.body?.maxHops);
-    const maxHops = Number.isFinite(maxHopsRaw) ? Math.max(1, Math.min(50, Math.floor(maxHopsRaw))) : 10;
-    const events: MacSearchEvent[] = [];
-    const addEvent = (event: Omit<MacSearchEvent, "timestamp">) => {
-      events.push({ ...event, timestamp: new Date().toISOString() });
-    };
-    addEvent({
-      stage: "request",
-      status: "info",
-      message: `Starting ${mode} search for ${macMatcher.displayMac} (${macMatcher.matchType}) across ${targets.length} device(s).`,
-    });
-    const results = await collectMacHitsForDevices(macMatcher.matcher, macMatcher.matchType, targets, addEvent);
-    addEvent({
-      stage: "request",
-      status: "success",
-      message: `Initial lookup completed with ${results.length} hit(s).`,
-    });
+  function normalizeBranchCode(value: unknown): string {
+    return String(value || "").trim().toUpperCase();
+  }
 
-    if (mode !== "trace") {
-      logAction(actorName(req), "MAC Search", `MAC ${macMatcher.displayMac} (${macMatcher.matchType}) -> ${results.length} hit(s)`, "automation");
-      return res.json({ success: true, mac: macMatcher.displayMac, matchType: macMatcher.matchType, results, events });
-    }
+  function traceCandidatePriority(hit: MacHit): number {
+    const portType = detectPortType(hit);
+    if (portType === "access") return 400;
+    if (portType === "unknown") return 300;
+    if (portType === "trunk") return 200;
+    if (portType === "lag") return 100;
+    return 0;
+  }
 
+  function rankTraceCandidates(hits: MacHit[]): MacHit[] {
+    return [...hits].sort((a, b) => {
+      const priorityDiff = traceCandidatePriority(b) - traceCandidatePriority(a);
+      if (priorityDiff !== 0) return priorityDiff;
+      const aPortType = detectPortType(a);
+      const bPortType = detectPortType(b);
+      const deterministicA = `${a.deviceName}|${a.ip}|${a.interface || ""}|${a.ifIndex || ""}|${a.vlan || 0}|${aPortType}`;
+      const deterministicB = `${b.deviceName}|${b.ip}|${b.interface || ""}|${b.ifIndex || ""}|${b.vlan || 0}|${bPortType}`;
+      return deterministicA.localeCompare(deterministicB);
+    });
+  }
+
+  async function traceMacPathFromCandidate(input: {
+    start: MacHit;
+    macMatcher: { matcher: (mac: string) => boolean; matchType: "exact" | "suffix" };
+    maxHops: number;
+    addEvent: (event: Omit<MacSearchEvent, "timestamp">) => void;
+  }): Promise<{ finalStatus: MacTraceStatus; hops: MacTraceHop[]; ambiguityNotes: string[] }> {
+    const { start, macMatcher, maxHops, addEvent } = input;
     const hops: MacTraceHop[] = [];
     const ambiguityNotes: string[] = [];
-    if (!results.length) {
-      addEvent({
-        stage: "trace",
-        status: "warning",
-        message: "Trace skipped because no initial hit was found.",
-      });
-      return res.json({
-        success: true,
-        mode: "trace",
-        mac: macMatcher.displayMac,
-        matchType: macMatcher.matchType,
-        finalStatus: "not_found" as MacTraceStatus,
-        hops,
-        ambiguityNotes,
-        events,
-      });
-    }
-
     let finalStatus: MacTraceStatus = "transit_last_seen";
-    let current = results[0];
-    if (results.length > 1) {
-      finalStatus = "ambiguous";
-      ambiguityNotes.push(`Initial search returned ${results.length} candidates; deterministic first candidate selected.`);
-    }
-
-    // Loop guards: stop revisiting the same switch/port path or bouncing between switches.
+    let current = start;
     const visitedDevicePort = new Set<string>();
     const visitedDevices = new Set<string>();
 
@@ -3990,7 +3933,6 @@ type MacSearchEvent = {
         break;
       }
 
-      // Traverse only when current hit is transit-like and topology has a deterministic next hop.
       const neighbors = findTopologyNeighbors(current.deviceId, inPort);
       if (!neighbors.length) {
         finalStatus = "transit_last_seen";
@@ -4006,6 +3948,7 @@ type MacSearchEvent = {
         hops.push(baseHop);
         break;
       }
+
       const nextLink = neighbors[0];
       if (neighbors.length > 1) {
         finalStatus = "ambiguous";
@@ -4061,7 +4004,7 @@ type MacSearchEvent = {
         finalStatus = "ambiguous";
         ambiguityNotes.push(`Neighbor ${neighbor.name} returned ${nextHits.length} candidate ports; deterministic first candidate selected.`);
       }
-      current = nextHits[0];
+      current = rankTraceCandidates(nextHits)[0];
 
       if (depth === maxHops - 1) {
         finalStatus = "depth_limit";
@@ -4072,6 +4015,118 @@ type MacSearchEvent = {
         });
       }
     }
+
+    return { finalStatus, hops, ambiguityNotes };
+  }
+
+  app.post("/api/automation/mac-search", checkRole(["admin", "operator", "viewer"]), async (req, res) => {
+    const rawMac = String(req.body?.mac || "");
+    const macMatcher = buildMacSearchMatcher(rawMac);
+    if (macMatcher.ok === false) {
+      return res.status(400).json({ error: macMatcher.error });
+    }
+    const requestedIds = Array.isArray(req.body?.deviceIds)
+      ? new Set(req.body.deviceIds.map((x: unknown) => String(x)))
+      : null;
+    const baseTargets = requestedIds ? inventory.filter((d) => requestedIds.has(d.id)) : [...inventory];
+    const branchCode = normalizeBranchCode(req.body?.branch || req.body?.regionPrefix);
+    const targets = branchCode
+      ? baseTargets.filter((d) => normalizeBranchCode(d.branch) === branchCode)
+      : baseTargets;
+    const mode = String(req.body?.mode || "single").trim().toLowerCase() === "trace" ? "trace" : "single";
+    const maxHopsRaw = Number(req.body?.maxHops);
+    const maxHops = Number.isFinite(maxHopsRaw) ? Math.max(1, Math.min(50, Math.floor(maxHopsRaw))) : 10;
+    const events: MacSearchEvent[] = [];
+    const addEvent = (event: Omit<MacSearchEvent, "timestamp">) => {
+      events.push({ ...event, timestamp: new Date().toISOString() });
+    };
+    addEvent({
+      stage: "request",
+      status: "info",
+      message: `Starting ${mode} search for ${macMatcher.displayMac} (${macMatcher.matchType}) across ${targets.length} device(s).`,
+    });
+    if (branchCode) {
+      addEvent({
+        stage: "request",
+        status: "info",
+        message: `Branch filter ${branchCode}: ${targets.length}/${baseTargets.length} device(s) selected.`,
+      });
+    }
+    const results = await collectMacHitsForDevices(macMatcher.matcher, macMatcher.matchType, targets, addEvent);
+    addEvent({
+      stage: "request",
+      status: "success",
+      message: `Initial lookup completed with ${results.length} hit(s).`,
+    });
+
+    if (mode !== "trace") {
+      logAction(actorName(req), "MAC Search", `MAC ${macMatcher.displayMac} (${macMatcher.matchType}) -> ${results.length} hit(s)`, "automation");
+      return res.json({ success: true, mac: macMatcher.displayMac, matchType: macMatcher.matchType, results, events });
+    }
+
+    const hops: MacTraceHop[] = [];
+    const ambiguityNotes: string[] = [];
+    if (!results.length) {
+      addEvent({
+        stage: "trace",
+        status: "warning",
+        message: "Trace skipped because no initial hit was found.",
+      });
+      return res.json({
+        success: true,
+        mode: "trace",
+        mac: macMatcher.displayMac,
+        matchType: macMatcher.matchType,
+        finalStatus: "not_found" as MacTraceStatus,
+        hops,
+        ambiguityNotes,
+        events,
+      });
+    }
+
+    const rankedStarts = rankTraceCandidates(results);
+    const traceStarts = rankedStarts.slice(0, Math.min(4, rankedStarts.length));
+    if (results.length > traceStarts.length) {
+      ambiguityNotes.push(`Initial search returned ${results.length} candidates; tracing top ${traceStarts.length} edge-priority candidates.`);
+    } else {
+      ambiguityNotes.push(`Initial search returned ${results.length} candidates; tracing all candidates by edge-priority.`);
+    }
+    const attempts: Array<{ start: MacHit; finalStatus: MacTraceStatus; hops: MacTraceHop[]; ambiguityNotes: string[] }> = [];
+    for (let idx = 0; idx < traceStarts.length; idx += 1) {
+      const start = traceStarts[idx];
+      addEvent({
+        stage: "trace",
+        status: "info",
+        message: `Trace candidate ${idx + 1}/${traceStarts.length}: ${start.deviceName} ${start.interface || "unknown"} (${detectPortType(start)}).`,
+        deviceId: start.deviceId,
+        deviceName: start.deviceName,
+        ip: start.ip,
+      });
+      const traced = await traceMacPathFromCandidate({
+        start,
+        macMatcher: { matcher: macMatcher.matcher, matchType: macMatcher.matchType },
+        maxHops,
+        addEvent,
+      });
+      attempts.push({ start, ...traced });
+      if (traced.finalStatus === "found_access") break;
+    }
+    const statusRank: Record<MacTraceStatus, number> = {
+      found_access: 0,
+      transit_last_seen: 1,
+      ambiguous: 2,
+      depth_limit: 3,
+      loop_detected: 4,
+      not_found: 5,
+    };
+    const chosen = [...attempts].sort((a, b) => {
+      const statusDiff = statusRank[a.finalStatus] - statusRank[b.finalStatus];
+      if (statusDiff !== 0) return statusDiff;
+      return traceCandidatePriority(b.start) - traceCandidatePriority(a.start);
+    })[0];
+    const finalStatus: MacTraceStatus = chosen?.finalStatus || "not_found";
+    hops.push(...(chosen?.hops || []));
+    for (const note of chosen?.ambiguityNotes || []) ambiguityNotes.push(note);
 
     addEvent({
       stage: "trace",

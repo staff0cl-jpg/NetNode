@@ -131,6 +131,9 @@ type MacSearchResult = {
   expectedVoiceVlan?: number;
   detectedVoiceVlan?: number;
   voiceVlanMatch?: 'match' | 'mismatch' | 'unknown' | 'not_voice_candidate';
+  candidateScore?: number;
+  candidateRank?: number;
+  candidateScoreReasons?: string[];
   source: string;
   timestamp: string;
 };
@@ -231,8 +234,9 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
   const [macEvents, setMacEvents] = React.useState<MacSearchEvent[]>([]);
   const [macMode, setMacMode] = React.useState<'trace' | 'single'>('trace');
   const [macMaxHops, setMacMaxHops] = React.useState<number>(10);
-  const [macScope, setMacScope] = React.useState<'all' | 'branch' | 'selected'>('all');
+  const [macScope, setMacScope] = React.useState<'all' | 'branch' | 'region' | 'selected'>('all');
   const [macBranchFilter, setMacBranchFilter] = React.useState('');
+  const [macRegionPrefix, setMacRegionPrefix] = React.useState('');
   const [macSelectedDeviceIds, setMacSelectedDeviceIds] = React.useState<string[]>([]);
   const [snmpConfig, setSnmpConfig] = React.useState({
     macSearch: {
@@ -539,6 +543,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
         body: JSON.stringify({
           mac: macInput.trim(),
           deviceIds,
+          branch: macScope === 'region' ? macRegionPrefix.trim() : undefined,
           mode: macMode,
           maxHops: Math.max(1, Math.min(50, Number(macMaxHops) || 10)),
         }),
@@ -573,12 +578,12 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
   };
 
   const traceStatusLabel: Record<MacTraceStatus, string> = {
-    found_access: 'Found on access/edge port',
-    transit_last_seen: 'Last seen on transit/trunk',
-    not_found: 'Not found',
-    ambiguous: 'Ambiguous path (deterministic pick)',
-    loop_detected: 'Loop detected and stopped',
-    depth_limit: 'Hop limit reached',
+    found_access: t('automationTraceStatusFoundAccess'),
+    transit_last_seen: t('automationTraceStatusTransitLastSeen'),
+    not_found: t('automationTraceStatusNotFound'),
+    ambiguous: t('automationTraceStatusAmbiguous'),
+    loop_detected: t('automationTraceStatusLoopDetected'),
+    depth_limit: t('automationTraceStatusDepthLimit'),
   };
 
   const voiceVlanStatusText = (result: MacSearchResult) => {
@@ -796,6 +801,8 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
       ? 'automationScopeHintAll'
       : macScope === 'branch'
         ? 'automationScopeHintBranch'
+        : macScope === 'region'
+          ? 'automationScopeHintRegion'
         : 'automationScopeHintSelected';
   const actionButtonBase =
     'px-4 py-2 rounded text-[10px] font-bold uppercase tracking-widest transition-colors disabled:opacity-50';
@@ -886,8 +893,8 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
               )}
               <div className="space-y-2">
                 <p className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('automationTargetScope')}</p>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                  {(['all', 'branch', 'selected'] as const).map((value) => (
+                <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                  {(['all', 'branch', 'region', 'selected'] as const).map((value) => (
                     <button
                       key={value}
                       type="button"
@@ -899,7 +906,13 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
                           : 'bg-[#141517] border-[#373a40] text-[#909296] hover:text-white'
                       )}
                     >
-                      {value === 'all' ? t('automationScopeAll') : value === 'branch' ? t('automationBranchFilter') : t('automationSelectDevices')}
+                      {value === 'all'
+                        ? t('automationScopeAll')
+                        : value === 'branch'
+                          ? t('automationBranchFilter')
+                          : value === 'region'
+                            ? t('automationRegionPrefixLabel')
+                            : t('automationSelectDevices')}
                     </button>
                   ))}
                 </div>
@@ -912,6 +925,20 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
                   className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
                   placeholder={t('automationBranchFilter')}
                 />
+              )}
+              {macScope === 'region' && (
+                <select
+                  value={macRegionPrefix}
+                  onChange={(e) => setMacRegionPrefix(e.target.value)}
+                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                >
+                  <option value="">{t('automationRegionPrefixPlaceholder')}</option>
+                  {availableBranches.map((branch) => (
+                    <option key={branch} value={branch}>
+                      {branch}
+                    </option>
+                  ))}
+                </select>
               )}
               {macScope === 'selected' && (
                 <select
@@ -977,7 +1004,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
               {macMode === 'trace' && macTraceResult && (
                 <div className="border border-[#373a40] rounded p-3 bg-[#141517] space-y-2">
                   <div className="text-xs text-white font-semibold">
-                    Trace status: {traceStatusLabel[macTraceResult.finalStatus] || macTraceResult.finalStatus}
+                    {t('automationTraceStatusLabel')}: {traceStatusLabel[macTraceResult.finalStatus] || macTraceResult.finalStatus}
                   </div>
                   <div className="text-[11px] text-[#909296]">
                     MAC {macTraceResult.mac} | Hops {macTraceResult.hops.length}/{macTraceResult.maxHops ?? '-'}
@@ -1021,6 +1048,11 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
                       <div className="text-[11px] text-[#909296] mt-1">
                         MAC {result.mac} | VLAN {result.vlan ?? '-'} | Voice VLAN {result.voiceVlan ?? '-'} | {result.vendor}
                       </div>
+                      {result.candidateScore !== undefined && (
+                        <div className="text-[11px] text-[#c1c2c5] mt-1">
+                          Rank {result.candidateRank ?? '-'} | Score {result.candidateScore} | {(result.candidateScoreReasons || []).join(', ') || 'no edge evidence'}
+                        </div>
+                      )}
                       <div className={cn('text-[11px] mt-1', result.voiceCandidate ? 'text-[#fab005]' : 'text-[#5c5f66]')}>
                         {t('automationVoiceCandidate')}: {result.voiceCandidate ? t('yes') : t('no')}
                         {result.matchedOui ? ` | ${t('automationMatchedOui')} ${result.matchedOui}` : ''}

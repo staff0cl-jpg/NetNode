@@ -100,6 +100,12 @@ const UNZONED_KEY = '__unzoned__';
 type ZoneBox = { key: string; label: string; x: number; y: number; width: number; height: number; count: number };
 type RoutedTopologyLink = TopoLink & { routePoints: number[]; labelX: number; labelY: number };
 
+const getSwitchZoneKey = (sw?: Pick<Switch, 'name' | 'zoneKey' | 'zone'>) => {
+  const explicit = String(sw?.zoneKey || '').trim();
+  if (explicit) return explicit;
+  return deriveZoneKey(sw?.name || '') || String(sw?.zone || '').trim();
+};
+
 function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: number): NodeWithPos[] {
   if (switches.length === 0) return [];
   const margin = 110;
@@ -760,7 +766,7 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
     const zoneGroups = new Map<string, { id: string; x: number; y: number; lane: Lane }[]>();
     points.forEach((p) => {
       const sw = byId.get(p.id);
-      const zoneKey = deriveZoneKey(sw?.name) || UNZONED_KEY;
+      const zoneKey = getSwitchZoneKey(sw) || UNZONED_KEY;
       if (!zoneGroups.has(zoneKey)) zoneGroups.set(zoneKey, []);
       zoneGroups.get(zoneKey)!.push(p);
     });
@@ -957,7 +963,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   const zones = React.useMemo(() => {
     const set = new Set<string>();
     regionSwitches.forEach((s) => {
-      const zone = deriveZoneKey(s.name);
+      const zone = getSwitchZoneKey(s);
       if (zone) set.add(zone);
     });
     return Array.from(set).sort((a, b) => a.localeCompare(b));
@@ -968,14 +974,14 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       return;
     }
     if (!selectedZone || (!zones.includes(selectedZone) && selectedZone !== '__all__')) {
-      setSelectedZone(zones[0]);
+      setSelectedZone('__all__');
     }
   }, [zones, selectedZone]);
   const zoneSwitches = React.useMemo(
     () =>
       regionSwitches.filter((s) => {
         if (selectedZone === '__all__') return true;
-        return selectedZone ? deriveZoneKey(s.name) === selectedZone : false;
+        return selectedZone ? getSwitchZoneKey(s) === selectedZone : false;
       }),
     [regionSwitches, selectedZone]
   );
@@ -983,6 +989,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     const override = String(zoneLabelOverrides[zoneKey] || '').trim();
     return override || zoneKey;
   }, [zoneLabelOverrides]);
+  const regionSwitchIds = React.useMemo(() => new Set(regionSwitches.map((s) => s.id)), [regionSwitches]);
   const topologySwitchIds = React.useMemo(() => new Set(zoneSwitches.map((s) => s.id)), [zoneSwitches]);
 
   useEffect(() => {
@@ -1094,18 +1101,17 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   useEffect(() => {
     const w = containerRef.current?.offsetWidth || canvasSize.width;
     const h = containerRef.current?.offsetHeight || canvasSize.height;
-    const visibleLinks = links.filter((l) => topologySwitchIds.has(l.source) && topologySwitchIds.has(l.target));
+    const layoutLinks = links.filter((l) => regionSwitchIds.has(l.source) && regionSwitchIds.has(l.target));
     const timer = window.setTimeout(() => {
-      const computed = computeLayout(zoneSwitches, visibleLinks, w, h);
-      setNodes(
-        computed.map((n) => {
-          const saved = savedLayout[n.id];
-          return saved ? { ...n, x: saved.x, y: saved.y } : n;
-        })
-      );
+      const computed = computeLayout(regionSwitches, layoutLinks, w, h);
+      const withSavedLayout = computed.map((n) => {
+        const saved = savedLayout[n.id];
+        return saved ? { ...n, x: saved.x, y: saved.y } : n;
+      });
+      setNodes(withSavedLayout.filter((n) => topologySwitchIds.has(n.id)));
     }, 80);
     return () => window.clearTimeout(timer);
-  }, [zoneSwitches, topologySwitchIds, links, canvasSize.width, canvasSize.height, savedLayout]);
+  }, [regionSwitches, regionSwitchIds, topologySwitchIds, links, canvasSize.width, canvasSize.height, savedLayout]);
 
   const handleAutoLayout = async () => {
     if (!canEditTopology) return;
@@ -1165,10 +1171,11 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       }
       const w = containerRef.current?.offsetWidth || canvasSize.width;
       const h = containerRef.current?.offsetHeight || canvasSize.height;
-      const visibleLinks = (data.links || []).filter((l) => topologySwitchIds.has(l.source) && topologySwitchIds.has(l.target));
-      const computed = computeLayout(zoneSwitches, visibleLinks, w, h);
+      const nextLinks = data.links || [];
+      const layoutLinks = nextLinks.filter((l) => regionSwitchIds.has(l.source) && regionSwitchIds.has(l.target));
+      const computed = computeLayout(regionSwitches, layoutLinks, w, h);
       // Auto-layout must take precedence over previously saved coordinates for this active tab.
-      setNodes(computed);
+      setNodes(computed.filter((n) => topologySwitchIds.has(n.id)));
       const nextPositions = computed.reduce<Record<string, { x: number; y: number }>>((acc, n) => {
         acc[n.id] = { x: n.x, y: n.y };
         return acc;
@@ -1423,7 +1430,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   const zoneBoxes = React.useMemo<ZoneBox[]>(() => {
     const groups = new Map<string, NodeWithPos[]>();
     nodes.forEach((node) => {
-      const zoneKey = deriveZoneKey(node.name) || UNZONED_KEY;
+      const zoneKey = getSwitchZoneKey(node) || UNZONED_KEY;
       if (!groups.has(zoneKey)) groups.set(zoneKey, []);
       groups.get(zoneKey)!.push(node);
     });
@@ -1447,7 +1454,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   }, [nodes, t, zoneLabel]);
   const routedVisibleLinks = React.useMemo<RoutedTopologyLink[]>(() => {
     const zoneByNode = new Map<string, string>();
-    nodes.forEach((node) => zoneByNode.set(node.id, deriveZoneKey(node.name) || UNZONED_KEY));
+    nodes.forEach((node) => zoneByNode.set(node.id, getSwitchZoneKey(node) || UNZONED_KEY));
     const boxByZone = new Map(zoneBoxes.map((box) => [box.key, box]));
     const zoneCenter = (zoneKey: string) => {
       const box = boxByZone.get(zoneKey);
@@ -1959,14 +1966,6 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                   opacity={0.12}
                   cornerRadius={[12, 12, 0, 0]}
                 />
-                <Text
-                  x={zone.x + 16}
-                  y={zone.y + 10}
-                  text={`${zone.label} (${zone.count})`}
-                  fill="#d3f9d8"
-                  fontSize={11}
-                  fontStyle="bold"
-                />
               </React.Fragment>
             ))}
           </Layer>
@@ -2108,6 +2107,19 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                   fill={node.status === 'online' ? '#40c057' : '#fa5252'}
                 />
               </React.Fragment>
+            ))}
+          </Layer>
+          <Layer listening={false}>
+            {zoneBoxes.map((zone) => (
+              <Text
+                key={`zone-label-${zone.key}`}
+                x={zone.x + 16}
+                y={zone.y + 10}
+                text={`${zone.label} (${zone.count})`}
+                fill="#d3f9d8"
+                fontSize={11}
+                fontStyle="bold"
+              />
             ))}
           </Layer>
         </Stage>
