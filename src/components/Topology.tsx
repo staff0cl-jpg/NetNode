@@ -748,20 +748,23 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
   type ZonePackItem = {
     zoneKey: string;
     nodes: { id: string; x: number; y: number; lane: Lane }[];
-    minX: number;
-    minY: number;
+    columns: number;
     boxWidth: number;
     boxHeight: number;
   };
-  const zonePadX = 32;
+  const zonePadX = 28;
   const zonePadTop = 28;
   const zonePadBottom = 24;
-  const zoneGapX = 34;
-  const zoneGapY = 30;
+  const zoneGapX = 30;
+  const zoneGapY = 28;
   const zonePackMargin = 44;
-  const zoneMinWidth = TOPO_NODE_WIDTH + zonePadX * 2 + 28;
-  const zoneMinHeight = TOPO_NODE_HEIGHT + zonePadTop + zonePadBottom + 20;
-  const zonePackMaxWidth = Math.max(720, width - zonePackMargin * 2);
+  const zoneNodeGapX = 22;
+  const zoneNodeGapY = 18;
+  const zoneMaxColumns = 4;
+  const zoneMinWidth = TOPO_NODE_WIDTH + zonePadX * 2;
+  const zoneMinHeight = TOPO_NODE_HEIGHT + zonePadTop + zonePadBottom;
+  const zoneMaxWidth = zonePadX * 2 + TOPO_NODE_WIDTH * zoneMaxColumns + zoneNodeGapX * (zoneMaxColumns - 1);
+  const zonePackMaxWidth = Math.max(760, Math.min(width - zonePackMargin * 2, 1540));
   const zoneGroups = new Map<string, { id: string; x: number; y: number; lane: Lane }[]>();
   points.forEach((point) => {
     const sw = byId.get(point.id);
@@ -773,17 +776,24 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
   });
   const zoneItems: ZonePackItem[] = Array.from(zoneGroups.entries())
     .map(([zoneKey, zoneNodes]) => {
-      const minX = Math.min(...zoneNodes.map((n) => n.x));
-      const maxX = Math.max(...zoneNodes.map((n) => n.x + TOPO_NODE_WIDTH));
-      const minY = Math.min(...zoneNodes.map((n) => n.y));
-      const maxY = Math.max(...zoneNodes.map((n) => n.y + TOPO_NODE_HEIGHT));
+      const count = zoneNodes.length;
+      const preferredColumns = Math.max(1, Math.ceil(Math.sqrt(count)));
+      const columns = Math.min(zoneMaxColumns, preferredColumns);
+      const rows = Math.max(1, Math.ceil(count / columns));
+      const contentWidth = columns * TOPO_NODE_WIDTH + Math.max(0, columns - 1) * zoneNodeGapX;
+      const contentHeight = rows * TOPO_NODE_HEIGHT + Math.max(0, rows - 1) * zoneNodeGapY;
       return {
         zoneKey,
-        nodes: [...zoneNodes].sort((a, b) => a.id.localeCompare(b.id)),
-        minX,
-        minY,
-        boxWidth: Math.max(zoneMinWidth, maxX - minX + zonePadX * 2),
-        boxHeight: Math.max(zoneMinHeight, maxY - minY + zonePadTop + zonePadBottom),
+        nodes: [...zoneNodes].sort((a, b) => {
+          const laneDelta = (laneIdx.get(a.lane) ?? 99) - (laneIdx.get(b.lane) ?? 99);
+          if (laneDelta !== 0) return laneDelta;
+          if (a.y !== b.y) return a.y - b.y;
+          if (a.x !== b.x) return a.x - b.x;
+          return a.id.localeCompare(b.id);
+        }),
+        columns,
+        boxWidth: Math.min(zoneMaxWidth, Math.max(zoneMinWidth, contentWidth + zonePadX * 2)),
+        boxHeight: Math.max(zoneMinHeight, contentHeight + zonePadTop + zonePadBottom),
       };
     })
     .sort((a, b) => a.zoneKey.localeCompare(b.zoneKey));
@@ -798,11 +808,11 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
     }
     const zoneX = packCursorX;
     const zoneY = packCursorY;
-    item.nodes.forEach((nodePoint) => {
-      const localX = nodePoint.x - item.minX;
-      const localY = nodePoint.y - item.minY;
-      nodePoint.x = zoneX + zonePadX + localX;
-      nodePoint.y = zoneY + zonePadTop + localY;
+    item.nodes.forEach((nodePoint, idx) => {
+      const row = Math.floor(idx / item.columns);
+      const col = idx % item.columns;
+      nodePoint.x = zoneX + zonePadX + col * (TOPO_NODE_WIDTH + zoneNodeGapX);
+      nodePoint.y = zoneY + zonePadTop + row * (TOPO_NODE_HEIGHT + zoneNodeGapY);
     });
     packCursorX += item.boxWidth + zoneGapX;
     packRowHeight = Math.max(packRowHeight, item.boxHeight);

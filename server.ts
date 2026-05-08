@@ -602,6 +602,7 @@ let snmpConfig = {
     dot1qTpFdbPortOid: "1.3.6.1.2.1.17.7.1.2.2.1.2",
     voiceVlanMacOid: "1.3.6.1.4.1.9.9.315.1.2.3.1.1",
     voiceOuiPrefixes: [] as string[],
+    voiceOuiEntries: [] as Array<{ ouiAddress: string; mask: string; description: string }>,
   },
 };
 
@@ -1977,14 +1978,122 @@ function formatOuiPrefix(prefix: string): string {
   return hex ? hex.match(/.{1,2}/g)?.join(":") || hex : "";
 }
 
-function findMatchedOui(mac: string): string | undefined {
+type VoiceOuiEntry = { ouiAddress: string; mask: string; description: string };
+type NormalizedVoiceOuiEntry = {
+  ouiAddressHex: string;
+  maskHex: string;
+  description: string;
+  ouiAddressDisplay: string;
+  maskDisplay: string;
+};
+
+function hexToColonHex(hex: string): string {
+  const normalized = String(hex || "").toLowerCase().replace(/[^0-9a-f]/g, "");
+  if (!normalized || normalized.length % 2 !== 0) return "";
+  return normalized.match(/.{1,2}/g)?.join(":") || "";
+}
+
+function normalizeOuiAddressHex12(raw: string): string {
+  const hex = normalizeMacLoose(raw);
+  if (!hex || hex.length > 12 || hex.length % 2 !== 0) return "";
+  return hex.padEnd(12, "0");
+}
+
+function normalizeOuiMaskHex12(raw: string, fallbackLengthBytes = 0): string {
+  const hex = normalizeMacLoose(raw);
+  if (hex && hex.length <= 12 && hex.length % 2 === 0) return hex.padEnd(12, "0");
+  if (fallbackLengthBytes <= 0 || fallbackLengthBytes > 6) return "";
+  return `${"ff".repeat(fallbackLengthBytes)}${"00".repeat(6 - fallbackLengthBytes)}`;
+}
+
+function normalizeVoiceOuiEntry(raw: unknown): NormalizedVoiceOuiEntry | null {
+  if (!raw || typeof raw !== "object") return null;
+  const source = raw as { ouiAddress?: unknown; mask?: unknown; description?: unknown };
+  const rawOui = String(source.ouiAddress || "").trim();
+  const rawMask = String(source.mask || "").trim();
+  const rawDescription = String(source.description || "").trim();
+  const ouiHex = normalizeOuiAddressHex12(rawOui);
+  const ouiBytes = normalizeMacLoose(rawOui).length / 2;
+  const maskHex = normalizeOuiMaskHex12(rawMask, Number.isFinite(ouiBytes) ? ouiBytes : 0);
+  if (!ouiHex || !maskHex) return null;
+  return {
+    ouiAddressHex: ouiHex,
+    maskHex,
+    description: rawDescription,
+    ouiAddressDisplay: hexToColonHex(ouiHex),
+    maskDisplay: hexToColonHex(maskHex),
+  };
+}
+
+function normalizeVoiceOuiEntries(raw: unknown): VoiceOuiEntry[] {
+  if (!Array.isArray(raw)) return [];
+  const unique = new Map<string, VoiceOuiEntry>();
+  raw.forEach((item) => {
+    const normalized = normalizeVoiceOuiEntry(item);
+    if (!normalized) return;
+    const key = `${normalized.ouiAddressHex}|${normalized.maskHex}|${normalized.description.toLowerCase()}`;
+    if (unique.has(key)) return;
+    unique.set(key, {
+      ouiAddress: normalized.ouiAddressDisplay,
+      mask: normalized.maskDisplay,
+      description: normalized.description,
+    });
+  });
+  return Array.from(unique.values());
+}
+
+function buildVoiceOuiEntriesFromPrefixes(prefixesRaw: unknown): VoiceOuiEntry[] {
+  const prefixes = normalizeOuiPrefixList(prefixesRaw);
+  return prefixes.map((prefix) => {
+    const bytes = prefix.length / 2;
+    const ouiAddressHex = prefix.padEnd(12, "0");
+    const maskHex = `${"ff".repeat(bytes)}${"00".repeat(6 - bytes)}`;
+    return {
+      ouiAddress: hexToColonHex(ouiAddressHex),
+      mask: hexToColonHex(maskHex),
+      description: "",
+    };
+  });
+}
+
+function getNormalizedVoiceOuiEntries(macSearch = snmpConfig.macSearch): NormalizedVoiceOuiEntry[] {
+  const explicitEntries = normalizeVoiceOuiEntries(macSearch?.voiceOuiEntries).map((entry) => normalizeVoiceOuiEntry(entry)).filter(Boolean) as NormalizedVoiceOuiEntry[];
+  const compatEntries = buildVoiceOuiEntriesFromPrefixes(macSearch?.voiceOuiPrefixes).map((entry) => normalizeVoiceOuiEntry(entry)).filter(Boolean) as NormalizedVoiceOuiEntry[];
+  const merged = [...explicitEntries, ...compatEntries];
+  const unique = new Map<string, NormalizedVoiceOuiEntry>();
+  merged.forEach((entry) => {
+    const key = `${entry.ouiAddressHex}|${entry.maskHex}|${entry.description.toLowerCase()}`;
+    if (!unique.has(key)) unique.set(key, entry);
+  });
+  return Array.from(unique.values()).sort((a, b) => b.maskHex.localeCompare(a.maskHex));
+}
+
+function isMacMatchingOuiMask(macHex: string, ouiHex: string, maskHex: string): boolean {
+  const normalizedMac = normalizeMacLoose(macHex);
+  if (normalizedMac.length !== 12) return false;
+  if (ouiHex.length !== 12 || maskHex.length !== 12) return false;
+  try {
+    const macValue = BigInt(`0x${normalizedMac}`);
+    const ouiValue = BigInt(`0x${ouiHex}`);
+    const maskValue = BigInt(`0x${maskHex}`);
+    return (macValue & maskValue) === (ouiValue & maskValue);
+  } catch {
+    return false;
+  }
+}
+
+function findMatchedOui(mac: string): { matchedOuiAddress: string; matchedMask: string; matchedDescription?: string; matchedOui: string } | undefined {
   const normalizedMac = normalizeMacLoose(mac);
   if (!normalizedMac) return undefined;
-  const prefixes = normalizeOuiPrefixList(snmpConfig.macSearch?.voiceOuiPrefixes);
-  const match = prefixes
-    .sort((a, b) => b.length - a.length)
-    .find((prefix) => normalizedMac.startsWith(prefix));
-  return match ? formatOuiPrefix(match) : undefined;
+  const match = getNormalizedVoiceOuiEntries()
+    .find((entry) => isMacMatchingOuiMask(normalizedMac, entry.ouiAddressHex, entry.maskHex));
+  if (!match) return undefined;
+  return {
+    matchedOuiAddress: match.ouiAddressDisplay,
+    matchedMask: match.maskDisplay,
+    matchedDescription: match.description || undefined,
+    matchedOui: match.ouiAddressDisplay,
+  };
 }
 
 function macFromOidSuffix(suffix: string): string {
@@ -3632,6 +3741,11 @@ async function startServer() {
     voiceVlan?: number;
     voiceCandidate: boolean;
     matchedOui?: string;
+    matchedOuiAddress?: string;
+    matchedMask?: string;
+    matchedDescription?: string;
+    portVoiceVlan?: number;
+    portDetectedVoiceVlan?: number;
     expectedVoiceVlan?: number;
     detectedVoiceVlan?: number;
     voiceVlanMatch: "match" | "mismatch" | "unknown" | "not_voice_candidate";
@@ -3771,10 +3885,10 @@ type MacSearchEvent = {
           const source = isLag ? "dot1dTpFdbPort:lag" : isTrunk ? "dot1dTpFdbPort:trunk" : "dot1dTpFdbPort:access";
           const qbridgeVlans = normalizedMac ? qBridgeByNormalizedMac.get(normalizedMac) || [] : [];
           const vlan = qbridgeVlans.length ? qbridgeVlans[0] : undefined;
-          const matchedOui = findMatchedOui(mac);
+          const matchedOuiInfo = findMatchedOui(mac);
           const expectedVoiceVlan = voiceMap[ifIndex];
           const detectedVoiceVlan = vlan;
-          const voiceCandidate = Boolean(matchedOui);
+          const voiceCandidate = Boolean(matchedOuiInfo);
           const voiceVlanMatch = !voiceCandidate
             ? "not_voice_candidate"
             : expectedVoiceVlan === undefined || detectedVoiceVlan === undefined
@@ -3794,7 +3908,12 @@ type MacSearchEvent = {
             vlan,
             voiceVlan: expectedVoiceVlan,
             voiceCandidate,
-            matchedOui,
+            matchedOui: matchedOuiInfo?.matchedOui,
+            matchedOuiAddress: matchedOuiInfo?.matchedOuiAddress,
+            matchedMask: matchedOuiInfo?.matchedMask,
+            matchedDescription: matchedOuiInfo?.matchedDescription,
+            portVoiceVlan: expectedVoiceVlan,
+            portDetectedVoiceVlan: detectedVoiceVlan,
             expectedVoiceVlan,
             detectedVoiceVlan,
             voiceVlanMatch,
@@ -3862,10 +3981,11 @@ type MacSearchEvent = {
 
   function traceCandidatePriority(hit: MacHit): number {
     const portType = detectPortType(hit);
-    if (portType === "access") return 400;
-    if (portType === "unknown") return 300;
-    if (portType === "trunk") return 200;
-    if (portType === "lag") return 100;
+    // Access/edge candidates are globally preferred for deterministic endpoint-first tracing.
+    if (portType === "access") return 1000;
+    if (portType === "trunk") return 300;
+    if (portType === "lag") return 250;
+    if (portType === "unknown") return 100;
     return 0;
   }
 
@@ -3903,7 +4023,9 @@ type MacSearchEvent = {
         addEvent({
           stage: "trace",
           status: "warning",
-          message: `Loop guard triggered on ${current.deviceName} ${inPort}.`,
+          message:
+            `Trace stopped: loop guard triggered on ${current.deviceName} ${inPort}. ` +
+            `Трассировка остановлена: обнаружен цикл на ${current.deviceName} ${inPort}.`,
           deviceId: current.deviceId,
           deviceName: current.deviceName,
           ip: current.ip,
@@ -3931,19 +4053,19 @@ type MacSearchEvent = {
         reason: "",
       };
 
-      if (portType === "access" || portType === "unknown") {
+      if (portType === "access") {
         finalStatus = "found_access";
         addEvent({
           stage: "trace",
           status: "success",
-          message: `Trace ended on ${current.deviceName} ${inPort} (${portType}).`,
+          message:
+            `Trace ended on access/edge port ${current.deviceName} ${inPort}. ` +
+            `Трассировка завершена на access/edge порту ${current.deviceName} ${inPort}.`,
           deviceId: current.deviceId,
           deviceName: current.deviceName,
           ip: current.ip,
         });
-        baseHop.reason = portType === "access"
-          ? "MAC terminates on access/edge port."
-          : "MAC found but port type is unknown; treating as edge termination.";
+        baseHop.reason = "MAC terminates on access/edge port.";
         hops.push(baseHop);
         break;
       }
@@ -3954,12 +4076,14 @@ type MacSearchEvent = {
         addEvent({
           stage: "trace",
           status: "warning",
-          message: `No topology neighbor found for ${current.deviceName} ${inPort}.`,
+          message:
+            `Trace stopped: no topology neighbor evidence for transit port ${current.deviceName} ${inPort} (${portType}). ` +
+            `Трассировка остановлена: нет данных о соседе в топологии для транзитного порта ${current.deviceName} ${inPort} (${portType}).`,
           deviceId: current.deviceId,
           deviceName: current.deviceName,
           ip: current.ip,
         });
-        baseHop.reason = "Transit/trunk port but no neighbor link found in topology.";
+        baseHop.reason = `Transit ${portType} port without neighbor evidence in topology.`;
         hops.push(baseHop);
         break;
       }
@@ -4021,7 +4145,7 @@ type MacSearchEvent = {
       }
       const edgePreferred = nextHits.filter((hit) => {
         const type = detectPortType(hit);
-        return type === "access" || type === "unknown";
+        return type === "access";
       });
       const nextPool = edgePreferred.length ? edgePreferred : nextHits;
       current = rankTraceCandidates(nextPool)[0];
@@ -4031,7 +4155,9 @@ type MacSearchEvent = {
         addEvent({
           stage: "trace",
           status: "warning",
-          message: `Reached max hops limit (${maxHops}).`,
+          message:
+            `Trace stopped: reached max hops limit (${maxHops}). ` +
+            `Трассировка остановлена: достигнут лимит переходов (${maxHops}).`,
         });
       }
     }
@@ -5529,13 +5655,18 @@ type MacSearchEvent = {
     if (Number.isFinite(Number(retries))) snmpConfig.retries = Math.max(0, Math.min(3, Number(retries)));
     if (Number.isFinite(Number(port))) snmpConfig.port = Math.max(1, Math.min(65535, Number(port)));
     if (macSearch && typeof macSearch === "object") {
+      const normalizedPrefixes = normalizeOuiPrefixList(macSearch.voiceOuiPrefixes ?? snmpConfig.macSearch.voiceOuiPrefixes);
+      const explicitEntries = normalizeVoiceOuiEntries(macSearch.voiceOuiEntries ?? snmpConfig.macSearch.voiceOuiEntries);
+      const compatEntries = buildVoiceOuiEntriesFromPrefixes(normalizedPrefixes);
+      const mergedVoiceOuiEntries = normalizeVoiceOuiEntries([...explicitEntries, ...compatEntries]);
       snmpConfig.macSearch = {
         ...snmpConfig.macSearch,
         dot1dTpFdbPortOid: String(macSearch.dot1dTpFdbPortOid || snmpConfig.macSearch.dot1dTpFdbPortOid).trim(),
         dot1dBasePortIfIndexOid: String(macSearch.dot1dBasePortIfIndexOid || snmpConfig.macSearch.dot1dBasePortIfIndexOid).trim(),
         dot1qTpFdbPortOid: String(macSearch.dot1qTpFdbPortOid || snmpConfig.macSearch.dot1qTpFdbPortOid).trim(),
         voiceVlanMacOid: String(macSearch.voiceVlanMacOid || snmpConfig.macSearch.voiceVlanMacOid).trim(),
-        voiceOuiPrefixes: normalizeOuiPrefixList(macSearch.voiceOuiPrefixes ?? snmpConfig.macSearch.voiceOuiPrefixes),
+        voiceOuiPrefixes: normalizedPrefixes,
+        voiceOuiEntries: mergedVoiceOuiEntries,
       };
     }
     logAction(actor, 'SNMP Config Update', `Changed SNMP settings (Version: ${version})`, 'config');
