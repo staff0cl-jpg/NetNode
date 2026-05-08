@@ -91,21 +91,34 @@ type TopologyMode = 'ip' | 'fc';
 
 const TOPO_NODE_WIDTH = 160;
 const TOPO_NODE_HEIGHT = 80;
-const TOPO_ZONE_PAD_X = 44;
+const TOPO_ZONE_PAD_X = 56;
 const TOPO_ZONE_PAD_TOP = 34;
 const TOPO_ZONE_PAD_BOTTOM = 30;
 const TOPO_ROW_TOP_Y = 34;
 const TOPO_ROW_SECOND_Y = 170;
 const TOPO_ROW_THIRD_Y = 306;
 const TOPO_ROW_HEIGHT = TOPO_NODE_HEIGHT + 52;
-const TOPO_COLUMN_GAP = TOPO_NODE_WIDTH + 66;
-const TOPO_ZONE_GAP_X = 100;
+const TOPO_COLUMN_GAP = TOPO_NODE_WIDTH + 120;
+const TOPO_ZONE_GAP_X = 180;
 const TOPO_ZONE_GAP_Y = 120;
-const TOPO_ROW_STAGGER_X = 90;
+const TOPO_ROW_STAGGER_X = 120;
+const TOPO_VENDOR_GROUP_GAP_X = 220;
+const TOPO_VENDOR_LAYER_GAP_Y = 150;
+const TOPO_VENDOR_MAX_COLUMNS = 5;
 const TOPO_ZONE_MIN_WIDTH = TOPO_NODE_WIDTH + TOPO_ZONE_PAD_X * 2;
-const TOPO_MAX_COLUMNS = 7;
+const TOPO_MAX_COLUMNS = 8;
+const TOPO_MAX_ZONE_COLUMNS_PER_ROW = 5;
 const TOPO_STAGE_SIDE_PADDING = 35;
-const TOPO_LAYOUT_MAX_WIDTH = 1500;
+const TOPO_LAYOUT_MAX_WIDTH = 1900;
+const TOPO_LAYOUT_FIT_SCALE = 0.82;
+
+const TOPO_TRUNK_STROKE = '#ff922b';
+const TOPO_TRUNK_LABEL_FILL = 'rgba(255, 146, 43, 0.18)';
+const TOPO_TRUNK_LABEL_STROKE = 'rgba(255, 146, 43, 0.82)';
+const TOPO_REGULAR_LINK_STROKE = '#4dabf7';
+const TOPO_REGULAR_LABEL_FILL = 'rgba(20, 21, 23, 0.78)';
+const TOPO_REGULAR_LABEL_STROKE = 'rgba(77, 171, 247, 0.36)';
+const TOPO_MANUAL_LINK_STROKE = '#40c057';
 
 const sortSwitchesByNameThenId = (a: Switch, b: Switch) => {
   const an = String(a.name || '').toLowerCase();
@@ -116,6 +129,9 @@ const sortSwitchesByNameThenId = (a: Switch, b: Switch) => {
 
 const isMikroTikSwitch = (sw: Switch) => String(sw.vendor || '').trim().toLowerCase().includes('mikrotik');
 const isCiscoSwitch = (sw: Switch) => String(sw.vendor || '').trim().toLowerCase().includes('cisco');
+const isPriorityVendorSwitch = (sw: Switch) => isMikroTikSwitch(sw) || isCiscoSwitch(sw);
+const isTrunkTopologyLink = (link: TopoLink, label: string) =>
+  !link.manual || /\b(trunk|uplink|lag|port-channel|etherchannel|po\d+|ae\d+|bond\d*)\b/i.test(label);
 
 function computeLegacyFlatLayout(switches: Switch[], links: TopoLink[], cw: number, ch: number): NodeWithPos[] {
   if (switches.length === 0) return [];
@@ -157,8 +173,17 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
   void links;
   void ch;
   const stageWidth = Math.max(cw, 1100);
+  const layoutWidth = Math.min(
+    TOPO_LAYOUT_MAX_WIDTH,
+    Math.max(1100, (stageWidth - TOPO_STAGE_SIDE_PADDING * 2) / TOPO_LAYOUT_FIT_SCALE)
+  );
+  const priorityMikroTik = switches.filter(isMikroTikSwitch).sort(sortSwitchesByNameThenId);
+  const priorityCisco = switches
+    .filter((sw) => !isMikroTikSwitch(sw) && isCiscoSwitch(sw))
+    .sort(sortSwitchesByNameThenId);
+  const lowerSwitches = switches.filter((sw) => !isPriorityVendorSwitch(sw));
   const zones = new Map<string, Switch[]>();
-  switches.forEach((sw) => {
+  lowerSwitches.forEach((sw) => {
     const zoneKey = deriveZoneKey(sw.name) || '__ungrouped__';
     if (!zones.has(zoneKey)) zones.set(zoneKey, []);
     zones.get(zoneKey)!.push(sw);
@@ -167,51 +192,22 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
   const zonePlans = Array.from(zones.entries())
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([zoneKey, zoneSwitches]) => {
-      const mikrotik = zoneSwitches.filter(isMikroTikSwitch).sort(sortSwitchesByNameThenId);
-      const cisco = zoneSwitches.filter((sw) => !isMikroTikSwitch(sw) && isCiscoSwitch(sw)).sort(sortSwitchesByNameThenId);
-      const others = zoneSwitches.filter((sw) => !isMikroTikSwitch(sw) && !isCiscoSwitch(sw)).sort(sortSwitchesByNameThenId);
+      const others = zoneSwitches.sort(sortSwitchesByNameThenId);
       const otherCols = Math.max(1, Math.min(TOPO_MAX_COLUMNS, others.length || 1));
-      const rowWidths = [
-        Math.max(1, mikrotik.length) * TOPO_NODE_WIDTH + Math.max(0, mikrotik.length - 1) * (TOPO_COLUMN_GAP - TOPO_NODE_WIDTH),
-        Math.max(1, cisco.length) * TOPO_NODE_WIDTH + Math.max(0, cisco.length - 1) * (TOPO_COLUMN_GAP - TOPO_NODE_WIDTH),
-        otherCols * TOPO_NODE_WIDTH + Math.max(0, otherCols - 1) * (TOPO_COLUMN_GAP - TOPO_NODE_WIDTH),
-      ];
+      const rowWidth = otherCols * TOPO_NODE_WIDTH + Math.max(0, otherCols - 1) * (TOPO_COLUMN_GAP - TOPO_NODE_WIDTH);
       const otherRows = Math.max(1, Math.ceil(others.length / otherCols));
-      const contentBottom =
-        TOPO_ROW_THIRD_Y +
-        (otherRows - 1) * TOPO_ROW_HEIGHT +
-        TOPO_NODE_HEIGHT;
+      const contentBottom = TOPO_ROW_TOP_Y + (otherRows - 1) * TOPO_ROW_HEIGHT + TOPO_NODE_HEIGHT;
       return {
         zoneKey,
-        mikrotik,
-        cisco,
         others,
         otherCols,
-        width: Math.max(TOPO_ZONE_MIN_WIDTH, Math.max(...rowWidths) + TOPO_ZONE_PAD_X * 2),
+        width: Math.max(TOPO_ZONE_MIN_WIDTH, rowWidth + TOPO_ZONE_PAD_X * 2),
         height: Math.max(
           TOPO_NODE_HEIGHT + TOPO_ZONE_PAD_TOP + TOPO_ZONE_PAD_BOTTOM,
           contentBottom + TOPO_ZONE_PAD_BOTTOM
         ),
       };
     });
-
-  const pos = new Map<string, { x: number; y: number }>();
-  const maxLayoutWidth = Math.min(TOPO_LAYOUT_MAX_WIDTH, Math.max(760, stageWidth - TOPO_STAGE_SIDE_PADDING * 2));
-  const rows: Array<{ plans: typeof zonePlans; width: number; height: number }> = [];
-  let currentRow: { plans: typeof zonePlans; width: number; height: number } = { plans: [], width: 0, height: 0 };
-
-  zonePlans.forEach((plan) => {
-    const nextWidth = currentRow.width === 0 ? plan.width : currentRow.width + TOPO_ZONE_GAP_X + plan.width;
-    if (currentRow.plans.length && nextWidth > maxLayoutWidth) {
-      rows.push(currentRow);
-      currentRow = { plans: [plan], width: plan.width, height: plan.height };
-      return;
-    }
-    currentRow.plans.push(plan);
-    currentRow.width = nextWidth;
-    currentRow.height = Math.max(currentRow.height, plan.height);
-  });
-  if (currentRow.plans.length) rows.push(currentRow);
 
   const placeRow = (items: Switch[], zoneX: number, zoneWidth: number, baseY: number, maxCols: number) => {
     if (!items.length) return;
@@ -229,21 +225,66 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
     }
   };
 
-  let rowY = 90;
+  const pos = new Map<string, { x: number; y: number }>();
+  const vendorGroups = [
+    { key: 'mikrotik', switches: priorityMikroTik },
+    { key: 'cisco', switches: priorityCisco },
+  ]
+    .filter((group) => group.switches.length > 0)
+    .map((group) => {
+      const cols = Math.max(1, Math.min(TOPO_VENDOR_MAX_COLUMNS, group.switches.length));
+      const rows = Math.max(1, Math.ceil(group.switches.length / cols));
+      return {
+        ...group,
+        cols,
+        width: Math.max(TOPO_ZONE_MIN_WIDTH, cols * TOPO_NODE_WIDTH + Math.max(0, cols - 1) * (TOPO_COLUMN_GAP - TOPO_NODE_WIDTH) + TOPO_ZONE_PAD_X * 2),
+        height: TOPO_ROW_TOP_Y + (rows - 1) * TOPO_ROW_HEIGHT + TOPO_NODE_HEIGHT + TOPO_ZONE_PAD_BOTTOM,
+      };
+    });
+  const vendorLayerWidth = vendorGroups.reduce(
+    (total, group, index) => total + group.width + (index > 0 ? TOPO_VENDOR_GROUP_GAP_X : 0),
+    0
+  );
+  let rowY = 70;
+  if (vendorGroups.length > 0) {
+    let vendorX = Math.max(TOPO_STAGE_SIDE_PADDING, stageWidth / 2 - vendorLayerWidth / 2);
+    vendorGroups.forEach((vendorGroup) => {
+      placeRow(vendorGroup.switches, vendorX, vendorGroup.width, rowY + TOPO_ROW_TOP_Y, vendorGroup.cols);
+      vendorX += vendorGroup.width + TOPO_VENDOR_GROUP_GAP_X;
+    });
+    rowY += Math.max(...vendorGroups.map((vendorGroup) => vendorGroup.height)) + TOPO_VENDOR_LAYER_GAP_Y;
+  }
+
+  const rows: Array<{ plans: typeof zonePlans; width: number; height: number }> = [];
+  let currentRow: { plans: typeof zonePlans; width: number; height: number } = { plans: [], width: 0, height: 0 };
+  zonePlans.forEach((plan) => {
+    const nextWidth = currentRow.width === 0 ? plan.width : currentRow.width + TOPO_ZONE_GAP_X + plan.width;
+    if (
+      currentRow.plans.length &&
+      (currentRow.plans.length >= TOPO_MAX_ZONE_COLUMNS_PER_ROW || nextWidth > layoutWidth)
+    ) {
+      rows.push(currentRow);
+      currentRow = { plans: [plan], width: plan.width, height: plan.height };
+      return;
+    }
+    currentRow.plans.push(plan);
+    currentRow.width = nextWidth;
+    currentRow.height = Math.max(currentRow.height, plan.height);
+  });
+  if (currentRow.plans.length) rows.push(currentRow);
+
   rows.forEach((row, rowIndex) => {
     const rowOffset = rowIndex % 2 === 1 ? TOPO_ROW_STAGGER_X : 0;
     let zoneX = Math.max(TOPO_STAGE_SIDE_PADDING, stageWidth / 2 - row.width / 2 + rowOffset);
     row.plans.forEach((plan) => {
-      placeRow(plan.mikrotik, zoneX, plan.width, rowY + TOPO_ROW_TOP_Y, Math.max(1, Math.min(3, plan.mikrotik.length || 1)));
-      placeRow(plan.cisco, zoneX, plan.width, rowY + TOPO_ROW_SECOND_Y, Math.max(1, Math.min(4, plan.cisco.length || 1)));
-      placeRow(plan.others, zoneX, plan.width, rowY + TOPO_ROW_THIRD_Y, plan.otherCols);
+      placeRow(plan.others, zoneX, plan.width, rowY + TOPO_ROW_TOP_Y, plan.otherCols);
       zoneX += plan.width + TOPO_ZONE_GAP_X;
     });
     rowY += row.height + TOPO_ZONE_GAP_Y;
   });
 
   return switches.map((sw) => {
-    const p = pos.get(sw.id) || { x: 35, y: 90 + TOPO_ROW_THIRD_Y };
+    const p = pos.get(sw.id) || { x: 35, y: rowY + TOPO_ROW_TOP_Y };
     return { ...sw, x: p.x, y: p.y };
   });
 }
@@ -267,6 +308,7 @@ const mergeManualAnchors = (
     const saved = savedLayout[n.id];
     if (!saved) return n;
     if (!Number.isFinite(saved.x) || !Number.isFinite(saved.y)) return n;
+    if (isPriorityVendorSwitch(n)) return n;
     if (isLikelyLegacyAutoPosition(n, saved, legacyPositions)) return n;
     return { ...n, x: Number(saved.x), y: Number(saved.y) };
   });
@@ -841,7 +883,11 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   const zoneBoxes = React.useMemo(() => {
     const map = new Map<string, NodeWithPos[]>();
     nodes.forEach((node) => {
-      const zoneKey = deriveZoneKey(node.name);
+      const zoneKey = isMikroTikSwitch(node)
+        ? '__vendor_mikrotik__'
+        : isCiscoSwitch(node)
+          ? '__vendor_cisco__'
+          : deriveZoneKey(node.name);
       if (!zoneKey) return;
       if (!map.has(zoneKey)) map.set(zoneKey, []);
       map.get(zoneKey)!.push(node);
@@ -854,14 +900,18 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
         const maxY = Math.max(...zoneNodes.map((n) => n.y + TOPO_NODE_HEIGHT));
         return {
           zoneKey,
-          label: zoneLabel(zoneKey),
+          label: zoneKey === '__vendor_mikrotik__' ? 'MikroTik' : zoneKey === '__vendor_cisco__' ? 'Cisco' : zoneLabel(zoneKey),
           x: minX - TOPO_ZONE_PAD_X,
           y: minY - TOPO_ZONE_PAD_TOP,
           width: Math.max(TOPO_ZONE_MIN_WIDTH, maxX - minX + TOPO_ZONE_PAD_X * 2),
           height: Math.max(TOPO_NODE_HEIGHT + TOPO_ZONE_PAD_TOP + TOPO_ZONE_PAD_BOTTOM, maxY - minY + TOPO_ZONE_PAD_TOP + TOPO_ZONE_PAD_BOTTOM),
         };
       })
-      .sort((a, b) => a.zoneKey.localeCompare(b.zoneKey));
+      .sort((a, b) => {
+        const order = (key: string) => (key === '__vendor_mikrotik__' ? 0 : key === '__vendor_cisco__' ? 1 : 2);
+        const priority = order(a.zoneKey) - order(b.zoneKey);
+        return priority || a.zoneKey.localeCompare(b.zoneKey);
+      });
   }, [nodes, zoneLabel]);
   const editingLink = React.useMemo(
     () => visibleLinks.find((l) => l.id === editingLinkId) || null,
@@ -914,25 +964,28 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
         const x2 = end.x + nx * laneOffset;
         const y2 = end.y + ny * laneOffset;
         const labelText = getLinkLabel(link);
+        const isTrunk = isTrunkTopologyLink(link, labelText);
+        const displayLabel = isTrunk ? `TRUNK ${labelText}` : labelText;
         const laneDistance = Math.abs(idx - (orderedGroup.length - 1) / 2);
         const labelLineOffset = 22 + laneDistance * 4;
         const tangentShift = (idx % 2 === 0 ? 1 : -1) * Math.ceil(idx / 2) * 12;
         const labelX = (x1 + x2) / 2 + nx * labelLineOffset + tx * tangentShift;
         const labelY = (y1 + y2) / 2 + ny * labelLineOffset + ty * tangentShift;
-        const labelWidth = Math.max(42, Math.ceil(labelText.length * 5.8 + 12));
-        const labelHeight = 14;
+        const labelWidth = Math.max(52, Math.ceil(displayLabel.length * 6.1 + 16));
+        const labelHeight = 16;
         return {
           link,
           idx,
+          isTrunk,
           linePoints: [x1, y1, x2, y2] as [number, number, number, number],
-          labelText,
+          labelText: displayLabel,
           labelX,
           labelY,
           labelWidth,
           labelHeight,
         };
       });
-    });
+    }).sort((a, b) => Number(a.isTrunk) - Number(b.isTrunk));
   }, [visibleLinks, nodes, getLinkLabel]);
   const openLinkEditor = React.useCallback((link: TopoLink) => {
     if (!canEditTopology) return;
@@ -1313,17 +1366,45 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                 listening={false}
               />
             ))}
-            {visibleLinks.map((link, i) => {
-              const start = getNodeCenter(link.source);
-              const end = getNodeCenter(link.target);
+            {renderedLinks.map((rendered, i) => {
+              const link = rendered.link;
               const linkId = link.id || `${link.source}::${link.target}::${i}`;
+              const isTrunk = rendered.isTrunk;
+              const isEditing = editingLinkId === link.id;
+              const lineColor = isTrunk ? TOPO_TRUNK_STROKE : link.manual ? TOPO_MANUAL_LINK_STROKE : TOPO_REGULAR_LINK_STROKE;
+              const labelX = rendered.labelX - rendered.labelWidth / 2;
+              const labelY = rendered.labelY - rendered.labelHeight / 2;
               return (
                 <React.Fragment key={`link-${linkId}`}>
                   <Line
-                    points={[start.x, start.y, end.x, end.y]}
-                    stroke="#228be6"
-                    strokeWidth={1}
-                    opacity={0.5}
+                    points={rendered.linePoints}
+                    stroke={isEditing ? '#ffffff' : lineColor}
+                    strokeWidth={isTrunk ? 4.4 : 1.6}
+                    opacity={isTrunk ? 0.96 : 0.46}
+                    dash={isTrunk ? undefined : [8, 6]}
+                    lineCap="round"
+                    lineJoin="round"
+                    shadowColor={isTrunk ? TOPO_TRUNK_STROKE : undefined}
+                    shadowBlur={isTrunk ? 8 : 0}
+                    shadowOpacity={isTrunk ? 0.35 : 0}
+                    onMouseDown={(e) => {
+                      e.cancelBubble = true;
+                    }}
+                    onDblClick={(e) => {
+                      e.cancelBubble = true;
+                      openLinkEditor(link);
+                    }}
+                  />
+                  <Rect
+                    x={labelX}
+                    y={labelY}
+                    width={rendered.labelWidth}
+                    height={rendered.labelHeight}
+                    cornerRadius={6}
+                    fill={isTrunk ? TOPO_TRUNK_LABEL_FILL : TOPO_REGULAR_LABEL_FILL}
+                    stroke={isEditing ? '#ffffff' : isTrunk ? TOPO_TRUNK_LABEL_STROKE : TOPO_REGULAR_LABEL_STROKE}
+                    strokeWidth={isEditing ? 1.2 : isTrunk ? 1.1 : 0.8}
+                    opacity={isTrunk ? 1 : 0.88}
                     onMouseDown={(e) => {
                       e.cancelBubble = true;
                     }}
@@ -1333,12 +1414,16 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                     }}
                   />
                   <Text
-                    x={(start.x + end.x) / 2}
-                    y={(start.y + end.y) / 2 - 10}
-                    text={getLinkLabel(link)}
-                    fill={editingLinkId === link.id ? "#ffffff" : "#5c5f66"}
-                    fontSize={9}
+                    x={labelX}
+                    y={labelY + 1}
+                    width={rendered.labelWidth}
+                    height={rendered.labelHeight}
+                    text={rendered.labelText}
+                    fill={isEditing ? "#ffffff" : isTrunk ? "#fff4e6" : "#ced4da"}
+                    fontSize={10}
+                    fontStyle="bold"
                     align="center"
+                    verticalAlign="middle"
                     onMouseDown={(e) => {
                       e.cancelBubble = true;
                     }}
