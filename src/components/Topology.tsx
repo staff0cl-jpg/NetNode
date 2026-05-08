@@ -33,9 +33,26 @@ const apiErrorDetailText = (value: unknown, httpStatus?: number) => {
 
 const readApiPayload = async (response: Response, fallback: string) => {
   const raw = await response.text();
+  const contentType = response.headers.get('content-type') || '';
   try {
     return raw ? JSON.parse(raw) : {};
   } catch {
+    const looksLikeHtml = /text\/html/i.test(contentType) || /^\s*<!doctype html/i.test(raw) || /^\s*<html/i.test(raw);
+    if (looksLikeHtml) {
+      if (response.status === 504) {
+        return {
+          error: 'Gateway timeout from proxy',
+          detail: 'The backend task took too long for the reverse proxy timeout.',
+          source: 'proxy',
+          code: 'gateway_timeout',
+        };
+      }
+      return {
+        error: 'Unexpected HTML error response from proxy',
+        source: 'proxy',
+        code: 'proxy_html_error',
+      };
+    }
     return { error: safeErrorText(raw, fallback) };
   }
 };

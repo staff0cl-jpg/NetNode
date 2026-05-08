@@ -79,9 +79,26 @@ const apiErrorDetailText = (value: unknown, httpStatus?: number) => {
 
 const readApiPayload = async (response: Response, fallback: string) => {
   const raw = await response.text();
+  const contentType = response.headers.get('content-type') || '';
   try {
     return raw ? JSON.parse(raw) : {};
   } catch {
+    const looksLikeHtml = /text\/html/i.test(contentType) || /^\s*<!doctype html/i.test(raw) || /^\s*<html/i.test(raw);
+    if (looksLikeHtml) {
+      if (response.status === 504) {
+        return {
+          error: 'Gateway timeout from proxy',
+          detail: 'The backend task took too long for the reverse proxy timeout.',
+          source: 'proxy',
+          code: 'gateway_timeout',
+        };
+      }
+      return {
+        error: 'Unexpected HTML error response from proxy',
+        source: 'proxy',
+        code: 'proxy_html_error',
+      };
+    }
     return { error: safeErrorText(raw, fallback) };
   }
 };
@@ -114,6 +131,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
     lastTickAt: string | null;
     lastProcessedProfiles: number;
     currentlyRunning: boolean;
+    activeManualWatchRunJobId?: string | null;
     enabledProfiles: number;
     nextRuns: Array<{ id: string; name: string; nextRunAt: string; dueInMs: number }>;
     serverNow: string;
@@ -521,26 +539,67 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         },
         body: JSON.stringify(profileId ? { profileIds: [profileId] } : {}),
       });
-      const data = await readApiPayload(response, 'Discovery watch run now failed');
+      const data = await readApiPayload(response, 'Discovery watch run start failed');
       if (!response.ok) {
-        alert(operationFailedMessage('Discovery watch run now', data, response.status));
+        alert(operationFailedMessage('Discovery watch run start', data, response.status));
         return;
       }
-      if (Array.isArray(data.profiles)) setWatchProfiles(data.profiles);
-      try {
-        const statusResp = await fetch('/api/discovery/watch/status', {
+      const jobId = String(data.jobId || '').trim();
+      if (!jobId) {
+        alert('Discovery watch run was accepted but no job id was returned');
+        return;
+      }
+
+      let attempts = 0;
+      const maxAttempts = 180; // ~6 minutes at 2s polling
+      const poll = async () => {
+        attempts += 1;
+        const statusResp = await fetch(`/api/discovery/watch/run/status/${encodeURIComponent(jobId)}`, {
           headers: {
             'x-user-role': role || 'viewer',
             'x-user-name': username || 'unknown'
           }
         });
-        if (statusResp.ok) setWatchStatus(await statusResp.json());
-      } catch {
-        /* ignore */
-      }
-      alert(`Profiles run: ${(data.runs || []).length}`);
+        const statusData = await readApiPayload(statusResp, 'Discovery watch status check failed');
+        if (!statusResp.ok) {
+          throw new Error(operationFailedMessage('Discovery watch status check', statusData, statusResp.status));
+        }
+
+        if (Array.isArray(statusData.profiles)) setWatchProfiles(statusData.profiles);
+        try {
+          const watchResp = await fetch('/api/discovery/watch/status', {
+            headers: {
+              'x-user-role': role || 'viewer',
+              'x-user-name': username || 'unknown'
+            }
+          });
+          if (watchResp.ok) setWatchStatus(await watchResp.json());
+        } catch {
+          /* ignore */
+        }
+
+        if (statusData.status === 'running') {
+          if (attempts >= maxAttempts) {
+            alert('Discovery watch run is still running. Check status again in a minute.');
+            return;
+          }
+          window.setTimeout(() => {
+            poll().catch((e) => alert(operationFailedMessage('Discovery watch status check', e instanceof Error ? e.message : e)));
+          }, 2000);
+          return;
+        }
+
+        if (statusData.status === 'error') {
+          alert(operationFailedMessage('Discovery watch run', statusData, 500));
+          return;
+        }
+
+        alert(`Profiles run: ${(statusData.runs || []).length}`);
+      };
+
+      poll().catch((e) => alert(operationFailedMessage('Discovery watch run', e instanceof Error ? e.message : e)));
     } catch (e) {
-      alert(operationFailedMessage('Discovery watch run now request', e instanceof Error ? e.message : e));
+      alert(operationFailedMessage('Discovery watch run start request', e instanceof Error ? e.message : e));
     }
   };
 

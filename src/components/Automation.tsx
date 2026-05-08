@@ -33,9 +33,26 @@ const apiErrorDetailText = (value: unknown, httpStatus?: number) => {
 
 const readApiPayload = async (response: Response, fallback: string) => {
   const raw = await response.text();
+  const contentType = response.headers.get('content-type') || '';
   try {
     return raw ? JSON.parse(raw) : {};
   } catch {
+    const looksLikeHtml = /text\/html/i.test(contentType) || /^\s*<!doctype html/i.test(raw) || /^\s*<html/i.test(raw);
+    if (looksLikeHtml) {
+      if (response.status === 504) {
+        return {
+          error: 'Gateway timeout from proxy',
+          detail: 'The backend task took too long for the reverse proxy timeout.',
+          source: 'proxy',
+          code: 'gateway_timeout',
+        };
+      }
+      return {
+        error: 'Unexpected HTML error response from proxy',
+        source: 'proxy',
+        code: 'proxy_html_error',
+      };
+    }
     return { error: safeErrorText(raw, fallback) };
   }
 };
@@ -108,6 +125,11 @@ type MacSearchResult = {
   ifIndex?: string;
   vlan?: number;
   voiceVlan?: number;
+  voiceCandidate?: boolean;
+  matchedOui?: string;
+  expectedVoiceVlan?: number;
+  detectedVoiceVlan?: number;
+  voiceVlanMatch?: 'match' | 'mismatch' | 'unknown' | 'not_voice_candidate';
   source: string;
   timestamp: string;
 };
@@ -147,12 +169,14 @@ interface AutomationProps {
 }
 
 type AutomationTabKey = 'execution' | 'macOid' | 'backup';
+type ExecutionFlowTabKey = 'scenario' | 'targeting';
 
 const Automation: React.FC<AutomationProps> = ({ role, username }) => {
   const { t } = useTranslation();
   const canApply = role === 'admin' || role === 'operator';
   const isAdmin = role === 'admin';
   const [activeTab, setActiveTab] = React.useState<AutomationTabKey>('execution');
+  const [executionFlowTab, setExecutionFlowTab] = React.useState<ExecutionFlowTabKey>('scenario');
 
   const [scenario, setScenario] = React.useState<Scenario>('create-vlan');
   const [scope, setScope] = React.useState<Scope>('all');
@@ -200,6 +224,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
       dot1dBasePortIfIndexOid: '1.3.6.1.2.1.17.1.4.1.2',
       dot1qTpFdbPortOid: '1.3.6.1.2.1.17.7.1.2.2.1.2',
       voiceVlanMacOid: '1.3.6.1.4.1.9.9.315.1.2.3.1.1',
+      voiceOuiPrefixes: '',
     },
   });
   const [backupConfig, setBackupConfig] = React.useState({
@@ -460,6 +485,17 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
     depth_limit: 'Hop limit reached',
   };
 
+  const voiceVlanStatusText = (result: MacSearchResult) => {
+    if (!result.voiceCandidate) return t('automationVoiceNotCandidate');
+    const expected = result.expectedVoiceVlan ?? result.voiceVlan;
+    const detected = result.detectedVoiceVlan ?? result.vlan;
+    if (result.voiceVlanMatch === 'match') return t('automationVoiceVlanMatch');
+    if (result.voiceVlanMatch === 'mismatch') {
+      return `${t('automationVoiceVlanMismatch')}: ${t('automationVoiceExpected')} ${expected ?? '-'} / ${t('automationVoiceDetected')} ${detected ?? '-'}`;
+    }
+    return `${t('automationVoiceVlanUnknown')}: ${t('automationVoiceExpected')} ${expected ?? '-'} / ${t('automationVoiceDetected')} ${detected ?? '-'}`;
+  };
+
   React.useEffect(() => {
     const loadEnterpriseConfig = async () => {
       try {
@@ -473,6 +509,9 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
                 dot1dBasePortIfIndexOid: snmpData.snmp.macSearch?.dot1dBasePortIfIndexOid || '1.3.6.1.2.1.17.1.4.1.2',
                 dot1qTpFdbPortOid: snmpData.snmp.macSearch?.dot1qTpFdbPortOid || '1.3.6.1.2.1.17.7.1.2.2.1.2',
                 voiceVlanMacOid: snmpData.snmp.macSearch?.voiceVlanMacOid || '1.3.6.1.4.1.9.9.315.1.2.3.1.1',
+                voiceOuiPrefixes: Array.isArray(snmpData.snmp.macSearch?.voiceOuiPrefixes)
+                  ? snmpData.snmp.macSearch.voiceOuiPrefixes.join('\n')
+                  : String(snmpData.snmp.macSearch?.voiceOuiPrefixes || ''),
               },
             });
           }
@@ -604,6 +643,10 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
         : 'automationScopeHintSelected';
   const actionButtonBase =
     'px-4 py-2 rounded text-[10px] font-bold uppercase tracking-widest transition-colors disabled:opacity-50';
+  const executionFlowTabs: Array<{ key: ExecutionFlowTabKey; label: string; hint: string }> = [
+    { key: 'scenario', label: t('automationScenario'), hint: t('automationScenarioTabHint') },
+    { key: 'targeting', label: t('automationTargetingTab'), hint: t('automationTargetingTabHint') },
+  ];
 
   return (
     <div className="p-4 md:p-8 animate-in slide-in-from-bottom-5 duration-700 space-y-6">
@@ -639,8 +682,8 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
         <p className="mt-2 px-1 text-[11px] text-[#909296]">{tabDescriptions[activeTab]}</p>
       </nav>
 
-      {activeTab === 'execution' && <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        <section className="xl:col-span-2 space-y-6">
+      {activeTab === 'execution' && <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 md:gap-6">
+        <section className="xl:col-span-7 space-y-6">
           <div className="bg-[#25262b] border border-[#373a40] rounded overflow-hidden">
             <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
               <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('automationMacSearchTitle')}</h3>
@@ -782,8 +825,13 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
                 </div>
               )}
               <div className="max-h-[260px] overflow-auto space-y-2">
-                {macMode === 'single' && !macResults.length && <div className="text-xs text-[#909296]">{t('automationMacSearchNoResults')}</div>}
-                {macMode === 'single' &&
+                {!macResults.length && (macMode === 'single' || macTraceResult) && <div className="text-xs text-[#909296]">{t('automationMacSearchNoResults')}</div>}
+                {macResults.length > 0 && (
+                  <div className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">
+                    {t('automationMacSearchTitle')}
+                  </div>
+                )}
+                {macResults.length > 0 &&
                   macResults.map((result, idx) => (
                     <div key={`${result.deviceId}-${idx}`} className="border border-[#373a40] rounded p-3 bg-[#141517]">
                       <div className="text-xs text-white font-semibold">
@@ -791,6 +839,11 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
                       </div>
                       <div className="text-[11px] text-[#909296] mt-1">
                         MAC {result.mac} | VLAN {result.vlan ?? '-'} | Voice VLAN {result.voiceVlan ?? '-'} | {result.vendor}
+                      </div>
+                      <div className={cn('text-[11px] mt-1', result.voiceCandidate ? 'text-[#fab005]' : 'text-[#5c5f66]')}>
+                        {t('automationVoiceCandidate')}: {result.voiceCandidate ? t('yes') : t('no')}
+                        {result.matchedOui ? ` | ${t('automationMatchedOui')} ${result.matchedOui}` : ''}
+                        {` | ${voiceVlanStatusText(result)}`}
                       </div>
                       <div className="text-[10px] text-[#5c5f66] mt-1">{result.timestamp}</div>
                     </div>
@@ -804,109 +857,140 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
               <Bot className="text-[#228be6]" size={18} />
               <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('automationWizard')}</h3>
             </div>
-            <div className="p-4 md:p-6 space-y-6">
+            <div className="p-4 md:p-6 space-y-4">
               <div className="space-y-2">
-                <p className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">1. {t('automationScenario')}</p>
-                <select
-                  value={scenario}
-                  onChange={(e) => setScenario(e.target.value as Scenario)}
-                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                >
-                  <option value="create-vlan">{t('automationScenarioCreateVlan')}</option>
-                  <option value="allow-vlan-on-trunk">{t('automationScenarioAllowOnTrunk')}</option>
-                </select>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <p className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('automationVlanId')}</p>
-                  <input
-                    type="number"
-                    min={1}
-                    max={4094}
-                    value={vlanId}
-                    onChange={(e) => setVlanId(Number(e.target.value) || 1)}
-                    className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <p className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('automationVlanName')}</p>
-                  <input
-                    value={vlanName}
-                    onChange={(e) => setVlanName(e.target.value)}
-                    className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                    placeholder="AUTO_VLAN_100"
-                  />
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <p className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">2. {t('automationTargetScope')}</p>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                  {(['all', 'selected', 'filter'] as Scope[]).map((value) => (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {executionFlowTabs.map((tab) => (
                     <button
-                      key={value}
+                      key={tab.key}
                       type="button"
-                      onClick={() => setScope(value)}
+                      onClick={() => setExecutionFlowTab(tab.key)}
                       className={cn(
-                        'px-3 py-2 rounded text-xs font-bold uppercase tracking-wider border',
-                        scope === value
+                        'px-3 py-2 rounded text-xs font-bold uppercase tracking-wider border text-left',
+                        executionFlowTab === tab.key
                           ? 'bg-[#228be6] border-[#228be6] text-white'
                           : 'bg-[#141517] border-[#373a40] text-[#909296] hover:text-white'
                       )}
                     >
-                      {value === 'all' ? t('automationScopeAll') : value === 'selected' ? t('automationScopeSelected') : t('automationScopeFilter')}
+                      {tab.label}
                     </button>
                   ))}
                 </div>
+                <p className="text-[10px] text-[#5c5f66]">
+                  {executionFlowTabs.find((tab) => tab.key === executionFlowTab)?.hint}
+                </p>
               </div>
 
-              {scope === 'selected' && (
-                <div className="space-y-2">
-                  <p className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('automationSelectDevices')}</p>
-                  <select
-                    multiple
-                    value={selectedDeviceIds}
-                    onChange={(e) =>
-                      setSelectedDeviceIds(Array.from(e.target.selectedOptions).map((opt) => opt.value))
-                    }
-                    className="w-full min-h-[140px] bg-[#141517] border border-[#373a40] p-2 rounded text-xs text-white"
-                  >
-                    {inventory.map((device) => (
-                      <option key={device.id} value={device.id}>
-                        {device.name} ({device.ip}) {device.vendor ? `- ${device.vendor}` : ''}
-                      </option>
-                    ))}
-                  </select>
+              {executionFlowTab === 'scenario' && (
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <p className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">1. {t('automationScenario')}</p>
+                    <select
+                      value={scenario}
+                      onChange={(e) => setScenario(e.target.value as Scenario)}
+                      className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                    >
+                      <option value="create-vlan">{t('automationScenarioCreateVlan')}</option>
+                      <option value="allow-vlan-on-trunk">{t('automationScenarioAllowOnTrunk')}</option>
+                    </select>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="space-y-2">
+                      <p className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('automationVlanId')}</p>
+                      <input
+                        type="number"
+                        min={1}
+                        max={4094}
+                        value={vlanId}
+                        onChange={(e) => setVlanId(Number(e.target.value) || 1)}
+                        className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <p className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('automationVlanName')}</p>
+                      <input
+                        value={vlanName}
+                        onChange={(e) => setVlanName(e.target.value)}
+                        className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                        placeholder="AUTO_VLAN_100"
+                      />
+                    </div>
+                  </div>
                 </div>
               )}
 
-              <div className="space-y-4">
-                <p className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">3. {t('automationFiltersAndPorts')}</p>
-                {scope === 'filter' && (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={vendorFilter} onChange={(e) => setVendorFilter(e.target.value)} placeholder={t('automationVendorFilter')} />
-                    <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={modelFilter} onChange={(e) => setModelFilter(e.target.value)} placeholder={t('automationModelFilter')} />
-                    <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={branchFilter} onChange={(e) => setBranchFilter(e.target.value)} placeholder={t('automationBranchFilter')} />
-                    <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} placeholder={t('automationCategoryFilter')} />
-                    <input className="md:col-span-2 bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={subcategoryFilter} onChange={(e) => setSubcategoryFilter(e.target.value)} placeholder={t('automationSubcategoryFilter')} />
+              {executionFlowTab === 'targeting' && (
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <p className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">2. {t('automationTargetScope')}</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      {(['all', 'selected', 'filter'] as Scope[]).map((value) => (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => setScope(value)}
+                          className={cn(
+                            'px-3 py-2 rounded text-xs font-bold uppercase tracking-wider border',
+                            scope === value
+                              ? 'bg-[#228be6] border-[#228be6] text-white'
+                              : 'bg-[#141517] border-[#373a40] text-[#909296] hover:text-white'
+                          )}
+                        >
+                          {value === 'all' ? t('automationScopeAll') : value === 'selected' ? t('automationScopeSelected') : t('automationScopeFilter')}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                )}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={ifNameRegex} onChange={(e) => setIfNameRegex(e.target.value)} placeholder={t('automationIfNameRegex')} />
-                  <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={descriptionContains} onChange={(e) => setDescriptionContains(e.target.value)} placeholder={t('automationDescriptionContains')} />
+
+                  {scope === 'selected' && (
+                    <div className="space-y-2">
+                      <p className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('automationSelectDevices')}</p>
+                      <select
+                        multiple
+                        value={selectedDeviceIds}
+                        onChange={(e) =>
+                          setSelectedDeviceIds(Array.from(e.target.selectedOptions).map((opt) => opt.value))
+                        }
+                        className="w-full h-32 bg-[#141517] border border-[#373a40] p-2 rounded text-xs text-white"
+                      >
+                        {inventory.map((device) => (
+                          <option key={device.id} value={device.id}>
+                            {device.name} ({device.ip}) {device.vendor ? `- ${device.vendor}` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  <div className="space-y-3">
+                    <p className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">3. {t('automationFiltersAndPorts')}</p>
+                    {scope === 'filter' && (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={vendorFilter} onChange={(e) => setVendorFilter(e.target.value)} placeholder={t('automationVendorFilter')} />
+                        <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={modelFilter} onChange={(e) => setModelFilter(e.target.value)} placeholder={t('automationModelFilter')} />
+                        <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={branchFilter} onChange={(e) => setBranchFilter(e.target.value)} placeholder={t('automationBranchFilter')} />
+                        <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} placeholder={t('automationCategoryFilter')} />
+                        <input className="md:col-span-2 bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={subcategoryFilter} onChange={(e) => setSubcategoryFilter(e.target.value)} placeholder={t('automationSubcategoryFilter')} />
+                      </div>
+                    )}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={ifNameRegex} onChange={(e) => setIfNameRegex(e.target.value)} placeholder={t('automationIfNameRegex')} />
+                      <input className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white" value={descriptionContains} onChange={(e) => setDescriptionContains(e.target.value)} placeholder={t('automationDescriptionContains')} />
+                    </div>
+                    <div className="flex flex-wrap gap-4">
+                      <label className="flex items-center gap-2 text-xs text-[#c1c2c5]">
+                        <input type="checkbox" checked={trunkOnly} onChange={(e) => setTrunkOnly(e.target.checked)} />
+                        {t('automationTrunkOnly')}
+                      </label>
+                      <label className="flex items-center gap-2 text-xs text-[#c1c2c5]">
+                        <input type="checkbox" checked={operStatusUp} onChange={(e) => setOperStatusUp(e.target.checked)} />
+                        {t('automationOperStatusUp')}
+                      </label>
+                    </div>
+                  </div>
                 </div>
-                <div className="flex flex-wrap gap-4">
-                  <label className="flex items-center gap-2 text-xs text-[#c1c2c5]">
-                    <input type="checkbox" checked={trunkOnly} onChange={(e) => setTrunkOnly(e.target.checked)} />
-                    {t('automationTrunkOnly')}
-                  </label>
-                  <label className="flex items-center gap-2 text-xs text-[#c1c2c5]">
-                    <input type="checkbox" checked={operStatusUp} onChange={(e) => setOperStatusUp(e.target.checked)} />
-                    {t('automationOperStatusUp')}
-                  </label>
-                </div>
-              </div>
+              )}
 
               <div className="pt-4 border-t border-[#373a40] flex flex-wrap gap-2 items-center">
                 <button
@@ -943,7 +1027,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
                 </span>
               )}
             </div>
-            <div className="p-4 max-h-[320px] overflow-auto space-y-2">
+            <div className="p-4 max-h-[260px] md:max-h-[320px] overflow-auto space-y-2">
               {!previewSteps.length && <div className="text-xs text-[#909296]">{t('automationNoPreview')}</div>}
               {previewSteps.map((step) => (
                 <div key={step.id} className="border border-[#373a40] rounded p-3 bg-[#141517]">
@@ -960,7 +1044,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
           </div>
         </section>
 
-        <section className="space-y-6">
+        <section className="xl:col-span-5 space-y-6">
           <div className="bg-[#25262b] border border-[#373a40] rounded overflow-hidden">
             <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center justify-between">
               <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('automationJobs')}</h3>
@@ -1085,6 +1169,17 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
                 value={snmpConfig.macSearch.voiceVlanMacOid}
                 onChange={(e) => setSnmpConfig({ ...snmpConfig, macSearch: { ...snmpConfig.macSearch, voiceVlanMacOid: e.target.value } })}
               />
+            </div>
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('settingsVoiceOuiPrefixes')}</label>
+              <textarea
+                rows={5}
+                className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                value={snmpConfig.macSearch.voiceOuiPrefixes}
+                onChange={(e) => setSnmpConfig({ ...snmpConfig, macSearch: { ...snmpConfig.macSearch, voiceOuiPrefixes: e.target.value } })}
+                placeholder="00:04:f2&#10;00:90:8f&#10;aabbcc"
+              />
+              <p className="text-[10px] text-[#5c5f66]">{t('settingsVoiceOuiPrefixesHelp')}</p>
             </div>
             <div className="flex justify-end">
               <button
