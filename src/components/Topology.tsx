@@ -102,15 +102,15 @@ const TOPO_COLUMN_GAP = TOPO_NODE_WIDTH + 120;
 const TOPO_ZONE_GAP_X = 180;
 const TOPO_ZONE_GAP_Y = 120;
 const TOPO_ROW_STAGGER_X = 120;
-const TOPO_VENDOR_GROUP_GAP_X = 220;
-const TOPO_VENDOR_LAYER_GAP_Y = 150;
-const TOPO_VENDOR_MAX_COLUMNS = 5;
+const TOPO_VENDOR_LAYER_GAP_Y = 130;
+const TOPO_VENDOR_MAX_COLUMNS = 7;
 const TOPO_ZONE_MIN_WIDTH = TOPO_NODE_WIDTH + TOPO_ZONE_PAD_X * 2;
-const TOPO_MAX_COLUMNS = 8;
-const TOPO_MAX_ZONE_COLUMNS_PER_ROW = 5;
+const TOPO_MAX_COLUMNS = 10;
+const TOPO_MAX_ZONE_COLUMNS_PER_ROW = 7;
 const TOPO_STAGE_SIDE_PADDING = 35;
-const TOPO_LAYOUT_MAX_WIDTH = 1900;
+const TOPO_LAYOUT_MAX_WIDTH = 2400;
 const TOPO_LAYOUT_FIT_SCALE = 0.82;
+const TOPO_BARYCENTER_ITERATIONS = 6;
 
 const TOPO_TRUNK_STROKE = '#ff922b';
 const TOPO_TRUNK_LABEL_FILL = 'rgba(255, 146, 43, 0.18)';
@@ -170,7 +170,6 @@ function computeLegacyFlatLayout(switches: Switch[], links: TopoLink[], cw: numb
 
 function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: number): NodeWithPos[] {
   if (switches.length === 0) return [];
-  void links;
   void ch;
   const stageWidth = Math.max(cw, 1100);
   const layoutWidth = Math.min(
@@ -182,17 +181,120 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
     .filter((sw) => !isMikroTikSwitch(sw) && isCiscoSwitch(sw))
     .sort(sortSwitchesByNameThenId);
   const lowerSwitches = switches.filter((sw) => !isPriorityVendorSwitch(sw));
+  const allSortedSwitches = [...switches].sort(sortSwitchesByNameThenId);
+  const nodeIndex = new Map(allSortedSwitches.map((sw, idx) => [sw.id, idx]));
+  const switchById = new Map(switches.map((sw) => [sw.id, sw]));
+  const zoneKeyForSwitch = (sw: Switch) => deriveZoneKey(sw.name) || '__ungrouped__';
+  const weightedCenter = (entries: Array<{ value: number; weight: number }>, fallback: number) => {
+    let totalWeight = 0;
+    let weightedSum = 0;
+    entries.forEach((entry) => {
+      if (entry.weight <= 0 || !Number.isFinite(entry.value)) return;
+      totalWeight += entry.weight;
+      weightedSum += entry.value * entry.weight;
+    });
+    return totalWeight > 0 ? weightedSum / totalWeight : fallback;
+  };
   const zones = new Map<string, Switch[]>();
   lowerSwitches.forEach((sw) => {
-    const zoneKey = deriveZoneKey(sw.name) || '__ungrouped__';
+    const zoneKey = zoneKeyForSwitch(sw);
     if (!zones.has(zoneKey)) zones.set(zoneKey, []);
     zones.get(zoneKey)!.push(sw);
   });
+  const zoneKeys = Array.from(zones.keys()).sort((a, b) => a.localeCompare(b));
 
-  const zonePlans = Array.from(zones.entries())
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([zoneKey, zoneSwitches]) => {
-      const others = zoneSwitches.sort(sortSwitchesByNameThenId);
+  const zoneGraph = new Map<string, Map<string, number>>();
+  const zoneToPriorityAnchor = new Map<string, Array<{ value: number; weight: number }>>();
+  const switchToAnchor = new Map<string, Array<{ value: number; weight: number }>>();
+  const priorityOrder = [...priorityMikroTik, ...priorityCisco];
+  const priorityAnchorById = new Map(priorityOrder.map((sw, idx) => [sw.id, idx]));
+  const getLinkWeight = (link: TopoLink) => {
+    const label = `${String(link.portA || '')} ${String(link.portB || '')}`.trim();
+    return isTrunkTopologyLink(link, label) ? 3 : 1;
+  };
+  const addZoneEdge = (a: string, b: string, weight: number) => {
+    if (!zoneGraph.has(a)) zoneGraph.set(a, new Map());
+    if (!zoneGraph.has(b)) zoneGraph.set(b, new Map());
+    zoneGraph.get(a)!.set(b, (zoneGraph.get(a)!.get(b) || 0) + weight);
+    zoneGraph.get(b)!.set(a, (zoneGraph.get(b)!.get(a) || 0) + weight);
+  };
+  links.forEach((link) => {
+    const source = switchById.get(link.source);
+    const target = switchById.get(link.target);
+    if (!source || !target) return;
+    const weight = getLinkWeight(link);
+    const sourcePriorityAnchor = priorityAnchorById.get(source.id);
+    const targetPriorityAnchor = priorityAnchorById.get(target.id);
+    const sourceIsLower = !isPriorityVendorSwitch(source);
+    const targetIsLower = !isPriorityVendorSwitch(target);
+    if (sourceIsLower && targetIsLower) {
+      const sourceZone = zoneKeyForSwitch(source);
+      const targetZone = zoneKeyForSwitch(target);
+      if (sourceZone !== targetZone) addZoneEdge(sourceZone, targetZone, weight);
+    }
+    if (sourceIsLower && targetPriorityAnchor !== undefined) {
+      const sourceZone = zoneKeyForSwitch(source);
+      if (!zoneToPriorityAnchor.has(sourceZone)) zoneToPriorityAnchor.set(sourceZone, []);
+      zoneToPriorityAnchor.get(sourceZone)!.push({ value: targetPriorityAnchor, weight });
+      if (!switchToAnchor.has(source.id)) switchToAnchor.set(source.id, []);
+      switchToAnchor.get(source.id)!.push({ value: targetPriorityAnchor, weight });
+    }
+    if (targetIsLower && sourcePriorityAnchor !== undefined) {
+      const targetZone = zoneKeyForSwitch(target);
+      if (!zoneToPriorityAnchor.has(targetZone)) zoneToPriorityAnchor.set(targetZone, []);
+      zoneToPriorityAnchor.get(targetZone)!.push({ value: sourcePriorityAnchor, weight });
+      if (!switchToAnchor.has(target.id)) switchToAnchor.set(target.id, []);
+      switchToAnchor.get(target.id)!.push({ value: sourcePriorityAnchor, weight });
+    }
+  });
+
+  const zoneInitialOrder = [...zoneKeys].sort((a, b) => {
+    const aFallback = nodeIndex.get(zones.get(a)?.[0]?.id || '') || 0;
+    const bFallback = nodeIndex.get(zones.get(b)?.[0]?.id || '') || 0;
+    const aCenter = weightedCenter(zoneToPriorityAnchor.get(a) || [], aFallback);
+    const bCenter = weightedCenter(zoneToPriorityAnchor.get(b) || [], bFallback);
+    if (aCenter !== bCenter) return aCenter - bCenter;
+    return a.localeCompare(b);
+  });
+  let orderedZoneKeys = [...zoneInitialOrder];
+  for (let i = 0; i < TOPO_BARYCENTER_ITERATIONS; i++) {
+    const orderIndex = new Map(orderedZoneKeys.map((zoneKey, idx) => [zoneKey, idx]));
+    orderedZoneKeys = [...orderedZoneKeys].sort((a, b) => {
+      const aFallback = orderIndex.get(a) || 0;
+      const bFallback = orderIndex.get(b) || 0;
+      const aNeighborEntries =
+        Array.from((zoneGraph.get(a) || new Map()).entries()).map(([neighbor, weight]) => ({
+          value: orderIndex.get(neighbor) ?? aFallback,
+          weight,
+        }));
+      const bNeighborEntries =
+        Array.from((zoneGraph.get(b) || new Map()).entries()).map(([neighbor, weight]) => ({
+          value: orderIndex.get(neighbor) ?? bFallback,
+          weight,
+        }));
+      const aCenter = weightedCenter(
+        [...aNeighborEntries, ...(zoneToPriorityAnchor.get(a) || [])],
+        aFallback
+      );
+      const bCenter = weightedCenter(
+        [...bNeighborEntries, ...(zoneToPriorityAnchor.get(b) || [])],
+        bFallback
+      );
+      if (aCenter !== bCenter) return aCenter - bCenter;
+      return a.localeCompare(b);
+    });
+  }
+
+  const zonePlans = orderedZoneKeys.map((zoneKey) => {
+      const zoneSwitches = [...(zones.get(zoneKey) || [])];
+      const others = zoneSwitches.sort((a, b) => {
+        const aFallback = nodeIndex.get(a.id) || 0;
+        const bFallback = nodeIndex.get(b.id) || 0;
+        const aCenter = weightedCenter(switchToAnchor.get(a.id) || [], aFallback);
+        const bCenter = weightedCenter(switchToAnchor.get(b.id) || [], bFallback);
+        if (aCenter !== bCenter) return aCenter - bCenter;
+        return sortSwitchesByNameThenId(a, b);
+      });
       const otherCols = Math.max(1, Math.min(TOPO_MAX_COLUMNS, others.length || 1));
       const rowWidth = otherCols * TOPO_NODE_WIDTH + Math.max(0, otherCols - 1) * (TOPO_COLUMN_GAP - TOPO_NODE_WIDTH);
       const otherRows = Math.max(1, Math.ceil(others.length / otherCols));
@@ -226,34 +328,21 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
   };
 
   const pos = new Map<string, { x: number; y: number }>();
-  const vendorGroups = [
-    { key: 'mikrotik', switches: priorityMikroTik },
-    { key: 'cisco', switches: priorityCisco },
-  ]
-    .filter((group) => group.switches.length > 0)
-    .map((group) => {
-      const cols = Math.max(1, Math.min(TOPO_VENDOR_MAX_COLUMNS, group.switches.length));
-      const rows = Math.max(1, Math.ceil(group.switches.length / cols));
-      return {
-        ...group,
-        cols,
-        width: Math.max(TOPO_ZONE_MIN_WIDTH, cols * TOPO_NODE_WIDTH + Math.max(0, cols - 1) * (TOPO_COLUMN_GAP - TOPO_NODE_WIDTH) + TOPO_ZONE_PAD_X * 2),
-        height: TOPO_ROW_TOP_Y + (rows - 1) * TOPO_ROW_HEIGHT + TOPO_NODE_HEIGHT + TOPO_ZONE_PAD_BOTTOM,
-      };
-    });
-  const vendorLayerWidth = vendorGroups.reduce(
-    (total, group, index) => total + group.width + (index > 0 ? TOPO_VENDOR_GROUP_GAP_X : 0),
-    0
-  );
   let rowY = 70;
-  if (vendorGroups.length > 0) {
-    let vendorX = Math.max(TOPO_STAGE_SIDE_PADDING, stageWidth / 2 - vendorLayerWidth / 2);
-    vendorGroups.forEach((vendorGroup) => {
-      placeRow(vendorGroup.switches, vendorX, vendorGroup.width, rowY + TOPO_ROW_TOP_Y, vendorGroup.cols);
-      vendorX += vendorGroup.width + TOPO_VENDOR_GROUP_GAP_X;
-    });
-    rowY += Math.max(...vendorGroups.map((vendorGroup) => vendorGroup.height)) + TOPO_VENDOR_LAYER_GAP_Y;
-  }
+  const placePriorityLayer = (items: Switch[], baseY: number) => {
+    if (!items.length) return;
+    const cols = Math.max(1, Math.min(TOPO_VENDOR_MAX_COLUMNS, items.length));
+    const width = Math.max(
+      TOPO_ZONE_MIN_WIDTH,
+      cols * TOPO_NODE_WIDTH + Math.max(0, cols - 1) * (TOPO_COLUMN_GAP - TOPO_NODE_WIDTH) + TOPO_ZONE_PAD_X * 2
+    );
+    const zoneX = Math.max(TOPO_STAGE_SIDE_PADDING, stageWidth / 2 - width / 2);
+    placeRow(items, zoneX, width, baseY, cols);
+  };
+  placePriorityLayer(priorityMikroTik, rowY + TOPO_ROW_TOP_Y);
+  rowY += TOPO_ROW_HEIGHT;
+  placePriorityLayer(priorityCisco, rowY + TOPO_ROW_TOP_Y);
+  rowY += TOPO_ROW_HEIGHT + TOPO_VENDOR_LAYER_GAP_Y;
 
   const rows: Array<{ plans: typeof zonePlans; width: number; height: number }> = [];
   let currentRow: { plans: typeof zonePlans; width: number; height: number } = { plans: [], width: 0, height: 0 };
@@ -272,6 +361,34 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
     currentRow.height = Math.max(currentRow.height, plan.height);
   });
   if (currentRow.plans.length) rows.push(currentRow);
+  const rowOrderIndices = rows.map((row) =>
+    new Map(row.plans.map((plan, idx) => [plan.zoneKey, idx]))
+  );
+  for (let i = 1; i < rows.length; i++) {
+    const prevOrder = rowOrderIndices[i - 1];
+    rows[i].plans = [...rows[i].plans].sort((a, b) => {
+      const aFallback = rowOrderIndices[i].get(a.zoneKey) || 0;
+      const bFallback = rowOrderIndices[i].get(b.zoneKey) || 0;
+      const aCenter = weightedCenter(
+        Array.from((zoneGraph.get(a.zoneKey) || new Map()).entries())
+          .filter(([zoneKey]) => prevOrder.has(zoneKey))
+          .map(([zoneKey, weight]) => ({ value: prevOrder.get(zoneKey) || 0, weight })),
+        aFallback
+      );
+      const bCenter = weightedCenter(
+        Array.from((zoneGraph.get(b.zoneKey) || new Map()).entries())
+          .filter(([zoneKey]) => prevOrder.has(zoneKey))
+          .map(([zoneKey, weight]) => ({ value: prevOrder.get(zoneKey) || 0, weight })),
+        bFallback
+      );
+      if (aCenter !== bCenter) return aCenter - bCenter;
+      return a.zoneKey.localeCompare(b.zoneKey);
+    });
+    rows[i].width = rows[i].plans.reduce(
+      (sum, plan, idx) => sum + plan.width + (idx > 0 ? TOPO_ZONE_GAP_X : 0),
+      0
+    );
+  }
 
   rows.forEach((row, rowIndex) => {
     const rowOffset = rowIndex % 2 === 1 ? TOPO_ROW_STAGGER_X : 0;
