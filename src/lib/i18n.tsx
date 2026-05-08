@@ -112,6 +112,7 @@ export const translations: Translations = {
   topologyPortA: { ru: 'Порт A', en: 'Port A' },
   topologyPortB: { ru: 'Порт B', en: 'Port B' },
   topologyLinkBtn: { ru: 'Связать', en: 'Link' },
+  topologySelectTabFirst: { ru: 'Сначала выберите вкладку региона.', en: 'Select a region tab first.' },
   addRegion: { ru: 'Добавить регион', en: 'Add region' },
   add: { ru: 'Добавить', en: 'Add' },
   renameTab: { ru: 'Переименовать вкладку', en: 'Rename tab' },

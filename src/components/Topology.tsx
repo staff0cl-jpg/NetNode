@@ -396,6 +396,10 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   }, [regionSwitches, topologySwitchIds, links, canvasSize.width, canvasSize.height, savedLayout]);
 
   const handleAutoLayout = async () => {
+    if (!selectedRegion) {
+      alert(t('topologySelectTabFirst'));
+      return;
+    }
     try {
       const rebuild = await fetch('/api/topology/links/rebuild', {
         method: 'POST',
@@ -963,7 +967,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
         <div className="absolute top-3 right-3 md:top-4 md:right-4 p-2 md:p-3 bg-[#25262b] border border-[#373a40] rounded text-[10px] text-[#909296] z-10 w-[calc(100%-1.5rem)] max-w-xs max-h-[45vh] overflow-auto">
           <div className="font-bold mb-2 text-white">{t('topologyManualLinks')}</div>
           <div className="space-y-1 max-h-40 overflow-auto">
-            {links.map((l, i) => (
+            {visibleLinks.map((l, i) => (
               <div key={`${l.id || `${l.source}-${l.target}-${i}`}`} className="flex items-center justify-between gap-2">
                 {(() => {
                   const key = l.id || '';
