@@ -32,6 +32,9 @@ const NotificationCenter: React.FC = () => {
                   title: t('notifyInfoTitle'),
                 };
 
+        const resolvedTitle = item.title ? t(item.title) : style.title;
+        const resolvedMessage = t(item.message);
+
         return (
           <div
             key={item.id}
@@ -42,9 +45,9 @@ const NotificationCenter: React.FC = () => {
             <div className="flex items-start gap-2">
               <span className="notification-toast__icon">{style.icon}</span>
               <div className="min-w-0 flex-1">
-                <p className="notification-toast__title text-xs font-semibold text-white">{item.title || style.title}</p>
+                <p className="notification-toast__title text-xs font-semibold text-white">{resolvedTitle}</p>
                 <p className="notification-toast__message mt-0.5 text-xs text-[#c1c2c5] whitespace-pre-wrap break-words">
-                  {item.message}
+                  {resolvedMessage}
                 </p>
               </div>
               <button

@@ -24,6 +24,12 @@ const parseUptimeSeconds = (uptime: string): number => {
   return (Number(m[1]) * 86400) + (Number(m[2]) * 3600) + (Number(m[3]) * 60);
 };
 
+const getSwitchSeverity = (sw: Switch): 'online' | 'warning' | 'critical' => {
+  if (sw.warningSeverity === 'critical' || sw.status === 'offline') return 'critical';
+  if (sw.warningSeverity === 'warning' || sw.status === 'warning') return 'warning';
+  return 'online';
+};
+
 interface InventoryProps {
   switches: Switch[];
   setSwitches: React.Dispatch<React.SetStateAction<Switch[]>>;
@@ -648,21 +654,31 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                   />
                 </td>
                 <td>
+                  {(() => {
+                    const severity = getSwitchSeverity(sw);
+                    const badgeClass =
+                      severity === 'online'
+                        ? "z-badge-success"
+                        : severity === 'warning'
+                          ? "z-badge-warning"
+                          : "z-badge-error";
+                    return (
                   <span className={cn(
                     "z-badge",
-                    sw.status === 'online' ? "z-badge-success" : 
-                    sw.status === 'warning' ? "z-badge-warning" : "z-badge-error"
+                    badgeClass
                   )}>
                     {sw.status}
                   </span>
+                    );
+                  })()}
                 </td>
                 <td>
                   <span
                     className={cn(
                       "z-badge",
-                      (sw.warningSeverity === 'critical' || sw.status === 'offline')
+                      getSwitchSeverity(sw) === 'critical'
                         ? "z-badge-error"
-                        : (sw.warningSeverity === 'warning' || sw.status === 'warning')
+                        : getSwitchSeverity(sw) === 'warning'
                           ? "z-badge-warning"
                           : "z-badge-success"
                     )}

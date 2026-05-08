@@ -85,686 +85,73 @@ type TopologyMode = 'ip' | 'fc';
 
 const TOPO_NODE_WIDTH = 160;
 const TOPO_NODE_HEIGHT = 80;
-const TOPO_LAYER_GAP = 220;
-const TOPO_CLUSTER_STEP_X = 460;
-const TOPO_RING_STEP = 180;
-const TOPO_LANE_STEP_X = TOPO_NODE_WIDTH + 110;
-const TOPO_ISLAND_COLUMN_WIDTH = 540;
-const TOPO_ISLAND_ROW_HEIGHT = 360;
-const TOPO_ISLAND_START_GAP = 420;
-const TOPO_INTRA_ROW_GAP = 56;
-const TOPO_INTRA_COL_GAP = 44;
 const TOPO_ZONE_PAD_X = 44;
 const TOPO_ZONE_PAD_TOP = 34;
 const TOPO_ZONE_PAD_BOTTOM = 30;
-const TOPO_LINK_PARALLEL_GAP = 14;
-const TOPO_LABEL_LINE_OFFSET = 20;
-const TOPO_LABEL_BG_PADDING_X = 6;
-const TOPO_LABEL_BG_PADDING_Y = 3;
-const TOPO_SAVED_Y_SNAP_TOLERANCE = 36;
+const TOPO_ROW_TOP_Y = 90;
+const TOPO_ROW_SECOND_Y = 300;
+const TOPO_ROW_HEIGHT = TOPO_NODE_HEIGHT + 52;
+const TOPO_COLUMN_GAP = TOPO_NODE_WIDTH + 66;
+const TOPO_MAX_COLUMNS = 7;
 
 function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: number): NodeWithPos[] {
   if (switches.length === 0) return [];
-  const margin = 110;
-  const byId = new Map(switches.map((s) => [s.id, s]));
-  const adj = new Map<string, Set<string>>();
-  const degree = new Map<string, number>();
-  switches.forEach((s) => {
-    adj.set(s.id, new Set());
-    degree.set(s.id, 0);
-  });
-  links.forEach((l) => {
-    if (!byId.has(l.source) || !byId.has(l.target)) return;
-    adj.get(l.source)?.add(l.target);
-    adj.get(l.target)?.add(l.source);
-    degree.set(l.source, (degree.get(l.source) || 0) + 1);
-    degree.set(l.target, (degree.get(l.target) || 0) + 1);
-  });
-
-  const lower = (v?: string) => String(v || '').trim().toLowerCase();
-  const toName = (s?: Switch) => String(s?.name || '').trim().toLowerCase();
-  const switchSortKey = (id: string) => `${toName(byId.get(id))}\u0000${id}`;
-  const stableSort = (items: Switch[], rank: (s: Switch) => number) =>
-    [...items].sort((a, b) => {
-      const dr = rank(b) - rank(a);
-      if (dr !== 0) return dr;
-      const na = toName(a);
-      const nb = toName(b);
-      if (na !== nb) return na.localeCompare(nb);
-      return String(a.id).localeCompare(String(b.id));
-    });
-  const byIdStable = (a: string, b: string) => {
-    const ka = switchSortKey(a);
-    const kb = switchSortKey(b);
-    return ka === kb ? a.localeCompare(b) : ka.localeCompare(kb);
+  void links;
+  void ch;
+  const sortByNameThenId = (a: Switch, b: Switch) => {
+    const an = String(a.name || '').toLowerCase();
+    const bn = String(b.name || '').toLowerCase();
+    if (an !== bn) return an.localeCompare(bn);
+    return String(a.id).localeCompare(String(b.id));
   };
-
-  const isMikroTik = (s: Switch) => lower(s.vendor) === 'mikrotik';
-  const isExplicitCore = (s: Switch) =>
-    lower(s.subcategory) === 'core' ||
-    lower(s.vendor) === 'cisco';
-  const isDistribution = (s: Switch) => lower(s.subcategory) === 'distribution';
-  const isAccess = (s: Switch) =>
-    lower(s.subcategory) === 'access' ||
-    lower(s.vendor) === 'hpe' ||
-    lower(s.vendor) === 'aruba';
-
-  type Lane = 'router' | 'core' | 'distribution' | 'access' | 'unknown';
-  const laneScore = (s: Switch) => {
-    if (isMikroTik(s)) return { lane: 'router' as Lane, score: 4 };
-    if (isExplicitCore(s)) return { lane: 'core' as Lane, score: 4 };
-    if (isDistribution(s)) return { lane: 'distribution' as Lane, score: 4 };
-    if (isAccess(s)) return { lane: 'access' as Lane, score: 4 };
-    const deg = degree.get(s.id) || 0;
-    if (deg <= 1) return { lane: 'unknown' as Lane, score: 1 };
-    if (deg >= 5) return { lane: 'core' as Lane, score: 2 };
-    if (deg >= 3) return { lane: 'distribution' as Lane, score: 2 };
-    return { lane: 'access' as Lane, score: 2 };
-  };
-  const parentKey = (id: string, parentSet: Set<string>) => {
-    const neighbors = Array.from(adj.get(id) || [])
-      .filter((n) => parentSet.has(n))
-      .sort(byIdStable);
-    return neighbors[0] || `~${id}`;
-  };
-
-  const trunkThreshold = Math.max(3, Math.ceil(Math.sqrt(Math.max(2, switches.length)) * 1.4));
-  const isTrunkRich = (s: Switch) => (degree.get(s.id) || 0) >= trunkThreshold;
-
-  const rankedAll = stableSort(switches, (s) => degree.get(s.id) || 0);
-  const laneMap = new Map<string, Lane>();
-  rankedAll.forEach((s) => laneMap.set(s.id, laneScore(s).lane));
-
-  type ComponentInfo = {
-    id: string;
-    nodes: Switch[];
-    nodeIds: Set<string>;
-    edgeCount: number;
-    maxDegree: number;
-    hasMikroTik: boolean;
-    hasExplicitCore: boolean;
-    isSpider: boolean;
-  };
-
-  const components: ComponentInfo[] = [];
-  const visited = new Set<string>();
-  const sortedIds = switches.map((s) => s.id).sort(byIdStable);
-  sortedIds.forEach((startId) => {
-    if (visited.has(startId)) return;
-    const queue = [startId];
-    const nodeIds = new Set<string>();
-    visited.add(startId);
-    while (queue.length) {
-      const current = queue.shift()!;
-      nodeIds.add(current);
-      Array.from(adj.get(current) || []).sort(byIdStable).forEach((next) => {
-        if (visited.has(next)) return;
-        visited.add(next);
-        queue.push(next);
+  const isMikroTik = (sw: Switch) => String(sw.vendor || '').trim().toLowerCase() === 'mikrotik';
+  const topRow = [...switches].filter(isMikroTik).sort(sortByNameThenId);
+  const lowerRow = [...switches].filter((sw) => !isMikroTik(sw)).sort(sortByNameThenId);
+  const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
+  const stageWidth = Math.max(cw, 1200);
+  const placeRow = (items: Switch[], baseY: number, maxCols: number) => {
+    const cols = Math.max(1, Math.min(maxCols, items.length));
+    const rows = Math.ceil(items.length / cols);
+    const positions = new Map<string, { x: number; y: number }>();
+    for (let r = 0; r < rows; r++) {
+      const start = r * cols;
+      const rowItems = items.slice(start, start + cols);
+      const rowWidth = (rowItems.length - 1) * TOPO_COLUMN_GAP;
+      const startX = stageWidth / 2 - rowWidth / 2;
+      rowItems.forEach((sw, idx) => {
+        positions.set(sw.id, {
+          x: clamp(startX + idx * TOPO_COLUMN_GAP, 35, stageWidth - TOPO_NODE_WIDTH - 35),
+          y: baseY + r * TOPO_ROW_HEIGHT,
+        });
       });
     }
-    const nodes = stableSort(
-      Array.from(nodeIds).map((id) => byId.get(id)).filter((s): s is Switch => !!s),
-      (s) => degree.get(s.id) || 0
-    );
-    const edgeCount = links.filter((l) => nodeIds.has(l.source) && nodeIds.has(l.target)).length;
-    const maxDegree = nodes.reduce((max, n) => Math.max(max, degree.get(n.id) || 0), 0);
-    const hasMikroTik = nodes.some(isMikroTik);
-    const hasExplicitCore = nodes.some((n) => !isMikroTik(n) && isExplicitCore(n));
-    const leafCount = nodes.filter((n) => (degree.get(n.id) || 0) <= 1).length;
-    components.push({
-      id: nodes[0]?.id || startId,
-      nodes,
-      nodeIds,
-      edgeCount,
-      maxDegree,
-      hasMikroTik,
-      hasExplicitCore,
-      isSpider: nodes.length >= 5 && (maxDegree >= nodes.length - 2 || leafCount / nodes.length >= 0.68),
-    });
-  });
-
-  const componentRank = (c: ComponentInfo) =>
-    (c.hasMikroTik ? 9000 : 0) +
-    (c.hasExplicitCore ? 7000 : 0) +
-    c.edgeCount * 90 +
-    c.nodes.length * 30 +
-    c.maxDegree * 10 -
-    (c.isSpider && !c.hasExplicitCore && !c.hasMikroTik ? 500 : 0);
-
-  components.sort((a, b) => {
-    const dr = componentRank(b) - componentRank(a);
-    if (dr !== 0) return dr;
-    if (a.nodes.length !== b.nodes.length) return b.nodes.length - a.nodes.length;
-    return switchSortKey(a.id).localeCompare(switchSortKey(b.id));
-  });
-
-  const primaryComponent = components[0];
-  const primaryIds = primaryComponent?.nodeIds || new Set<string>();
-  const primaryNodes = primaryComponent?.nodes || [];
-  const secondaryComponents = components.slice(1).sort((a, b) => {
-    if (a.isSpider !== b.isSpider) return a.isSpider ? -1 : 1;
-    if (a.nodes.length !== b.nodes.length) return b.nodes.length - a.nodes.length;
-    if (a.edgeCount !== b.edgeCount) return b.edgeCount - a.edgeCount;
-    return switchSortKey(a.id).localeCompare(switchSortKey(b.id));
-  });
-
-  let sourceCores = stableSort(
-    primaryNodes.filter((s) => !isMikroTik(s) && isExplicitCore(s)),
-    (s) => degree.get(s.id) || 0
-  );
-  if (!sourceCores.length) {
-    sourceCores = stableSort(
-      primaryNodes.filter((s) => !isMikroTik(s) && !isDistribution(s) && !isAccess(s) && isTrunkRich(s)),
-      (s) => degree.get(s.id) || 0
-    );
-  }
-  if (!sourceCores.length && primaryNodes.length) {
-    const inferredCore = stableSort(primaryNodes.filter((s) => !isMikroTik(s)), (s) => degree.get(s.id) || 0)[0] || primaryNodes[0];
-    sourceCores = inferredCore ? [inferredCore] : [];
-  }
-
-  const coreIds = new Set(sourceCores.map((c) => c.id));
-  sourceCores.forEach((core) => laneMap.set(core.id, 'core'));
-  const routers = stableSort(primaryNodes.filter((s) => isMikroTik(s) && !coreIds.has(s.id)), (s) => degree.get(s.id) || 0);
-
-  const laneOrder: Lane[] = ['router', 'core', 'distribution', 'access', 'unknown'];
-  const laneGapX = TOPO_LANE_STEP_X;
-  const primaryLaneCounts = new Map<Lane, number>();
-  laneOrder.forEach((lane) => primaryLaneCounts.set(lane, 0));
-  primaryNodes.forEach((node) => {
-    const lane = laneMap.get(node.id) || 'unknown';
-    primaryLaneCounts.set(lane, (primaryLaneCounts.get(lane) || 0) + 1);
-  });
-  const maxPrimaryLane = Math.max(1, ...Array.from(primaryLaneCounts.values()));
-  const islandColumns = secondaryComponents.length ? Math.min(3, secondaryComponents.length) : 0;
-  const islandRows = islandColumns ? Math.ceil(secondaryComponents.length / islandColumns) : 0;
-  const primaryWidth = Math.max(
-    980,
-    maxPrimaryLane * laneGapX + 360,
-    Math.max(1, sourceCores.length) * TOPO_CLUSTER_STEP_X + 240
-  );
-  const islandStartX = margin + primaryWidth + TOPO_ISLAND_START_GAP;
-  const islandColumnWidth = TOPO_ISLAND_COLUMN_WIDTH;
-  const islandRowHeight = TOPO_ISLAND_ROW_HEIGHT;
-  const width = Math.max(
-    1480,
-    Math.floor(cw * 1.42),
-    islandStartX + islandColumns * islandColumnWidth + margin
-  );
-  const height = Math.max(
-    980,
-    Math.floor(ch * 1.36),
-    margin + TOPO_LAYER_GAP * 4 + islandRows * islandRowHeight + 180
-  );
-  const rightLimit = width - TOPO_NODE_WIDTH - 26;
-  const bottomLimit = height - TOPO_NODE_HEIGHT - 24;
+    return positions;
+  };
   const pos = new Map<string, { x: number; y: number }>();
-
-  const owners = new Map<string, string>();
-  const dist = new Map<string, number>();
-  const queue: string[] = [];
-  sourceCores.forEach((c) => {
-    owners.set(c.id, c.id);
-    dist.set(c.id, 0);
-    queue.push(c.id);
-  });
-  while (queue.length) {
-    const u = queue.shift()!;
-    for (const v of Array.from(adj.get(u) || []).sort(byIdStable)) {
-      if (!primaryIds.has(v)) continue;
-      const cand = (dist.get(u) || 0) + 1;
-      const cur = dist.get(v);
-      if (cur === undefined || cand < cur) {
-        dist.set(v, cand);
-        owners.set(v, owners.get(u)!);
-        queue.push(v);
-      } else if (cand === cur) {
-        const currentOwner = owners.get(v) || '';
-        const nextOwner = owners.get(u) || '';
-        if (nextOwner.localeCompare(currentOwner) < 0) owners.set(v, nextOwner);
-      }
-    }
-  }
-
-  const fallbackCore = sourceCores[0];
-  primaryNodes.forEach((s) => {
-    if (owners.has(s.id) || !fallbackCore) return;
-    owners.set(s.id, fallbackCore.id);
-  });
-
-  const unknownIds = new Set<string>();
-  primaryNodes.forEach((s) => {
-    const meta = laneScore(s);
-    if (meta.lane === 'unknown' || meta.score <= 1) unknownIds.add(s.id);
-  });
-
-  const coreClusterMap = new Map<string, Switch[]>();
-  sourceCores.forEach((c) => coreClusterMap.set(c.id, [c]));
-  stableSort(primaryNodes, (s) => degree.get(s.id) || 0).forEach((s) => {
-    if (coreIds.has(s.id) || unknownIds.has(s.id)) return;
-    const owner = owners.get(s.id);
-    if (!owner) {
-      unknownIds.add(s.id);
-      return;
-    }
-    const lane = laneMap.get(s.id) || 'unknown';
-    if (lane === 'unknown') {
-      unknownIds.add(s.id);
-      return;
-    }
-    if (!coreClusterMap.has(owner)) coreClusterMap.set(owner, []);
-    coreClusterMap.get(owner)!.push(s);
-  });
-
-  if (!sourceCores.length) {
-    const hasRouter = primaryNodes.some(isMikroTik);
-    const baseY = margin;
-    const laneY = new Map<Lane, number>([
-      ['router', baseY],
-      ['core', baseY + (hasRouter ? TOPO_LAYER_GAP : 0)],
-      ['distribution', baseY + (hasRouter ? TOPO_LAYER_GAP : 0) + TOPO_LAYER_GAP],
-      ['access', baseY + (hasRouter ? TOPO_LAYER_GAP : 0) + TOPO_LAYER_GAP * 2],
-      ['unknown', Math.min(bottomLimit, baseY + (hasRouter ? TOPO_LAYER_GAP : 0) + TOPO_LAYER_GAP * 3 + 48)],
-    ]);
-    const itemsByLane = new Map<Lane, Switch[]>();
-    laneOrder.forEach((lane) => itemsByLane.set(lane, []));
-    stableSort(primaryNodes, (s) => degree.get(s.id) || 0).forEach((s) => {
-      const lane = laneMap.get(s.id) || 'unknown';
-      itemsByLane.get(lane)?.push(s);
-    });
-    laneOrder.forEach((lane) => {
-      const laneItems = itemsByLane.get(lane) || [];
-      laneItems.forEach((s, idx) => {
-        const row = Math.floor(idx / 6);
-        const col = idx % 6;
-        const laneBaseY = laneY.get(lane) || baseY;
-        pos.set(s.id, {
-          x: margin + col * laneGapX,
-          y: laneBaseY + row * (TOPO_NODE_HEIGHT + TOPO_INTRA_COL_GAP),
-        });
-      });
-    });
-  } else {
-    const hasRouterLayer = routers.length > 0;
-    const yRouter = margin;
-    const yCore = margin + (hasRouterLayer ? TOPO_LAYER_GAP : 0);
-    const yDist = yCore + TOPO_LAYER_GAP;
-    const yAccess = yDist + TOPO_LAYER_GAP;
-    const yUnknown = Math.min(bottomLimit, yAccess + TOPO_LAYER_GAP + 30);
-    const laneY = new Map<Lane, number>([
-      ['router', yRouter],
-      ['core', yCore],
-      ['distribution', yDist],
-      ['access', yAccess],
-      ['unknown', yUnknown],
-    ]);
-
-    const left = margin;
-    const availableWidth = primaryWidth;
-    const sortedCores = [...sourceCores].sort((a, b) => {
-      const aRouterHits = Array.from(adj.get(a.id) || []).filter((id) => routers.some((r) => r.id === id)).length;
-      const bRouterHits = Array.from(adj.get(b.id) || []).filter((id) => routers.some((r) => r.id === id)).length;
-      if (aRouterHits !== bRouterHits) return bRouterHits - aRouterHits;
-      const aClusterSize = (coreClusterMap.get(a.id) || []).length;
-      const bClusterSize = (coreClusterMap.get(b.id) || []).length;
-      if (aClusterSize !== bClusterSize) return bClusterSize - aClusterSize;
-      const da = degree.get(a.id) || 0;
-      const db = degree.get(b.id) || 0;
-      if (da !== db) return db - da;
-      const na = toName(a);
-      const nb = toName(b);
-      if (na !== nb) return na.localeCompare(nb);
-      return String(a.id).localeCompare(String(b.id));
-    });
-    const coreStep = sortedCores.length === 1 ? 0 : availableWidth / (sortedCores.length - 1);
-    sortedCores.forEach((core, idx) => {
-      const x = sortedCores.length === 1
-        ? left + availableWidth / 2
-        : left + idx * coreStep;
-      pos.set(core.id, { x, y: yCore });
-    });
-
-    const routerTargets = stableSort(routers, (s) => degree.get(s.id) || 0);
-    routerTargets.forEach((r, idx) => {
-      const neighbors = Array.from(adj.get(r.id) || []).filter((id) => coreIds.has(id)).sort(byIdStable);
-      const anchorCore = neighbors[0] || sortedCores[idx % sortedCores.length]?.id || sortedCores[0]?.id;
-      const baseX = pos.get(anchorCore || '')?.x || left + availableWidth / 2;
-      const spread = Math.floor(idx / Math.max(1, sortedCores.length));
-      pos.set(r.id, { x: baseX + (spread - 0.5) * 136, y: yRouter });
-    });
-
-    sortedCores.forEach((core, coreIdx) => {
-      const coreX = pos.get(core.id)?.x || left + availableWidth / 2;
-      const members = (coreClusterMap.get(core.id) || []).filter((n) => n.id !== core.id);
-      const clusterDist = stableSort(
-        members.filter((s) => {
-          if (unknownIds.has(s.id)) return false;
-          const lane = laneMap.get(s.id) || 'unknown';
-          return lane === 'distribution';
-        }),
-        (s) => degree.get(s.id) || 0
-      );
-      const clusterAccess = stableSort(
-        members.filter((s) => {
-          if (unknownIds.has(s.id)) return false;
-          const lane = laneMap.get(s.id) || 'unknown';
-          return lane === 'access';
-        }),
-        (s) => degree.get(s.id) || 0
-      );
-      const residue = members.filter((s) => !clusterDist.some((d) => d.id === s.id) && !clusterAccess.some((a) => a.id === s.id));
-      residue.forEach((r) => unknownIds.add(r.id));
-
-      const clusterDistIds = new Set(clusterDist.map((d) => d.id));
-      const accessByDist = new Map<string, Switch[]>();
-      const distParentSet = new Set<string>([core.id, ...routers.map((r) => r.id), ...sortedCores.map((c) => c.id)]);
-      const orderedDist = [...clusterDist].sort((a, b) => {
-        const pa = parentKey(a.id, distParentSet);
-        const pb = parentKey(b.id, distParentSet);
-        if (pa !== pb) return pa.localeCompare(pb);
-        const da = degree.get(a.id) || 0;
-        const db = degree.get(b.id) || 0;
-        if (da !== db) return db - da;
-        const na = toName(a);
-        const nb = toName(b);
-        if (na !== nb) return na.localeCompare(nb);
-        return String(a.id).localeCompare(String(b.id));
-      });
-
-      const slotLeft = sortedCores.length === 1 ? left : left + (coreIdx / sortedCores.length) * availableWidth;
-      const slotRight = sortedCores.length === 1 ? left + availableWidth : left + ((coreIdx + 1) / sortedCores.length) * availableWidth;
-      const slotWidth = Math.max(TOPO_NODE_WIDTH, slotRight - slotLeft);
-      const distStep = Math.max(TOPO_RING_STEP, Math.min(laneGapX, slotWidth / Math.max(1, orderedDist.length)));
-      orderedDist.forEach((d, idx) => {
-        const offset = (idx - (orderedDist.length - 1) / 2) * distStep;
-        pos.set(d.id, { x: coreX + offset, y: yDist });
-      });
-
-      clusterAccess.forEach((a) => {
-        const candidates = Array.from(adj.get(a.id) || []).filter((id) => clusterDistIds.has(id)).sort(byIdStable);
-        const parent = candidates[0] || `~${core.id}`;
-        if (!accessByDist.has(parent)) accessByDist.set(parent, []);
-        accessByDist.get(parent)!.push(a);
-      });
-
-      const distOrder = orderedDist.map((d) => d.id);
-      const accessOrdered = [...clusterAccess].sort((a, b) => {
-        const pa = accessByDist.has(parentKey(a.id, clusterDistIds)) ? parentKey(a.id, clusterDistIds) : '~';
-        const pb = accessByDist.has(parentKey(b.id, clusterDistIds)) ? parentKey(b.id, clusterDistIds) : '~';
-        const ia = distOrder.indexOf(pa);
-        const ib = distOrder.indexOf(pb);
-        if (ia !== ib) return ia - ib;
-        const da = degree.get(a.id) || 0;
-        const db = degree.get(b.id) || 0;
-        if (da !== db) return db - da;
-        const na = toName(a);
-        const nb = toName(b);
-        if (na !== nb) return na.localeCompare(nb);
-        return String(a.id).localeCompare(String(b.id));
-      });
-
-      const placedAccess = new Set<string>();
-      orderedDist.forEach((d) => {
-        const group = accessOrdered.filter((a) => {
-          if (placedAccess.has(a.id)) return false;
-          const parents = Array.from(adj.get(a.id) || []).filter((id) => clusterDistIds.has(id)).sort(byIdStable);
-          return (parents[0] || '') === d.id;
-        });
-        const step = TOPO_NODE_WIDTH + TOPO_INTRA_ROW_GAP;
-        group.forEach((a, idx) => {
-          const offset = (idx - (group.length - 1) / 2) * step;
-          const base = pos.get(d.id)?.x || coreX;
-          const row = Math.floor(idx / 8);
-          pos.set(a.id, { x: base + offset, y: yAccess + row * (TOPO_NODE_HEIGHT + TOPO_INTRA_COL_GAP) });
-          placedAccess.add(a.id);
-        });
-      });
-      accessOrdered.forEach((a, idx) => {
-        if (placedAccess.has(a.id)) return;
-        const fallbackOffset = (idx - (accessOrdered.length - 1) / 2) * (TOPO_NODE_WIDTH + 24);
-        pos.set(a.id, { x: coreX + fallbackOffset, y: yAccess });
-      });
-    });
-
-    const unknownNodes = stableSort(
-      primaryNodes.filter((s) => unknownIds.has(s.id) || !pos.has(s.id)),
-      (s) => degree.get(s.id) || 0
-    );
-    const unknownStartX = margin;
-    unknownNodes.forEach((n, idx) => {
-      const col = idx % 6;
-      const row = Math.floor(idx / 6);
-      pos.set(n.id, {
-        x: unknownStartX + col * laneGapX,
-        y: laneY.get('unknown')! + row * (TOPO_NODE_HEIGHT + TOPO_INTRA_COL_GAP),
-      });
-    });
-  }
-
-  const placeRow = (items: Switch[], baseX: number, y: number, maxColumns: number) => {
-    const step = TOPO_NODE_WIDTH + TOPO_INTRA_ROW_GAP;
-    const columns = Math.max(1, Math.min(maxColumns, items.length));
-    items.forEach((item, idx) => {
-      const row = Math.floor(idx / columns);
-      const col = idx % columns;
-      const rowItems = Math.min(columns, items.length - row * columns);
-      const rowWidth = (rowItems - 1) * step;
-      pos.set(item.id, {
-        x: baseX - rowWidth / 2 + col * step,
-        y: y + row * (TOPO_NODE_HEIGHT + TOPO_INTRA_COL_GAP),
-      });
-    });
-  };
-
-  secondaryComponents.forEach((component, idx) => {
-    const col = islandColumns ? idx % islandColumns : 0;
-    const row = islandColumns ? Math.floor(idx / islandColumns) : 0;
-    const baseX = islandStartX + col * islandColumnWidth + islandColumnWidth / 2 - TOPO_NODE_WIDTH / 2;
-    const baseY = margin + row * islandRowHeight;
-    const ordered = stableSort(component.nodes, (s) => degree.get(s.id) || 0);
-    const hubs = ordered.filter((s) => isMikroTik(s) || isExplicitCore(s) || (degree.get(s.id) || 0) === component.maxDegree);
-    const hub = hubs[0] || ordered[0];
-    if (!hub) return;
-    const hubLane = isMikroTik(hub) ? 'router' : 'core';
-    laneMap.set(hub.id, hubLane);
-    pos.set(hub.id, { x: baseX, y: baseY });
-
-    const rest = ordered.filter((s) => s.id !== hub.id);
-    const middle = rest.filter((s) => isDistribution(s) || (degree.get(s.id) || 0) > 1);
-    const leaves = rest.filter((s) => !middle.some((m) => m.id === s.id));
-    middle.forEach((s) => laneMap.set(s.id, 'distribution'));
-    leaves.forEach((s) => laneMap.set(s.id, 'access'));
-    placeRow(middle, baseX, baseY + 118, 3);
-    placeRow(leaves, baseX, baseY + (middle.length ? 224 : 118), 4);
-  });
-
-  const points = switches.map((s) => {
-    const p = pos.get(s.id) || { x: width / 2, y: height / 2 };
-    return { id: s.id, x: p.x, y: p.y, lane: (laneMap.get(s.id) || 'unknown') as Lane };
-  });
-  const laneIdx = new Map<Lane, number>(laneOrder.map((lane, idx) => [lane, idx]));
-  const laneNodes = new Map<Lane, { id: string; x: number; y: number; lane: Lane }[]>();
-  laneOrder.forEach((lane) => laneNodes.set(lane, []));
-  points
-    .filter((p) => primaryIds.has(p.id) && p.lane !== 'unknown')
-    .forEach((p) => laneNodes.get(p.lane)?.push(p));
-  const idToPoint = new Map(points.map((p) => [p.id, p]));
-  const byLaneEdges = new Map<number, Array<{ a: string; b: string }>>();
-  links.forEach((l) => {
-    const a = idToPoint.get(l.source);
-    const b = idToPoint.get(l.target);
-    if (!a || !b) return;
-    if (!primaryIds.has(a.id) || !primaryIds.has(b.id)) return;
-    const ai = laneIdx.get(a.lane) ?? 0;
-    const bi = laneIdx.get(b.lane) ?? 0;
-    if (Math.abs(ai - bi) !== 1) return;
-    const low = Math.min(ai, bi);
-    const edge = ai < bi ? { a: a.id, b: b.id } : { a: b.id, b: a.id };
-    if (!byLaneEdges.has(low)) byLaneEdges.set(low, []);
-    byLaneEdges.get(low)!.push(edge);
-  });
-
-  const anchorX = new Map<string, number>(points.map((p) => [p.id, p.x]));
-  const nodeHalf = TOPO_NODE_WIDTH / 2;
-  const minBoxGapX = TOPO_NODE_WIDTH + 56;
-  const minBoxGapY = TOPO_NODE_HEIGHT + 44;
-  const median = (nums: number[]) => {
-    if (!nums.length) return 0;
-    const sorted = [...nums].sort((a, b) => a - b);
-    const mid = Math.floor(sorted.length / 2);
-    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-  };
-  const resolveLane = (lane: Lane) => {
-    const lanePoints = [...(laneNodes.get(lane) || [])].sort((a, b) => (a.x - b.x) || a.id.localeCompare(b.id));
-    for (let i = 1; i < lanePoints.length; i++) {
-      const prev = lanePoints[i - 1];
-      const cur = lanePoints[i];
-      const minX = prev.x + laneGapX;
-      if (cur.x < minX) cur.x = minX;
-    }
-    const maxRight = Math.min(rightLimit - nodeHalf, margin + primaryWidth - nodeHalf);
-    const minLeft = 35 + nodeHalf;
-    let shift = 0;
-    if (lanePoints.length) {
-      const leftMost = lanePoints[0].x;
-      const rightMost = lanePoints[lanePoints.length - 1].x;
-      if (rightMost > maxRight) shift = maxRight - rightMost;
-      if (leftMost + shift < minLeft) shift = minLeft - leftMost;
-      lanePoints.forEach((p) => {
-        p.x = Math.min(maxRight, Math.max(minLeft, p.x + shift));
-      });
-    }
-    laneNodes.set(lane, lanePoints);
-  };
-  laneOrder.filter((lane) => lane !== 'unknown').forEach(resolveLane);
-
-  for (let iter = 0; iter < 6; iter++) {
-    const passOrder = iter % 2 === 0 ? laneOrder.filter((lane) => lane !== 'unknown') : laneOrder.filter((lane) => lane !== 'unknown').reverse();
-    passOrder.forEach((lane) => {
-      const idx = laneIdx.get(lane) ?? 0;
-      const lanePoints = laneNodes.get(lane) || [];
-      const targetX = new Map<string, number>();
-      lanePoints.forEach((p) => {
-        const neighbors: number[] = [];
-        const upEdges = byLaneEdges.get(idx - 1) || [];
-        const downEdges = byLaneEdges.get(idx) || [];
-        upEdges.forEach((e) => {
-          if (e.b === p.id) {
-            const src = idToPoint.get(e.a);
-            if (src) neighbors.push(src.x);
-          }
-        });
-        downEdges.forEach((e) => {
-          if (e.a === p.id) {
-            const dst = idToPoint.get(e.b);
-            if (dst) neighbors.push(dst.x);
-          }
-        });
-        const base = anchorX.get(p.id) ?? p.x;
-        targetX.set(p.id, neighbors.length ? median(neighbors) * 0.72 + base * 0.28 : base);
-      });
-      lanePoints
-        .sort((a, b) => {
-          const ax = targetX.get(a.id) ?? a.x;
-          const bx = targetX.get(b.id) ?? b.x;
-          if (ax !== bx) return ax - bx;
-          return a.id.localeCompare(b.id);
-        })
-        .forEach((p, order) => {
-          const tx = targetX.get(p.id) ?? p.x;
-          const leftBound = 35 + nodeHalf + order * laneGapX;
-          p.x = Math.max(tx, leftBound);
-        });
-      resolveLane(lane);
-    });
-  }
-
-  const allLaneNodes = new Map<Lane, { id: string; x: number; y: number; lane: Lane }[]>();
-  laneOrder.forEach((lane) => allLaneNodes.set(lane, []));
-  points.forEach((p) => allLaneNodes.get(p.lane)?.push(p));
-
-  const resolveLaneRows = () => {
-    laneOrder.forEach((lane) => {
-      const lanePoints = [...(allLaneNodes.get(lane) || [])].sort((a, b) => (a.y - b.y) || (a.x - b.x) || a.id.localeCompare(b.id));
-      let rowY = 35;
-      let nextX = 35;
-      lanePoints.forEach((p, idx) => {
-        if (idx === 0 || p.y >= rowY + minBoxGapY) {
-          rowY = Math.max(35, p.y);
-          nextX = 35;
-        }
-        if (p.x < nextX) p.x = nextX;
-        if (p.x > rightLimit && nextX > 35) {
-          rowY += minBoxGapY;
-          p.x = 35;
-        }
-        p.y = Math.max(35, rowY);
-        nextX = p.x + minBoxGapX;
-      });
-      allLaneNodes.set(lane, lanePoints);
-    });
-  };
-
-  const globalRelaxCollisions = () => {
-    const ordered = [...points].sort((a, b) => {
-      const ay = a.y - b.y;
-      if (ay !== 0) return ay;
-      const ax = a.x - b.x;
-      if (ax !== 0) return ax;
-      return a.id.localeCompare(b.id);
-    });
-    for (let pass = 0; pass < 18; pass++) {
-      let moved = false;
-      resolveLaneRows();
-      for (let i = 0; i < ordered.length; i++) {
-        for (let j = i + 1; j < ordered.length; j++) {
-          const a = ordered[i];
-          const b = ordered[j];
-          const overlapX = minBoxGapX - Math.abs(a.x - b.x);
-          const overlapY = minBoxGapY - Math.abs(a.y - b.y);
-          if (overlapX <= 0 || overlapY <= 0) continue;
-
-          const ai = laneIdx.get(a.lane) ?? laneOrder.length;
-          const bi = laneIdx.get(b.lane) ?? laneOrder.length;
-          if (ai === bi) {
-            // Same-lane collisions are resolved horizontally first to preserve hierarchy.
-            const [left, right] = a.x < b.x || (a.x === b.x && a.id.localeCompare(b.id) <= 0) ? [a, b] : [b, a];
-            right.x = Math.max(right.x, left.x + minBoxGapX);
-          } else if (Math.abs(ai - bi) <= 1) {
-            // Adjacent lanes keep their x alignment; the lower hierarchy lane moves down.
-            const lower = ai < bi ? b : a;
-            lower.y = Math.max(lower.y, (ai < bi ? a.y : b.y) + minBoxGapY);
-          } else if (overlapX <= overlapY) {
-            const [left, right] = a.x < b.x || (a.x === b.x && a.id.localeCompare(b.id) <= 0) ? [a, b] : [b, a];
-            right.x = Math.max(right.x, left.x + minBoxGapX);
-          } else {
-            const [top, bottom] = a.y < b.y || (a.y === b.y && a.id.localeCompare(b.id) <= 0) ? [a, b] : [b, a];
-            bottom.y = Math.max(bottom.y, top.y + minBoxGapY);
-          }
-          a.x = Math.max(35, a.x);
-          b.x = Math.max(35, b.x);
-          a.y = Math.max(35, a.y);
-          b.y = Math.max(35, b.y);
-          moved = true;
-        }
-      }
-      if (!moved) break;
-    }
-    resolveLaneRows();
-  };
-
-  globalRelaxCollisions();
-
-  return switches.map((s) => {
-    const p = idToPoint.get(s.id) || { x: width / 2, y: height / 2, lane: 'unknown' as Lane };
-    return {
-      ...s,
-      x: Math.max(35, p.x),
-      y: Math.max(35, p.y),
-    };
+  placeRow(topRow, TOPO_ROW_TOP_Y, Math.max(1, Math.min(4, topRow.length || 1))).forEach((v, k) => pos.set(k, v));
+  placeRow(lowerRow, TOPO_ROW_SECOND_Y, TOPO_MAX_COLUMNS).forEach((v, k) => pos.set(k, v));
+  return switches.map((sw) => {
+    const p = pos.get(sw.id) || { x: 35, y: TOPO_ROW_SECOND_Y };
+    return { ...sw, x: p.x, y: p.y };
   });
 }
+
+const isMikroTikSwitch = (sw: Switch) => String(sw.vendor || '').trim().toLowerCase() === 'mikrotik';
+
+const isSavedYWithinRowBand = (sw: Switch, y: number) =>
+  isMikroTikSwitch(sw) ? y <= TOPO_ROW_SECOND_Y - 40 : y >= TOPO_ROW_SECOND_Y - 40;
+
+const getNodeSeverity = (sw: Switch): 'online' | 'warning' | 'critical' => {
+  if (sw.warningSeverity === 'critical' || sw.status === 'offline') return 'critical';
+  if (sw.warningSeverity === 'warning' || sw.status === 'warning') return 'warning';
+  return 'online';
+};
+
+const NODE_COLORS: Record<'online' | 'warning' | 'critical', string> = {
+  online: '#40c057',
+  warning: '#fab005',
+  critical: '#fa5252',
+};
 
 function topologyScopeQuery(topologyMode: TopologyMode, branch?: string) {
   const params = new URLSearchParams({ topologyMode });
@@ -987,8 +374,8 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
         computed.map((n) => {
           const saved = savedLayout[n.id];
           if (!saved) return n;
-          const snappedY = Math.abs(saved.y - n.y) <= TOPO_SAVED_Y_SNAP_TOLERANCE ? saved.y : n.y;
-          return { ...n, x: saved.x, y: snappedY };
+          if (!isSavedYWithinRowBand(n, saved.y)) return n;
+          return { ...n, x: saved.x, y: saved.y };
         })
       );
     }, 80);
@@ -1055,10 +442,20 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       const h = containerRef.current?.offsetHeight || canvasSize.height;
       const visibleLinks = (data.links || []).filter((l) => topologySwitchIds.has(l.source) && topologySwitchIds.has(l.target));
       const computed = computeLayout(zoneSwitches, visibleLinks, w, h);
-      // Auto-layout must take precedence over previously saved coordinates for this active tab.
-      setNodes(computed);
+      const merged = computed.map((n) => {
+        const saved = savedLayout[n.id];
+        if (!saved) return n;
+        if (!isSavedYWithinRowBand(n, saved.y)) return n;
+        return { ...n, x: saved.x, y: saved.y };
+      });
+      setNodes(merged);
       const nextPositions = computed.reduce<Record<string, { x: number; y: number }>>((acc, n) => {
-        acc[n.id] = { x: n.x, y: n.y };
+        const saved = savedLayout[n.id];
+        if (saved && isSavedYWithinRowBand(n, saved.y)) {
+          acc[n.id] = { x: saved.x, y: saved.y };
+        } else {
+          acc[n.id] = { x: n.x, y: n.y };
+        }
         return acc;
       }, {});
       setSavedLayout(nextPositions);
@@ -1790,7 +1187,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                   width={160}
                   height={80}
                   fill="#25262b"
-                  stroke={node.status === 'online' ? '#40c057' : '#fa5252'}
+                  stroke={NODE_COLORS[getNodeSeverity(node)]}
                   strokeWidth={2}
                   cornerRadius={4}
                   draggable={canEditTopology}
@@ -1856,7 +1253,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                   x={node.x + 145}
                   y={node.y + 15}
                   radius={4}
-                  fill={node.status === 'online' ? '#40c057' : '#fa5252'}
+                  fill={NODE_COLORS[getNodeSeverity(node)]}
                 />
               </React.Fragment>
             ))}
