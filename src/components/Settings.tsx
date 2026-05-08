@@ -197,6 +197,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
           }));
         }
         const templateResp = await fetch('/api/snmp/templates', {
+          credentials: 'include',
           headers: {
             'x-user-role': role || 'viewer',
             'x-user-name': username || 'unknown'
@@ -209,6 +210,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
           }
         }
         const invMetaResp = await fetch('/api/inventory/meta', {
+          credentials: 'include',
           headers: {
             'x-user-role': role || 'viewer',
             'x-user-name': username || 'unknown'
@@ -605,6 +607,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       const models = JSON.parse(inventoryMetaEditor.modelsJson || '{}');
       const response = await fetch('/api/inventory/meta', {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
           'x-user-role': role || 'viewer',
@@ -663,6 +666,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
     try {
       const response = await fetch('/api/snmp/templates', {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
           'x-user-role': role || 'viewer',

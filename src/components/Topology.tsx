@@ -367,23 +367,43 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
     const p = pos.get(s.id) || { x: width / 2, y: height / 2 };
     return { id: s.id, x: p.x, y: p.y, lane: (laneMap.get(s.id) || 'unknown') as Lane };
   });
+  const laneOrder: Lane[] = ['router', 'core', 'distribution', 'access', 'unknown'];
+  const laneIdx = new Map<Lane, number>(laneOrder.map((lane, idx) => [lane, idx]));
   const laneNodes = new Map<Lane, { id: string; x: number; y: number; lane: Lane }[]>();
-  (['router', 'core', 'distribution', 'access', 'unknown'] as Lane[]).forEach((lane) => laneNodes.set(lane, []));
+  laneOrder.forEach((lane) => laneNodes.set(lane, []));
   points.forEach((p) => laneNodes.get(p.lane)?.push(p));
+  const idToPoint = new Map(points.map((p) => [p.id, p]));
+  const byLaneEdges = new Map<number, Array<{ a: string; b: string }>>();
+  links.forEach((l) => {
+    const a = idToPoint.get(l.source);
+    const b = idToPoint.get(l.target);
+    if (!a || !b) return;
+    const ai = laneIdx.get(a.lane) ?? 0;
+    const bi = laneIdx.get(b.lane) ?? 0;
+    if (Math.abs(ai - bi) !== 1) return;
+    const low = Math.min(ai, bi);
+    const edge = ai < bi ? { a: a.id, b: b.id } : { a: b.id, b: a.id };
+    if (!byLaneEdges.has(low)) byLaneEdges.set(low, []);
+    byLaneEdges.get(low)!.push(edge);
+  });
 
+  const anchorX = new Map<string, number>(points.map((p) => [p.id, p.x]));
   const laneGapX = TOPO_NODE_WIDTH + 48;
   const nodeHalf = TOPO_NODE_WIDTH / 2;
-  const lockLane = (lane: Lane) => {
-    const lanePoints = (laneNodes.get(lane) || []).sort((a, b) => (a.x - b.x) || a.id.localeCompare(b.id));
+  const median = (nums: number[]) => {
+    if (!nums.length) return 0;
+    const sorted = [...nums].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  };
+  const resolveLane = (lane: Lane) => {
+    const lanePoints = [...(laneNodes.get(lane) || [])].sort((a, b) => (a.x - b.x) || a.id.localeCompare(b.id));
     for (let i = 1; i < lanePoints.length; i++) {
       const prev = lanePoints[i - 1];
       const cur = lanePoints[i];
       const minX = prev.x + laneGapX;
       if (cur.x < minX) cur.x = minX;
     }
-    const center = lanePoints.length
-      ? lanePoints.reduce((acc, p) => acc + p.x, 0) / lanePoints.length
-      : width / 2;
     const maxRight = rightLimit - nodeHalf;
     const minLeft = 35 + nodeHalf;
     let shift = 0;
@@ -393,33 +413,52 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
       if (rightMost > maxRight) shift = maxRight - rightMost;
       if (leftMost + shift < minLeft) shift = minLeft - leftMost;
       lanePoints.forEach((p) => {
-        p.x += shift;
-        p.x = Math.min(maxRight, Math.max(minLeft, p.x));
+        p.x = Math.min(maxRight, Math.max(minLeft, p.x + shift));
       });
-    } else {
-      void center;
     }
+    laneNodes.set(lane, lanePoints);
   };
-  (['router', 'core', 'distribution', 'access', 'unknown'] as Lane[]).forEach(lockLane);
+  laneOrder.forEach(resolveLane);
 
-  const idToPoint = new Map(points.map((p) => [p.id, p]));
-  for (let iter = 0; iter < 4; iter++) {
-    let moved = false;
-    links.forEach((l) => {
-      const a = idToPoint.get(l.source);
-      const b = idToPoint.get(l.target);
-      if (!a || !b) return;
-      if (a.lane === b.lane) return;
-      const spanX = b.x - a.x;
-      if (Math.abs(spanX) > TOPO_CLUSTER_STEP_X * 1.45) {
-        const pull = (Math.abs(spanX) - TOPO_CLUSTER_STEP_X * 1.45) * 0.02 * Math.sign(spanX);
-        a.x += pull;
-        b.x -= pull;
-        moved = true;
-      }
+  for (let iter = 0; iter < 6; iter++) {
+    const passOrder = iter % 2 === 0 ? laneOrder : [...laneOrder].reverse();
+    passOrder.forEach((lane) => {
+      const idx = laneIdx.get(lane) ?? 0;
+      const lanePoints = laneNodes.get(lane) || [];
+      const targetX = new Map<string, number>();
+      lanePoints.forEach((p) => {
+        const neighbors: number[] = [];
+        const upEdges = byLaneEdges.get(idx - 1) || [];
+        const downEdges = byLaneEdges.get(idx) || [];
+        upEdges.forEach((e) => {
+          if (e.b === p.id) {
+            const src = idToPoint.get(e.a);
+            if (src) neighbors.push(src.x);
+          }
+        });
+        downEdges.forEach((e) => {
+          if (e.a === p.id) {
+            const dst = idToPoint.get(e.b);
+            if (dst) neighbors.push(dst.x);
+          }
+        });
+        const base = anchorX.get(p.id) ?? p.x;
+        targetX.set(p.id, neighbors.length ? median(neighbors) * 0.72 + base * 0.28 : base);
+      });
+      lanePoints
+        .sort((a, b) => {
+          const ax = targetX.get(a.id) ?? a.x;
+          const bx = targetX.get(b.id) ?? b.x;
+          if (ax !== bx) return ax - bx;
+          return a.id.localeCompare(b.id);
+        })
+        .forEach((p, order) => {
+          const tx = targetX.get(p.id) ?? p.x;
+          const leftBound = 35 + nodeHalf + order * laneGapX;
+          p.x = Math.max(tx, leftBound);
+        });
+      resolveLane(lane);
     });
-    (['router', 'core', 'distribution', 'access', 'unknown'] as Lane[]).forEach(lockLane);
-    if (!moved) break;
   }
 
   return switches.map((s) => {
@@ -681,7 +720,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
             'x-user-role': role || 'viewer',
             'x-user-name': username || 'unknown'
           },
-          body: JSON.stringify({ positions: nextPositions }),
+          body: JSON.stringify({ positions: nextPositions, branch: selectedRegion || undefined }),
         });
       } catch {
         // ignore layout persistence errors on auto-layout
@@ -762,7 +801,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       await fetch('/api/topology/layout', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ positions: { [id]: { x, y } } }),
+        body: JSON.stringify({ positions: { [id]: { x, y } }, branch: selectedRegion || undefined }),
       });
     } catch (error) {
       console.error('Failed to save layout:', error);
@@ -799,6 +838,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           portB: '',
           topologyMode,
           allowDuplicate: isFcMode,
+          branch: selectedRegion || undefined,
         }),
       });
       const data = await res.json();
@@ -817,7 +857,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       const res = await fetch('/api/topology/links', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(link),
+        body: JSON.stringify({ ...link, branch: selectedRegion || undefined }),
       });
       const data = await res.json();
       if (res.ok && Array.isArray(data.links)) {
@@ -840,6 +880,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           ...link,
           newPortA: nextPortA || t('topologyLinkCommentDefault'),
           newPortB: '',
+          branch: selectedRegion || undefined,
         }),
       });
       const data = await res.json();

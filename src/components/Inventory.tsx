@@ -124,6 +124,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
 
   React.useEffect(() => {
     fetch('/api/inventory/meta', {
+      credentials: 'include',
       headers: {
         'x-user-role': role || 'viewer',
         'x-user-name': username || 'unknown'
@@ -137,6 +138,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
       })
       .catch(() => {});
     fetch('/api/snmp/templates', {
+      credentials: 'include',
       headers: {
         'x-user-role': role || 'viewer',
         'x-user-name': username || 'unknown'
@@ -184,6 +186,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
       if (editingId) {
         const response = await fetch(`/api/inventory/${editingId}`, {
           method: 'PATCH',
+          credentials: 'include',
           headers: { 
             'Content-Type': 'application/json',
             'x-user-role': role || 'viewer',
@@ -198,6 +201,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
       } else {
         const response = await fetch('/api/inventory', {
           method: 'POST',
+          credentials: 'include',
           headers: { 
             'Content-Type': 'application/json',
             'x-user-role': role || 'viewer',
@@ -229,6 +233,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
       try {
         await fetch(`/api/inventory/${id}`, {
           method: 'DELETE',
+          credentials: 'include',
           headers: { 
             'x-user-role': role || 'viewer',
             'x-user-name': username || 'unknown'
@@ -273,6 +278,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
     try {
       const response = await fetch('/api/inventory/bulk', {
         method: 'POST',
+        credentials: 'include',
         headers: { 
           'Content-Type': 'application/json',
           'x-user-role': role || 'viewer',

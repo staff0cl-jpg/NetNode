@@ -10,6 +10,7 @@ interface AuditLog {
   action: string;
   details: string;
   category: 'auth' | 'inventory' | 'config' | 'user_mgmt' | 'system' | 'automation';
+  ipAddress?: string;
 }
 
 const CategoryIcon = ({ category }: { category: AuditLog['category'] }) => {
@@ -57,7 +58,8 @@ const AuditLogs: React.FC<{ role?: string, username?: string }> = ({ role, usern
   const filteredLogs = logs.filter(log => {
     const matchesSearch = log.user.toLowerCase().includes(searchTerm.toLowerCase()) || 
                          log.action.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                         log.details.toLowerCase().includes(searchTerm.toLowerCase());
+                         log.details.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                         (log.ipAddress || '').toLowerCase().includes(searchTerm.toLowerCase());
     const matchesCategory = filterCategory === 'all' || log.category === filterCategory;
     return matchesSearch && matchesCategory;
   });
@@ -191,17 +193,18 @@ const AuditLogs: React.FC<{ role?: string, username?: string }> = ({ role, usern
               <th className="text-left p-4 text-[10px] uppercase font-bold text-[#5c5f66] tracking-widest">{t('user')}</th>
               <th className="text-left p-4 text-[10px] uppercase font-bold text-[#5c5f66] tracking-widest">{t('category')}</th>
               <th className="text-left p-4 text-[10px] uppercase font-bold text-[#5c5f66] tracking-widest">{t('action')}</th>
+              <th className="text-left p-4 text-[10px] uppercase font-bold text-[#5c5f66] tracking-widest">{t('ipAddress')}</th>
               <th className="text-left p-4 text-[10px] uppercase font-bold text-[#5c5f66] tracking-widest">{t('details')}</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-[#373a40]">
             {loading && logs.length === 0 ? (
               <tr>
-                <td colSpan={5} className="p-8 text-center text-[#909296] italic">{t('loadingLogs')}</td>
+                <td colSpan={6} className="p-8 text-center text-[#909296] italic">{t('loadingLogs')}</td>
               </tr>
             ) : filteredLogs.length === 0 ? (
               <tr>
-                <td colSpan={5} className="p-8 text-center text-[#909296] italic">{t('noLogsFound')}</td>
+                <td colSpan={6} className="p-8 text-center text-[#909296] italic">{t('noLogsFound')}</td>
               </tr>
             ) : filteredLogs.map((log) => (
               <tr key={log.id} className="hover:bg-white/5 transition-colors group">
@@ -224,6 +227,9 @@ const AuditLogs: React.FC<{ role?: string, username?: string }> = ({ role, usern
                 </td>
                 <td className="p-4 text-sm font-bold text-white">
                   {localizeAction(log.action)}
+                </td>
+                <td className="p-4 text-xs font-mono text-[#909296]">
+                  {log.ipAddress || '-'}
                 </td>
                 <td className="p-4 text-sm text-[#909296]">
                   {localizeDetails(log.details)}

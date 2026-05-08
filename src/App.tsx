@@ -28,6 +28,7 @@ function AppContent() {
   const fetchInventory = async () => {
     try {
       const response = await fetch('/api/inventory', {
+        credentials: 'include',
         headers: { 
           'x-user-role': user?.role || 'viewer',
           'x-user-name': user?.username || 'unknown'
@@ -84,6 +85,7 @@ function AppContent() {
     const fetchBanner = async () => {
       try {
         const response = await fetch('/api/system/banner', {
+          credentials: 'include',
           headers: {
             'x-user-role': user?.role || 'viewer',
             'x-user-name': user?.username || 'unknown'

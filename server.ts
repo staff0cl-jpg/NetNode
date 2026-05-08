@@ -347,7 +347,8 @@ interface AuditLog {
   user: string;
   action: string;
   details: string;
-  category: 'auth' | 'inventory' | 'config' | 'user_mgmt' | 'system';
+  category: 'auth' | 'inventory' | 'config' | 'user_mgmt' | 'system' | 'automation';
+  ipAddress?: string;
 }
 
 let auditLogs: AuditLog[] = [];
@@ -2097,18 +2098,38 @@ function testLdapServiceBind(profile: LdapRoleProfile): Promise<{ ok: boolean; m
   });
 }
 
-const logAction = (user: string, action: string, details: string, category: AuditLog['category']) => {
+function getRequestIp(req: express.Request): string {
+  const forwarded = req.headers["x-forwarded-for"];
+  const forwardedFirst = Array.isArray(forwarded)
+    ? forwarded[0]
+    : typeof forwarded === "string"
+      ? forwarded.split(",")[0]
+      : "";
+  const rawIp = (forwardedFirst || req.socket?.remoteAddress || req.ip || "").trim();
+  if (!rawIp) return "-";
+  return rawIp.startsWith("::ffff:") ? rawIp.slice(7) : rawIp;
+}
+
+const logAction = (
+  user: string,
+  action: string,
+  details: string,
+  category: AuditLog['category'],
+  ipAddress?: string
+) => {
   const log: AuditLog = {
     id: Date.now().toString() + Math.random().toString(36).substr(2, 5),
     timestamp: new Date().toISOString(),
     user,
     action,
     details,
-    category
+    category,
+    ipAddress: ipAddress || undefined
   };
   auditLogs.unshift(log); // Newest first
   if (auditLogs.length > 500) auditLogs.pop(); // Keep last 500 logs
-  console.log(`[Audit] [${category.toUpperCase()}] ${user}: ${action} - ${details}`);
+  const suffix = ipAddress ? ` [ip=${ipAddress}]` : "";
+  console.log(`[Audit] [${category.toUpperCase()}] ${user}: ${action} - ${details}${suffix}`);
 };
 
 function parseCookieHeader(src = ""): Record<string, string> {
@@ -2143,6 +2164,16 @@ function clearSessionCookie(res: express.Response, secure: boolean) {
     sameSite: "lax",
     path: "/",
   });
+}
+
+function shouldUseSecureCookie(req: express.Request, isProd: boolean): boolean {
+  if (!isProd) return false;
+  if (req.secure) return true;
+  const proto = String(req.headers["x-forwarded-proto"] || "")
+    .split(",")[0]
+    .trim()
+    .toLowerCase();
+  return proto === "https";
 }
 
 function makeSession(user: AuthUser): string {
@@ -2185,7 +2216,6 @@ async function startServer() {
   const io = new Server(server);
   const PORT = process.env.PORT || 3000;
   const isProd = process.env.NODE_ENV === "production";
-  const useSecureCookie = isProd;
 
   console.log(`Starting server on port ${PORT} (NODE_ENV=${process.env.NODE_ENV})`);
 
@@ -2707,14 +2737,15 @@ async function startServer() {
 
   app.post("/api/auth/login", async (req, res) => {
     const { username, password } = req.body as { username?: string; password?: string };
+    const requestIp = getRequestIp(req);
 
     const user = users.find((u) => u.username === username && password && verifyLocalPassword(u, password));
     if (user) {
       const authUser = { id: user.id, username: user.username, role: user.role };
       user.lastLogin = new Date().toISOString();
       const sid = makeSession(authUser);
-      writeSessionCookie(res, sid, useSecureCookie);
-      logAction(username || "unknown", "Login Success", "User authenticated successfully", "auth");
+      writeSessionCookie(res, sid, shouldUseSecureCookie(req, isProd));
+      logAction(username || "unknown", "Login Success", "User authenticated successfully", "auth", requestIp);
       return res.json({ success: true, user: authUser });
     }
 
@@ -2723,28 +2754,34 @@ async function startServer() {
       if (adminOk) {
         const authUser = { id: `ldap-admin:${username}`, username, role: "admin" };
         const sid = makeSession(authUser);
-        writeSessionCookie(res, sid, useSecureCookie);
-        logAction(username, "Login Success", "LDAP (administrators profile)", "auth");
+        writeSessionCookie(res, sid, shouldUseSecureCookie(req, isProd));
+        logAction(username, "Login Success", "LDAP (administrators profile)", "auth", requestIp);
         return res.json({ success: true, user: authUser });
       }
       const operatorOk = await verifyLdapLogin(ldapConfig.operator, username, password);
       if (operatorOk) {
         const authUser = { id: `ldap-operator:${username}`, username, role: "operator" };
         const sid = makeSession(authUser);
-        writeSessionCookie(res, sid, useSecureCookie);
-        logAction(username, "Login Success", "LDAP (operators profile)", "auth");
+        writeSessionCookie(res, sid, shouldUseSecureCookie(req, isProd));
+        logAction(username, "Login Success", "LDAP (operators profile)", "auth", requestIp);
         return res.json({ success: true, user: authUser });
       }
     }
 
-    logAction(username || "unknown", "Login Failure", `Failed login attempt for username: ${username || "unknown"}`, "auth");
+    logAction(
+      username || "unknown",
+      "Login Failure",
+      `Failed login attempt for username: ${username || "unknown"}`,
+      "auth",
+      requestIp
+    );
     res.status(401).json({ success: false, message: "Invalid credentials" });
   });
 
   app.get("/api/auth/session", (req, res) => {
     const { sid, user } = readSession(req);
     if (!user) {
-      if (sid) clearSessionCookie(res, useSecureCookie);
+      if (sid) clearSessionCookie(res, shouldUseSecureCookie(req, isProd));
       // Return 200 to avoid noisy expected 401 logs before login in browser console.
       return res.json({ success: false, message: "Session expired or invalid" });
     }
@@ -2753,10 +2790,11 @@ async function startServer() {
 
   app.post("/api/auth/logout", (req, res) => {
     const { sid, user } = readSession(req);
+    const requestIp = getRequestIp(req);
     if (sid) sessionStore.delete(sid);
-    clearSessionCookie(res, useSecureCookie);
+    clearSessionCookie(res, shouldUseSecureCookie(req, isProd));
     if (user?.username) {
-      logAction(user.username, "Logout", "User logged out", "auth");
+      logAction(user.username, "Logout", "User logged out", "auth", requestIp);
     }
     return res.json({ success: true });
   });
@@ -3254,15 +3292,23 @@ async function startServer() {
       portB?: string;
       topologyMode?: string;
       allowDuplicate?: boolean;
+      branch?: string;
     };
     const source = String(body.source || "").trim();
     const target = String(body.target || "").trim();
     const portA = String(body.portA || "").trim();
     const portB = String(body.portB || "").trim();
+    const branch = String(body.branch || "").trim();
     const topologyMode = String(body.topologyMode || "").trim().toLowerCase();
     const allowDuplicate = Boolean(body.allowDuplicate) || topologyMode === "fc";
     if (!source || !target || source === target) {
       return res.status(400).json({ error: "Invalid link endpoints" });
+    }
+    if (branch) {
+      const branchIds = branchDeviceIdSet(branch);
+      if (!branchIds.has(source) || !branchIds.has(target)) {
+        return res.status(400).json({ error: "Link endpoints must belong to active branch" });
+      }
     }
     const exists = !allowDuplicate && topologyLinks.some(
       (l) =>
@@ -3270,7 +3316,7 @@ async function startServer() {
         (l.source === target && l.target === source && l.portA === portB && l.portB === portA)
     );
     if (!exists) {
-      saveTopologySnapshot(actorName(req), "topology.link.add");
+      saveTopologySnapshot(actorName(req), "topology.link.add", branch || undefined);
       topologyLinks.push(ensureTopologyLinkId({ source, target, portA: portA || "N/A", portB: portB || "N/A", manual: true }));
     }
     res.json({ success: true, links: topologyLinks });
@@ -3285,6 +3331,7 @@ async function startServer() {
       portB?: string;
       newPortA?: string;
       newPortB?: string;
+      branch?: string;
     };
     const source = String(body.source || "").trim();
     const target = String(body.target || "").trim();
@@ -3293,6 +3340,7 @@ async function startServer() {
     const portB = String(body.portB || "").trim();
     const newPortA = String(body.newPortA || "").trim();
     const newPortB = String(body.newPortB || "").trim();
+    const branch = String(body.branch || "").trim();
     if (!source || !target || !portA || !portB) return res.status(400).json({ error: "Invalid link" });
     if (!newPortA && !newPortB) return res.status(400).json({ error: "newPortA/newPortB required" });
 
@@ -3308,8 +3356,15 @@ async function startServer() {
         );
     const pick = idx >= 0 ? idx : revIdx;
     if (pick < 0) return res.status(404).json({ error: "Link not found" });
+    if (branch) {
+      const branchIds = branchDeviceIdSet(branch);
+      const link = topologyLinks[pick];
+      if (!branchIds.has(link.source) || !branchIds.has(link.target)) {
+        return res.status(400).json({ error: "Link is outside active branch" });
+      }
+    }
 
-    saveTopologySnapshot(actorName(req), "topology.link.rename");
+    saveTopologySnapshot(actorName(req), "topology.link.rename", branch || undefined);
     const cur = topologyLinks[pick];
     topologyLinks[pick] = ensureTopologyLinkId({
       ...cur,
@@ -3321,14 +3376,17 @@ async function startServer() {
   });
 
   app.delete("/api/topology/links", checkRole(["admin", "operator"]), (req, res) => {
-    const body = req.body as { id?: string; source?: string; target?: string; portA?: string; portB?: string };
+    const body = req.body as { id?: string; source?: string; target?: string; portA?: string; portB?: string; branch?: string };
     const id = String(body.id || "").trim();
     const source = String(body.source || "").trim();
     const target = String(body.target || "").trim();
     const portA = String(body.portA || "").trim();
     const portB = String(body.portB || "").trim();
+    const branch = String(body.branch || "").trim();
+    const branchIds = branch ? branchDeviceIdSet(branch) : null;
     const before = topologyLinks.length;
     const nextLinks = topologyLinks.filter((l) => {
+      if (branchIds && (!branchIds.has(l.source) || !branchIds.has(l.target))) return true;
       if (id) return l.id !== id;
       return !(
         l.source === source &&
@@ -3338,18 +3396,21 @@ async function startServer() {
       );
     });
     const removed = before - nextLinks.length;
-    if (removed > 0) saveTopologySnapshot(actorName(req), "topology.link.delete");
+    if (removed > 0) saveTopologySnapshot(actorName(req), "topology.link.delete", branch || undefined);
     topologyLinks = nextLinks;
     res.json({ success: true, removed, links: topologyLinks });
   });
 
   app.post("/api/topology/layout", checkRole(["admin", "operator"]), (req, res) => {
-    const body = req.body as { positions?: Record<string, { x: number; y: number }> };
+    const body = req.body as { positions?: Record<string, { x: number; y: number }>; branch?: string };
     const positions = body?.positions || {};
+    const branch = String(body?.branch || "").trim();
+    const branchIds = branch ? branchDeviceIdSet(branch) : null;
     const actor = actorName(req);
     const hasIncoming = Object.keys(positions).length > 0;
-    if (hasIncoming) saveTopologySnapshot(actor, "topology.layout.update");
+    if (hasIncoming) saveTopologySnapshot(actor, "topology.layout.update", branch || undefined);
     for (const [id, pos] of Object.entries(positions)) {
+      if (branchIds && !branchIds.has(id)) continue;
       if (Number.isFinite(pos?.x) && Number.isFinite(pos?.y)) {
         topologyLayout[id] = { x: Number(pos.x), y: Number(pos.y) };
       }
