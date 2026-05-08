@@ -96,7 +96,9 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
 
   const onlineSwitches = switches.filter(s => s.status === 'online');
   const onlineCount = onlineSwitches.length;
-  const avgLoadValue = switches.length > 0 ? Math.round((onlineCount / switches.length) * 100) : 0;
+  const avgLoadValue = Number.isFinite(Number(dashboardMetrics?.cpuSummary?.avgCpuLoad))
+    ? Number(dashboardMetrics?.cpuSummary?.avgCpuLoad)
+    : 0;
   
   const dynamicData = React.useMemo(() => {
     const top = dashboardMetrics?.trunkSummary?.topByTraffic || [];
@@ -351,6 +353,12 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
                   </div>
                   <div className="text-[#909296] mt-1 break-words">{p.ifName} :: {p.description}</div>
                   <div className="text-[#228be6] mt-1">IN {Math.round(p.inBps / 1_000_000)} Mbps / OUT {Math.round(p.outBps / 1_000_000)} Mbps</div>
+                  {(() => {
+                    const device = ((dashboardMetrics?.devices || []) as Array<any>).find((d) => d.id === p.deviceId);
+                    const cpu = Number(device?.cpuLoad);
+                    if (!Number.isFinite(cpu)) return null;
+                    return <div className="text-[#fab005] mt-1">CPU: {Math.round(cpu * 100) / 100}%</div>;
+                  })()}
                 </div>
               ))}
             </div>

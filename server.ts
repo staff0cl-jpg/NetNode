@@ -159,6 +159,44 @@ type TopologyLink = {
 };
 let topologyLinks: TopologyLink[] = [];
 let topologyLayout: Record<string, { x: number; y: number }> = {};
+type TopologySnapshot = {
+  id: string;
+  createdAt: string;
+  actor: string;
+  reason: string;
+  branch?: string;
+  links: TopologyLink[];
+  layout: Record<string, { x: number; y: number }>;
+};
+let topologySnapshots: TopologySnapshot[] = [];
+
+function cloneTopologyLinks(links: TopologyLink[]): TopologyLink[] {
+  return links.map((l) => ({ ...l }));
+}
+
+function cloneTopologyLayout(layout: Record<string, { x: number; y: number }>): Record<string, { x: number; y: number }> {
+  const out: Record<string, { x: number; y: number }> = {};
+  Object.entries(layout || {}).forEach(([id, p]) => {
+    out[id] = { x: Number(p.x), y: Number(p.y) };
+  });
+  return out;
+}
+
+function saveTopologySnapshot(actor: string, reason: string, branch?: string) {
+  const snapshot: TopologySnapshot = {
+    id: `topo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    createdAt: new Date().toISOString(),
+    actor,
+    reason,
+    branch: branch || undefined,
+    links: cloneTopologyLinks(topologyLinks),
+    layout: cloneTopologyLayout(topologyLayout),
+  };
+  topologySnapshots.push(snapshot);
+  if (topologySnapshots.length > 60) {
+    topologySnapshots = topologySnapshots.slice(topologySnapshots.length - 60);
+  }
+}
 
 type AuthUser = { id: string; username: string; role: string };
 type LocalUser = AuthUser & {
@@ -433,6 +471,7 @@ let snmpTemplates: SnmpTemplate[] = [
     vendorHint: "Any",
     metrics: [
       { key: "uptime", oid: "1.3.6.1.2.1.1.3.0", scale: 0.01, unit: "s" },
+      { key: "cpu_load", oid: "1.3.6.1.2.1.25.3.3.1.2", scale: 1, unit: "%" },
     ],
   },
   {
@@ -1209,6 +1248,44 @@ function snmpWalk(host: string, baseOid: string, timeout = snmpConfig.timeoutMs)
     };
     tryNext();
   });
+}
+
+function parseNumericMetric(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function isCpuMetricDef(def: SnmpOidDef): boolean {
+  const key = String(def.key || "").toLowerCase();
+  const oid = String(def.oid || "");
+  return (
+    key.includes("cpu") ||
+    oid.startsWith("1.3.6.1.2.1.25.3.3.1.2") || // hrProcessorLoad
+    oid.startsWith("1.3.6.1.4.1.9.2.1.58") || // Cisco old CPU avg 5 sec
+    oid.startsWith("1.3.6.1.4.1.9.2.1.57") || // Cisco old CPU avg 1 min
+    oid.startsWith("1.3.6.1.4.1.14988.1.1.3.10.0") // MikroTik CPU load
+  );
+}
+
+async function resolveMetricValue(host: string, def: SnmpOidDef, scalarMap: Record<string, number | string>): Promise<number | string | null> {
+  const direct = scalarMap[def.oid];
+  if (direct !== undefined) {
+    const numeric = parseNumericMetric(direct);
+    if (numeric !== null) return numeric * (def.scale ?? 1);
+    return String(direct);
+  }
+  // For table-like CPU OIDs (e.g., hrProcessorLoad), calculate arithmetic mean.
+  if (isCpuMetricDef(def) && !String(def.oid || "").endsWith(".0")) {
+    const walked = await snmpWalk(host, def.oid);
+    const samples = Object.values(walked)
+      .map((v) => Number(v))
+      .filter((n) => Number.isFinite(n));
+    if (samples.length) {
+      const avg = samples.reduce((a, b) => a + b, 0) / samples.length;
+      return avg * (def.scale ?? 1);
+    }
+  }
+  return null;
 }
 
 async function collectTrunkMetrics(host: string): Promise<TrunkMetric[]> {
@@ -2850,9 +2927,49 @@ async function startServer() {
     res.json({ links: topologyLinks, layout: topologyLayout });
   });
 
+  app.get("/api/topology/versions", checkRole(["admin", "operator", "viewer"]), (_req, res) => {
+    const versions = topologySnapshots
+      .slice()
+      .reverse()
+      .map((v) => ({
+        id: v.id,
+        createdAt: v.createdAt,
+        actor: v.actor,
+        reason: v.reason,
+        branch: v.branch,
+      }));
+    res.json({ versions, total: versions.length });
+  });
+
+  app.post("/api/topology/undo", checkRole(["admin", "operator"]), (req, res) => {
+    const branch = String(req.body?.branch || "").trim();
+    const actor = actorName(req);
+    if (!topologySnapshots.length) {
+      return res.status(404).json({ success: false, error: "No topology versions available" });
+    }
+    const idx = branch
+      ? (() => {
+          for (let i = topologySnapshots.length - 1; i >= 0; i--) {
+            const v = topologySnapshots[i];
+            if (!v.branch || v.branch === branch) return i;
+          }
+          return -1;
+        })()
+      : topologySnapshots.length - 1;
+    if (idx < 0) return res.status(404).json({ success: false, error: "No matching topology version found" });
+    const snapshot = topologySnapshots[idx];
+    topologySnapshots.splice(idx, 1);
+    topologyLinks = cloneTopologyLinks(snapshot.links).map((l) => ensureTopologyLinkId(l));
+    topologyLayout = cloneTopologyLayout(snapshot.layout);
+    logAction(actor, "Topology Undo", `Restored version ${snapshot.id}${branch ? ` (branch: ${branch})` : ""}`, "inventory");
+    return res.json({ success: true, restored: { id: snapshot.id, createdAt: snapshot.createdAt, reason: snapshot.reason }, links: topologyLinks, layout: topologyLayout });
+  });
+
   app.post("/api/topology/links/rebuild", checkRole(["admin", "operator"]), async (req, res) => {
     try {
       const branch = String(req.body?.branch || "").trim();
+      const actor = actorName(req);
+      saveTopologySnapshot(actor, "topology.rebuild", branch || undefined);
       const links = await inferTopologyLinksFromTrunkDescriptions(branch || undefined);
       if (branch) {
         const branchDeviceIds = new Set(
@@ -2931,7 +3048,6 @@ async function startServer() {
         topologyLinks = out;
       }
       rebuildTopologyFromInventory();
-      const actor = actorName(req);
       logAction(
         actor,
         "Rebuild Topology",
@@ -3008,6 +3124,7 @@ async function startServer() {
         (l.source === target && l.target === source && l.portA === portB && l.portB === portA)
     );
     if (!exists) {
+      saveTopologySnapshot(actorName(req), "topology.link.add");
       topologyLinks.push(ensureTopologyLinkId({ source, target, portA: portA || "N/A", portB: portB || "N/A", manual: true }));
     }
     res.json({ success: true, links: topologyLinks });
@@ -3046,6 +3163,7 @@ async function startServer() {
     const pick = idx >= 0 ? idx : revIdx;
     if (pick < 0) return res.status(404).json({ error: "Link not found" });
 
+    saveTopologySnapshot(actorName(req), "topology.link.rename");
     const cur = topologyLinks[pick];
     topologyLinks[pick] = ensureTopologyLinkId({
       ...cur,
@@ -3064,7 +3182,7 @@ async function startServer() {
     const portA = String(body.portA || "").trim();
     const portB = String(body.portB || "").trim();
     const before = topologyLinks.length;
-    topologyLinks = topologyLinks.filter((l) => {
+    const nextLinks = topologyLinks.filter((l) => {
       if (id) return l.id !== id;
       return !(
         l.source === source &&
@@ -3073,7 +3191,10 @@ async function startServer() {
         l.portB === portB
       );
     });
-    res.json({ success: true, removed: before - topologyLinks.length, links: topologyLinks });
+    const removed = before - nextLinks.length;
+    if (removed > 0) saveTopologySnapshot(actorName(req), "topology.link.delete");
+    topologyLinks = nextLinks;
+    res.json({ success: true, removed, links: topologyLinks });
   });
 
   app.post("/api/topology/layout", checkRole(["admin", "operator"]), (req, res) => {
@@ -3128,12 +3249,19 @@ async function startServer() {
           ? await snmpGetMap(item.ip, allDefs.map((m) => m.oid))
           : {};
         const custom: Record<string, number | string> = {};
-        allDefs.forEach((def) => {
-          const v = map[def.oid];
-          if (v === undefined) return;
-          const n = Number(v);
-          custom[def.key] = Number.isFinite(n) ? n * (def.scale ?? 1) : String(v);
-        });
+        await Promise.all(
+          allDefs.map(async (def) => {
+            const value = await resolveMetricValue(item.ip, def, map);
+            if (value === null || value === undefined) return;
+            custom[def.key] = typeof value === "number" ? Math.round(value * 100) / 100 : String(value);
+          })
+        );
+        const cpuCandidates = Object.entries(custom)
+          .filter(([k, v]) => k.toLowerCase().includes("cpu") && Number.isFinite(Number(v)))
+          .map(([, v]) => Number(v));
+        const cpuLoad = cpuCandidates.length
+          ? Math.round((cpuCandidates.reduce((a, b) => a + b, 0) / cpuCandidates.length) * 100) / 100
+          : null;
         const trunks = await collectTrunkMetricsWithFallback(item);
         return {
           id: item.id,
@@ -3143,14 +3271,21 @@ async function startServer() {
           category: item.category || "Switch",
           trunks,
           metrics: custom,
+          cpuLoad,
         };
       })
     );
 
     const trunkFlat = sample.flatMap((d) => d.trunks.map((t) => ({ ...t, deviceId: d.id, deviceName: d.name, branch: d.branch })));
+    const cpuDevices = sample.filter((d) => Number.isFinite(Number(d.cpuLoad))).map((d) => Number(d.cpuLoad));
+    const avgCpuLoad = cpuDevices.length ? Math.round((cpuDevices.reduce((a, b) => a + b, 0) / cpuDevices.length) * 100) / 100 : null;
     res.json({
       generatedAt: new Date().toISOString(),
       devices: sample,
+      cpuSummary: {
+        avgCpuLoad,
+        devicesWithCpu: cpuDevices.length,
+      },
       trunkSummary: {
         total: trunkFlat.length,
         down: trunkFlat.filter((t) => t.operStatus !== 1).length,
