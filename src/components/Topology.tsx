@@ -539,6 +539,8 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
 
   const anchorX = new Map<string, number>(points.map((p) => [p.id, p.x]));
   const nodeHalf = TOPO_NODE_WIDTH / 2;
+  const minBoxGapX = TOPO_NODE_WIDTH + 34;
+  const minBoxGapY = TOPO_NODE_HEIGHT + 30;
   const median = (nums: number[]) => {
     if (!nums.length) return 0;
     const sorted = [...nums].sort((a, b) => a - b);
@@ -610,12 +612,88 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
     });
   }
 
+  const allLaneNodes = new Map<Lane, { id: string; x: number; y: number; lane: Lane }[]>();
+  laneOrder.forEach((lane) => allLaneNodes.set(lane, []));
+  points.forEach((p) => allLaneNodes.get(p.lane)?.push(p));
+
+  const resolveLaneRows = () => {
+    laneOrder.forEach((lane) => {
+      const lanePoints = [...(allLaneNodes.get(lane) || [])].sort((a, b) => (a.y - b.y) || (a.x - b.x) || a.id.localeCompare(b.id));
+      let rowY = 35;
+      let nextX = 35;
+      lanePoints.forEach((p, idx) => {
+        if (idx === 0 || p.y >= rowY + minBoxGapY) {
+          rowY = Math.max(35, p.y);
+          nextX = 35;
+        }
+        if (p.x < nextX) p.x = nextX;
+        if (p.x > rightLimit && nextX > 35) {
+          rowY += minBoxGapY;
+          p.x = 35;
+        }
+        p.y = Math.max(35, rowY);
+        nextX = p.x + minBoxGapX;
+      });
+      allLaneNodes.set(lane, lanePoints);
+    });
+  };
+
+  const globalRelaxCollisions = () => {
+    const ordered = [...points].sort((a, b) => {
+      const ay = a.y - b.y;
+      if (ay !== 0) return ay;
+      const ax = a.x - b.x;
+      if (ax !== 0) return ax;
+      return a.id.localeCompare(b.id);
+    });
+    for (let pass = 0; pass < 18; pass++) {
+      let moved = false;
+      resolveLaneRows();
+      for (let i = 0; i < ordered.length; i++) {
+        for (let j = i + 1; j < ordered.length; j++) {
+          const a = ordered[i];
+          const b = ordered[j];
+          const overlapX = minBoxGapX - Math.abs(a.x - b.x);
+          const overlapY = minBoxGapY - Math.abs(a.y - b.y);
+          if (overlapX <= 0 || overlapY <= 0) continue;
+
+          const ai = laneIdx.get(a.lane) ?? laneOrder.length;
+          const bi = laneIdx.get(b.lane) ?? laneOrder.length;
+          if (ai === bi) {
+            // Same-lane collisions are resolved horizontally first to preserve hierarchy.
+            const [left, right] = a.x < b.x || (a.x === b.x && a.id.localeCompare(b.id) <= 0) ? [a, b] : [b, a];
+            right.x = Math.max(right.x, left.x + minBoxGapX);
+          } else if (Math.abs(ai - bi) <= 1) {
+            // Adjacent lanes keep their x alignment; the lower hierarchy lane moves down.
+            const lower = ai < bi ? b : a;
+            lower.y = Math.max(lower.y, (ai < bi ? a.y : b.y) + minBoxGapY);
+          } else if (overlapX <= overlapY) {
+            const [left, right] = a.x < b.x || (a.x === b.x && a.id.localeCompare(b.id) <= 0) ? [a, b] : [b, a];
+            right.x = Math.max(right.x, left.x + minBoxGapX);
+          } else {
+            const [top, bottom] = a.y < b.y || (a.y === b.y && a.id.localeCompare(b.id) <= 0) ? [a, b] : [b, a];
+            bottom.y = Math.max(bottom.y, top.y + minBoxGapY);
+          }
+          a.x = Math.max(35, a.x);
+          b.x = Math.max(35, b.x);
+          a.y = Math.max(35, a.y);
+          b.y = Math.max(35, b.y);
+          moved = true;
+        }
+      }
+      if (!moved) break;
+    }
+    resolveLaneRows();
+  };
+
+  globalRelaxCollisions();
+
   return switches.map((s) => {
     const p = idToPoint.get(s.id) || { x: width / 2, y: height / 2, lane: 'unknown' as Lane };
     return {
       ...s,
-      x: Math.min(rightLimit, Math.max(35, p.x)),
-      y: Math.min(bottomLimit, Math.max(35, p.y)),
+      x: Math.max(35, p.x),
+      y: Math.max(35, p.y),
     };
   });
 }

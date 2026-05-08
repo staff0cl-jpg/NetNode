@@ -3,6 +3,7 @@ import { createServer as createViteServer } from "vite";
 import { Server } from "socket.io";
 import http from "http";
 import net from "net";
+import { promises as fs } from "fs";
 import path from "path";
 import { Client } from "ssh2";
 import * as dotenv from "dotenv";
@@ -534,7 +535,66 @@ let snmpConfig = {
   port: 161,
   timeoutMs: 1200,
   retries: 0,
+  macSearch: {
+    dot1dTpFdbPortOid: "1.3.6.1.2.1.17.4.3.1.2",
+    dot1dBasePortIfIndexOid: "1.3.6.1.2.1.17.1.4.1.2",
+    dot1qTpFdbPortOid: "1.3.6.1.2.1.17.7.1.2.2.1.2",
+    voiceVlanMacOid: "1.3.6.1.4.1.9.9.315.1.2.3.1.1",
+  },
 };
+
+type BackupScope = {
+  mode: "all" | "filtered";
+  deviceIds?: string[];
+  vendors?: string[];
+  branches?: string[];
+};
+
+type BackupConfig = {
+  enabled: boolean;
+  intervalHours: number;
+  networkSharePath: string;
+  scope: BackupScope;
+  credentials?: {
+    username?: string;
+    password?: string;
+    domain?: string;
+  };
+};
+
+type BackupHistoryItem = {
+  id: string;
+  startedAt: string;
+  finishedAt?: string;
+  status: "running" | "completed" | "failed";
+  actor: string;
+  summary: {
+    total: number;
+    success: number;
+    failed: number;
+  };
+  details: Array<{
+    deviceId: string;
+    deviceName: string;
+    ip: string;
+    status: "success" | "failed";
+    filePath?: string;
+    error?: string;
+  }>;
+  error?: string;
+};
+
+let backupConfig: BackupConfig = {
+  enabled: false,
+  intervalHours: 6,
+  networkSharePath: "",
+  scope: { mode: "all" },
+  credentials: { username: "", password: "", domain: "" },
+};
+let backupHistory: BackupHistoryItem[] = [];
+let backupScheduler: NodeJS.Timeout | null = null;
+let backupRunLock = false;
+let backupSchedulerLastTickAt: string | null = null;
 
 let inventoryMeta = {
   categories: ["Switch", "Router", "FC Switch", "UPS", "Firewall", "Other"],
@@ -576,14 +636,14 @@ function isLikelyTrunkPort(name: string, alias: string, descr: string, ifType?: 
   const t = Number(ifType || 0);
   if (t === 161) return true; // ieee8023adLag
   if (!v) return false;
-  return /\b(trunk|trk\d*|lag\d*|port-?channel\d*|po\d+|etherchannel|bond\d*|bridge-aggregation\d*|ae\d+|lacp)\b/.test(v);
+  return /\b(trunk|trk\d*|lag\d*|port-?\s*channel\s*\d*|po\s*\d+|etherchannel|bond\d*|bridge-aggregation\d*|ae\d+|lacp)\b/.test(v);
 }
 
 function isLikelyLagInterface(name: string, alias: string, descr: string, ifType?: string): boolean {
   const v = `${name} ${alias} ${descr}`.trim().toLowerCase();
   const t = Number(ifType || 0);
   if (t === 161) return true; // ieee8023adLag
-  return /\b(trk\d*|lag\d*|port-?channel\d*|po\d+|etherchannel|bond\d*|bridge-aggregation\d*|ae\d+|lacp)\b/.test(v);
+  return /\b(trk\d*|lag\d*|port-?\s*channel\s*\d*|po\s*\d+|etherchannel|bond\d*|bridge-aggregation\d*|ae\d+|lacp)\b/.test(v);
 }
 
 function parseCiscoIfIndexFromSuffix(suffix: string): string {
@@ -624,18 +684,43 @@ function emptyLagMembership(): LagMembership {
 
 async function getLagMembership(host: string): Promise<LagMembership> {
   try {
-    // IEEE8023-LAG-MIB maps member ifIndex values to the active logical aggregator ifIndex.
-    const attachedAgg = await snmpWalk(host, "1.2.840.10006.300.43.1.2.1.1.13");
+    const [attachedAgg, ifStackStatus, ifNames, ifAlias, ifDescr, ifType] = await Promise.all([
+      // IEEE8023-LAG-MIB maps member ifIndex values to the active logical aggregator ifIndex.
+      snmpWalk(host, "1.2.840.10006.300.43.1.2.1.1.13"),
+      // IF-MIB ifStackStatus often exposes Cisco EtherChannel as Port-Channel -> physical member.
+      snmpWalk(host, "1.3.6.1.2.1.31.1.2.1.3"),
+      snmpWalk(host, "1.3.6.1.2.1.31.1.1.1.1"),
+      snmpWalk(host, "1.3.6.1.2.1.31.1.1.1.18"),
+      snmpWalk(host, "1.3.6.1.2.1.2.2.1.2"),
+      snmpWalk(host, "1.3.6.1.2.1.2.2.1.3"),
+    ]);
     const out = emptyLagMembership();
-    for (const [memberRaw, aggRaw] of Object.entries(attachedAgg)) {
+    const addMembership = (memberRaw: string, aggRaw: string) => {
       const member = String(memberRaw || "").trim();
       const agg = String(aggRaw || "").trim();
-      if (!member || !agg || agg === "0" || agg === member) continue;
+      if (!member || !agg || agg === "0" || member === "0" || agg === member) return;
       out.memberToAgg.set(member, agg);
       out.aggIndexes.add(agg);
       const members = out.aggToMembers.get(agg) || new Set<string>();
       members.add(member);
       out.aggToMembers.set(agg, members);
+    };
+    for (const [memberRaw, aggRaw] of Object.entries(attachedAgg)) {
+      addMembership(memberRaw, aggRaw);
+    }
+    for (const [suffix, rawStatus] of Object.entries(ifStackStatus)) {
+      if (Number(rawStatus || 0) !== 1) continue; // active
+      const [higher, lower] = String(suffix || "").split(".").filter(Boolean);
+      if (!higher || !lower) continue;
+      const higherLooksLag =
+        out.aggIndexes.has(higher) ||
+        isLikelyLagInterface(
+          String(ifNames[higher] || "").trim(),
+          String(ifAlias[higher] || "").trim(),
+          String(ifDescr[higher] || "").trim(),
+          ifType[higher]
+        );
+      if (higherLooksLag) addMembership(lower, higher);
     }
     return out;
   } catch {
@@ -1565,6 +1650,70 @@ function snmpWalk(host: string, baseOid: string, timeout = snmpConfig.timeoutMs)
   });
 }
 
+function normalizeMac(raw: string): string {
+  const hex = String(raw || "").toLowerCase().replace(/[^0-9a-f]/g, "");
+  if (hex.length !== 12) return "";
+  return hex.match(/.{1,2}/g)?.join(":") || "";
+}
+
+function normalizeMacLoose(raw: string): string {
+  return String(raw || "").toLowerCase().replace(/[^0-9a-f]/g, "");
+}
+
+function macFromOidSuffix(suffix: string): string {
+  const parts = String(suffix || "")
+    .split(".")
+    .map((x) => Number(x))
+    .filter((n) => Number.isFinite(n) && n >= 0 && n <= 255);
+  if (parts.length < 6) return "";
+  const macParts = parts.slice(parts.length - 6).map((n) => n.toString(16).padStart(2, "0"));
+  return normalizeMac(macParts.join(""));
+}
+
+function parseQBridgeSuffix(suffix: string): { vlan?: number; mac: string } {
+  const parts = String(suffix || "")
+    .split(".")
+    .map((x) => Number(x))
+    .filter((n) => Number.isFinite(n));
+  if (parts.length < 7) return { mac: "" };
+  const vlan = parts[0];
+  const mac = normalizeMac(parts.slice(parts.length - 6).map((n) => n.toString(16).padStart(2, "0")).join(""));
+  return { vlan: Number.isFinite(vlan) ? vlan : undefined, mac };
+}
+
+async function collectVoiceVlanMap(host: string): Promise<Record<string, number>> {
+  const out: Record<string, number> = {};
+  const voiceOid = String(snmpConfig.macSearch?.voiceVlanMacOid || "").trim();
+  if (!voiceOid) return out;
+  try {
+    const walked = await snmpWalk(host, voiceOid);
+    Object.entries(walked).forEach(([suffix, value]) => {
+      const vlan = Number(value);
+      if (!Number.isFinite(vlan) || vlan <= 0 || vlan > 4094) return;
+      const tokens = String(suffix || "").split(".").filter(Boolean);
+      const ifIndex = tokens[tokens.length - 1];
+      if (!ifIndex) return;
+      out[ifIndex] = vlan;
+    });
+  } catch {
+    /* ignore vendor-specific failures */
+  }
+  return out;
+}
+
+function sanitizeFileNamePart(src: string): string {
+  return String(src || "")
+    .trim()
+    .replace(/[\\/:*?"<>|]+/g, "_")
+    .replace(/\s+/g, "_")
+    .slice(0, 80) || "device";
+}
+
+function timestampForFile(date = new Date()): string {
+  const p2 = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}${p2(date.getMonth() + 1)}${p2(date.getDate())}-${p2(date.getHours())}${p2(date.getMinutes())}${p2(date.getSeconds())}`;
+}
+
 function parseNumericMetric(value: unknown): number | null {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
@@ -1751,6 +1900,101 @@ function runSshReadonlyCommands(host: string, username: string, password: string
         ...legacySshConnectOptions(),
       });
   });
+}
+
+function backupCommandsForVendor(vendor: string): string[] {
+  const v = String(vendor || "").toLowerCase();
+  if (v.includes("cisco")) return ["terminal length 0", "show running-config"];
+  if (v.includes("hpe") || v.includes("aruba")) return ["show running-config", "display current-configuration"];
+  return ["show running-config"];
+}
+
+function resolveBackupTargets(config: BackupConfig): InventoryItem[] {
+  if (config.scope.mode !== "filtered") return [...inventory];
+  const ids = new Set((config.scope.deviceIds || []).map((x) => String(x)));
+  const vendors = new Set((config.scope.vendors || []).map((x) => String(x).toLowerCase()));
+  const branches = new Set((config.scope.branches || []).map((x) => String(x).toLowerCase()));
+  return inventory.filter((d) => {
+    if (ids.size && !ids.has(d.id)) return false;
+    if (vendors.size && !vendors.has(String(d.vendor || "").toLowerCase())) return false;
+    if (branches.size && !branches.has(String(d.branch || "").toLowerCase())) return false;
+    return true;
+  });
+}
+
+async function runBackupJob(actor: string): Promise<BackupHistoryItem> {
+  if (backupRunLock) {
+    throw new Error("Backup job is already running");
+  }
+  backupRunLock = true;
+  const entry: BackupHistoryItem = {
+    id: `backup-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    startedAt: new Date().toISOString(),
+    status: "running",
+    actor,
+    summary: { total: 0, success: 0, failed: 0 },
+    details: [],
+  };
+  backupHistory.unshift(entry);
+  if (backupHistory.length > 100) backupHistory = backupHistory.slice(0, 100);
+  try {
+    const profile = getActiveSshReadonlyProfile();
+    if (!profile) {
+      throw new Error("SSH readonly profile is required for backups");
+    }
+    const root = String(backupConfig.networkSharePath || "").trim();
+    if (!root) {
+      throw new Error("Network share path is not configured");
+    }
+    await fs.mkdir(root, { recursive: true });
+    const targets = resolveBackupTargets(backupConfig);
+    entry.summary.total = targets.length;
+    await forEachWithLimit(targets, 3, async (device) => {
+      try {
+        const output = await runSshReadonlyCommands(
+          device.ip,
+          profile.username,
+          profile.password,
+          profile.port,
+          backupCommandsForVendor(device.vendor)
+        );
+        const stamp = timestampForFile();
+        const fileName = `${sanitizeFileNamePart(device.name)}_${sanitizeFileNamePart(device.ip)}_${stamp}.cfg`;
+        const filePath = path.join(root, fileName);
+        const content = `# NetNode backup\n# device=${device.name}\n# ip=${device.ip}\n# vendor=${device.vendor}\n# timestamp=${new Date().toISOString()}\n\n${output}`;
+        await fs.writeFile(filePath, content, "utf8");
+        entry.details.push({
+          deviceId: device.id,
+          deviceName: device.name,
+          ip: device.ip,
+          status: "success",
+          filePath,
+        });
+        entry.summary.success += 1;
+      } catch (e) {
+        entry.details.push({
+          deviceId: device.id,
+          deviceName: device.name,
+          ip: device.ip,
+          status: "failed",
+          error: e instanceof Error ? e.message : String(e),
+        });
+        entry.summary.failed += 1;
+      }
+    });
+    entry.status = entry.summary.failed > 0 ? "failed" : "completed";
+    entry.finishedAt = new Date().toISOString();
+    logAction(actor, "Backup Run", `Backup ${entry.id}: success ${entry.summary.success}, failed ${entry.summary.failed}`, "system");
+    return entry;
+  } catch (e) {
+    entry.status = "failed";
+    entry.error = e instanceof Error ? e.message : String(e);
+    entry.finishedAt = new Date().toISOString();
+    logAction(actor, "Backup Run Failed", entry.error, "system");
+    return entry;
+  } finally {
+    backupRunLock = false;
+  }
 }
 
 function parseTrunksFromSshText(text: string): TrunkMetric[] {
@@ -1995,7 +2239,8 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
   if (devices.length < 2) return [];
 
   const byId = new Map(devices.map((d) => [d.id, d]));
-  const directed: Array<{ source: string; target: string; portA: string; raw: string }> = [];
+  type DirectedTopologyCandidate = { source: string; target: string; portA: string; raw: string; isFc?: boolean; isLag?: boolean; sourceRank?: number };
+  const directed: DirectedTopologyCandidate[] = [];
   const isFcSwitch = (item: InventoryItem) => {
     const category = String(item.category || "").toLowerCase();
     return category === "fc switch" || category === "fibre channel switch" || category === "fiber channel switch";
@@ -2018,6 +2263,29 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
     if (!ifIndex || (ifOperMap[ifIndex] === undefined && ifAdminMap[ifIndex] === undefined)) return true;
     const state = resolveTrunkState(ifIndex, ifOperMap, ifAdminMap, lag);
     return !state.isDown;
+  };
+  const resolveLogicalPort = (
+    ifIndex: string,
+    ifNameMap: Record<string, string>,
+    ifAliasMap: Record<string, string>,
+    ifDescrMap: Record<string, string>,
+    ifTypeMap: Record<string, string>,
+    lag: LagMembership
+  ) => {
+    const logicalIndex = lag.memberToAgg.get(ifIndex) || ifIndex;
+    const rawName = String(ifNameMap[ifIndex] || `if${ifIndex}`).trim();
+    const rawAlias = String(ifAliasMap[ifIndex] || "").trim();
+    const rawDescr = String(ifDescrMap[ifIndex] || "").trim();
+    const logicalName = String(ifNameMap[logicalIndex] || (logicalIndex === ifIndex ? rawName : `if${logicalIndex}`)).trim();
+    const logicalAlias = String(ifAliasMap[logicalIndex] || "").trim();
+    const logicalDescr = String(ifDescrMap[logicalIndex] || "").trim();
+    const alias = logicalAlias || rawAlias;
+    const descr = logicalDescr || rawDescr;
+    const isLag =
+      logicalIndex !== ifIndex ||
+      lag.aggIndexes.has(logicalIndex) ||
+      isLikelyLagInterface(logicalName, alias, descr, ifTypeMap[logicalIndex] || ifTypeMap[ifIndex]);
+    return { ifIndex: logicalIndex, ifName: logicalName || rawName, alias, descr, rawName, rawAlias, rawDescr, isLag };
   };
   const genericDevices = devices.filter((d) => !isFcSwitch(d));
   const findDeviceByNameHint = (hint: string, selfId: string): InventoryItem | undefined => {
@@ -2055,19 +2323,17 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
       const ciscoAggHints = getCiscoAggregateHints(ciscoHints, lag);
       const indexes = buildInterfaceIndexSet([ifAliasMap, ifDescrMap, ifNameMap], new Set([...ciscoHints, ...ciscoAggHints, ...lag.aggIndexes]));
       for (const ifIndex of indexes) {
-        const aggIndex = lag.memberToAgg.get(ifIndex);
-        if (aggIndex && indexes.has(aggIndex)) continue;
-        const alias = String(ifAliasMap[ifIndex] || "").trim();
-        const descr = String(ifDescrMap[ifIndex] || "").trim();
-        const ifName = String(ifNameMap[ifIndex] || `if${ifIndex}`).trim();
-        const trunkHint = alias || descr;
-        const isLag = isLikelyLagInterface(ifName, alias, descr, ifTypeMap[ifIndex]) || lag.aggIndexes.has(ifIndex);
-        if (!isLikelyTrunkPort(ifName, alias, descr, ifTypeMap[ifIndex]) && !isLag && !ciscoHints.has(ifIndex) && !ciscoAggHints.has(ifIndex)) continue;
-        if (!shouldUseTopologyPort(ifIndex, ifOperMap, ifAdminMap, lag)) continue;
+        const port = resolveLogicalPort(ifIndex, ifNameMap, ifAliasMap, ifDescrMap, ifTypeMap, lag);
+        const { alias, descr, ifName } = port;
+        const trunkHint = `${alias} ${descr} ${port.rawAlias} ${port.rawDescr}`.trim();
+        const rawLooksTrunk = isLikelyTrunkPort(port.rawName, port.rawAlias, port.rawDescr, ifTypeMap[ifIndex]);
+        const logicalLooksTrunk = isLikelyTrunkPort(ifName, alias, descr, ifTypeMap[port.ifIndex] || ifTypeMap[ifIndex]);
+        if (!logicalLooksTrunk && !rawLooksTrunk && !port.isLag && !ciscoHints.has(ifIndex) && !ciscoHints.has(port.ifIndex) && !ciscoAggHints.has(port.ifIndex)) continue;
+        if (!shouldUseTopologyPort(port.ifIndex, ifOperMap, ifAdminMap, lag)) continue;
         const aliasNorm = norm(trunkHint);
         const peer = findDeviceByNameHint(aliasNorm, dev.id);
         if (!peer) continue;
-        directed.push({ source: dev.id, target: peer.id, portA: ifName, raw: trunkHint });
+        directed.push({ source: dev.id, target: peer.id, portA: ifName, raw: trunkHint, isLag: port.isLag, sourceRank: 90 });
       }
     } catch {
       // Skip device-level parsing errors, keep building topology from others.
@@ -2095,14 +2361,11 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
       const ciscoAggHints = getCiscoAggregateHints(ciscoHints, lag);
       const allIf = buildInterfaceIndexSet([ifNameMap, ifAliasMap, ifDescrMap], new Set([...ciscoHints, ...ciscoAggHints, ...lag.aggIndexes]));
       for (const ifIndex of allIf) {
-        const aggIndex = lag.memberToAgg.get(ifIndex);
-        if (aggIndex && allIf.has(aggIndex)) continue;
-        const ifName = String(ifNameMap[ifIndex] || `if${ifIndex}`).trim();
-        const alias = String(ifAliasMap[ifIndex] || "").trim();
-        const descr = String(ifDescrMap[ifIndex] || "").trim();
-        const isLag = isLikelyLagInterface(ifName, alias, descr, ifTypeMap[ifIndex]) || lag.aggIndexes.has(ifIndex);
-        if ((isLikelyTrunkPort(ifName, alias, descr, ifTypeMap[ifIndex]) || isLag || ciscoHints.has(ifIndex) || ciscoAggHints.has(ifIndex)) && shouldUseTopologyPort(ifIndex, ifOperMap, ifAdminMap, lag)) {
-          trunkIfIndexes.add(ifIndex);
+        const port = resolveLogicalPort(ifIndex, ifNameMap, ifAliasMap, ifDescrMap, ifTypeMap, lag);
+        const rawLooksTrunk = isLikelyTrunkPort(port.rawName, port.rawAlias, port.rawDescr, ifTypeMap[ifIndex]);
+        const logicalLooksTrunk = isLikelyTrunkPort(port.ifName, port.alias, port.descr, ifTypeMap[port.ifIndex] || ifTypeMap[ifIndex]);
+        if ((logicalLooksTrunk || rawLooksTrunk || port.isLag || ciscoHints.has(ifIndex) || ciscoHints.has(port.ifIndex) || ciscoAggHints.has(port.ifIndex)) && shouldUseTopologyPort(port.ifIndex, ifOperMap, ifAdminMap, lag)) {
+          trunkIfIndexes.add(port.ifIndex);
         }
       }
 
@@ -2136,7 +2399,7 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
         if (ifIndex && !shouldUseTopologyPort(ifIndex, ifOperMap, ifAdminMap, lag)) continue;
         const peer = findDeviceByNameHint(sysName, dev.id);
         if (!peer) continue;
-        directed.push({ source: dev.id, target: peer.id, portA: localIfName, raw: `LLDP:${sysName}` });
+        directed.push({ source: dev.id, target: peer.id, portA: localIfName, raw: `LLDP:${sysName}`, isLag: !!aggregateIfIndex, sourceRank: 70 });
       }
     } catch {
       // Skip device-level LLDP errors and continue.
@@ -2157,17 +2420,14 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
       ]);
       const indexes = new Set([...Object.keys(ifNameMap), ...Object.keys(ifAliasMap), ...Object.keys(ifDescrMap), ...lag.aggIndexes]);
       for (const ifIndex of indexes) {
-        const aggIndex = lag.memberToAgg.get(ifIndex);
-        if (aggIndex && indexes.has(aggIndex)) continue;
-        if (!shouldUseTopologyPort(ifIndex, ifOperMap, ifAdminMap, lag)) continue;
-        const ifName = String(ifNameMap[ifIndex] || `if${ifIndex}`).trim();
-        const alias = String(ifAliasMap[ifIndex] || "").trim();
-        const descr = String(ifDescrMap[ifIndex] || "").trim();
-        const hintRaw = `${alias} ${descr}`.trim();
+        const port = resolveLogicalPort(ifIndex, ifNameMap, ifAliasMap, ifDescrMap, {}, lag);
+        if (!shouldUseTopologyPort(port.ifIndex, ifOperMap, ifAdminMap, lag)) continue;
+        const { ifName, alias, descr } = port;
+        const hintRaw = `${alias} ${descr} ${port.rawAlias} ${port.rawDescr}`.trim();
         if (!hintRaw || hintRaw.length < 3) continue;
         const peer = findDeviceByNameHint(hintRaw, dev.id);
         if (!peer || isFcSwitch(peer)) continue;
-        directed.push({ source: dev.id, target: peer.id, portA: ifName || `if${ifIndex}`, raw: `IF-COMMENT:${hintRaw}` });
+        directed.push({ source: dev.id, target: peer.id, portA: ifName || `if${ifIndex}`, raw: `IF-COMMENT:${hintRaw}`, isLag: port.isLag, sourceRank: 30 });
       }
     } catch {
       // continue
@@ -2209,7 +2469,7 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
               if (matched) localIfName = String(matched[1] || "").trim();
             }
           }
-          directed.push({ source: dev.id, target: peer.id, portA: localIfName || "fc-port", raw: `FC-LLDP:${sysName}` });
+          directed.push({ source: dev.id, target: peer.id, portA: localIfName || "fc-port", raw: `FC-LLDP:${sysName}`, isFc: true, sourceRank: 80 });
         }
       }
     } catch {
@@ -2243,7 +2503,7 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
           selfRole === "unknown" ||
           peerRole === "unknown";
         if (!roleCompatible) continue;
-        directed.push({ source: dev.id, target: peer.id, portA: ifName || "fc-port", raw: `FC-ALIAS:${alias || descr}` });
+        directed.push({ source: dev.id, target: peer.id, portA: ifName || "fc-port", raw: `FC-ALIAS:${alias || descr}`, isFc: true, sourceRank: 50 });
       }
     } catch {
       // continue
@@ -2309,8 +2569,8 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
           if (existingFcPair.has(pairKey)) continue;
           const corePort = pickPort(core.id);
           const edgePort = pickPort(edge.id);
-          directed.push({ source: core.id, target: edge.id, portA: corePort, raw: "FC-SYNTHETIC" });
-          directed.push({ source: edge.id, target: core.id, portA: edgePort, raw: "FC-SYNTHETIC" });
+          directed.push({ source: core.id, target: edge.id, portA: corePort, raw: "FC-SYNTHETIC", isFc: true, sourceRank: 10 });
+          directed.push({ source: edge.id, target: core.id, portA: edgePort, raw: "FC-SYNTHETIC", isFc: true, sourceRank: 10 });
           existingFcPair.add(pairKey);
           break;
         }
@@ -2318,15 +2578,39 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
     }
   }
 
+  const pairKeyOf = (d: { source: string; target: string }) => [d.source, d.target].sort().join("::");
+  const candidateScore = (d: DirectedTopologyCandidate) => {
+    const raw = String(d.raw || "").toUpperCase();
+    const lagScore = d.isLag || isLikelyLagInterface(d.portA, "", d.raw) ? 1000 : 0;
+    const sourceScore = d.sourceRank ?? (raw.startsWith("LLDP:") ? 70 : raw.startsWith("IF-COMMENT:") ? 30 : 0);
+    return lagScore + sourceScore;
+  };
+  const sortedDirected = [...directed].sort((a, b) => {
+    const score = candidateScore(b) - candidateScore(a);
+    if (score !== 0) return score;
+    const pair = pairKeyOf(a).localeCompare(pairKeyOf(b));
+    if (pair !== 0) return pair;
+    const pa = String(a.portA || "");
+    const pb = String(b.portA || "");
+    return pa.localeCompare(pb);
+  });
   const used = new Set<string>();
   const out: TopologyLink[] = [];
-  for (const d of directed) {
-    const key = [d.source, d.target].sort().join("::");
+  for (const d of sortedDirected) {
+    const pairKey = pairKeyOf(d);
+    const sourceDevice = byId.get(d.source);
+    const targetDevice = byId.get(d.target);
+    if (!sourceDevice || !targetDevice) continue;
+    const isFcPair = d.isFc || (isFcSwitch(sourceDevice) && isFcSwitch(targetDevice));
+    const reverseCandidates = sortedDirected.filter((x) => x.source === d.target && x.target === d.source);
+    const reverse = reverseCandidates[0];
+    const portAForKey = d.source <= d.target ? d.portA : reverse?.portA || "";
+    const portBForKey = d.source <= d.target ? reverse?.portA || "" : d.portA;
+    // IP topology is intentionally one logical edge per pair; FC mode can keep real parallel port links.
+    const key = isFcPair ? `${pairKey}::${portAForKey}::${portBForKey}` : pairKey;
     if (used.has(key)) continue;
-    const reverse = directed.find((x) => x.source === d.target && x.target === d.source);
     const portA = d.portA;
     const portB = reverse?.portA || (reverse ? reverse.raw : "Trunk");
-    if (!byId.has(d.source) || !byId.has(d.target)) continue;
     out.push({ source: d.source, target: d.target, portA, portB });
     used.add(key);
   }
@@ -2567,6 +2851,22 @@ async function startServer() {
   }, 60 * 1000);
   logAction("system", "Discovery Watch Scheduler Start", "Scheduler initialized (1-minute tick, per-profile interval)", "system");
 
+  if (backupScheduler) clearInterval(backupScheduler);
+  backupScheduler = setInterval(async () => {
+    try {
+      backupSchedulerLastTickAt = new Date().toISOString();
+      if (!backupConfig.enabled) return;
+      if (backupRunLock) return;
+      const lastDone = backupHistory.find((x) => x.finishedAt);
+      const intervalMs = Math.max(1, Number(backupConfig.intervalHours || 6)) * 60 * 60 * 1000;
+      if (lastDone?.finishedAt && Date.now() - new Date(lastDone.finishedAt).getTime() < intervalMs) return;
+      await runBackupJob("system-scheduler");
+    } catch {
+      /* ignore scheduler errors */
+    }
+  }, 60 * 1000);
+  logAction("system", "Backup Scheduler Start", "Scheduler initialized (1-minute tick)", "system");
+
   // API: Audit Logs
   app.get("/api/audit-logs", checkRole(['admin']), (req, res) => {
     res.json(auditLogs);
@@ -2759,6 +3059,88 @@ async function startServer() {
     automationCancellation.add(id);
     logAction(actorName(req), "AUTOMATION_CANCEL", `Cancel requested for ${id}`, "system");
     return res.json({ success: true });
+  });
+
+  app.post("/api/automation/mac-search", checkRole(["admin", "operator", "viewer"]), async (req, res) => {
+    const rawMac = String(req.body?.mac || "");
+    const searchHex = normalizeMacLoose(rawMac);
+    if (searchHex.length !== 12) {
+      return res.status(400).json({ error: "Invalid MAC format" });
+    }
+    const requestedIds = Array.isArray(req.body?.deviceIds)
+      ? new Set(req.body.deviceIds.map((x: unknown) => String(x)))
+      : null;
+    const targets = requestedIds ? inventory.filter((d) => requestedIds.has(d.id)) : [...inventory];
+    const results: Array<{
+      deviceId: string;
+      deviceName: string;
+      ip: string;
+      vendor: string;
+      mac: string;
+      interface?: string;
+      ifIndex?: string;
+      vlan?: number;
+      voiceVlan?: number;
+      source: string;
+      timestamp: string;
+    }> = [];
+    await forEachWithLimit(targets, 8, async (device) => {
+      try {
+        const dot1dPortOid = String(snmpConfig.macSearch?.dot1dTpFdbPortOid || "1.3.6.1.2.1.17.4.3.1.2").trim();
+        const basePortIfIndexOid = String(snmpConfig.macSearch?.dot1dBasePortIfIndexOid || "1.3.6.1.2.1.17.1.4.1.2").trim();
+        const dot1qPortOid = String(snmpConfig.macSearch?.dot1qTpFdbPortOid || "1.3.6.1.2.1.17.7.1.2.2.1.2").trim();
+        const [dot1dPorts, basePortIfIndex, ifNames, ifDescr, qBridgePorts, voiceMap] = await Promise.all([
+          snmpWalk(device.ip, dot1dPortOid),
+          snmpWalk(device.ip, basePortIfIndexOid),
+          snmpWalk(device.ip, "1.3.6.1.2.1.31.1.1.1.1"),
+          snmpWalk(device.ip, "1.3.6.1.2.1.2.2.1.2"),
+          snmpWalk(device.ip, dot1qPortOid),
+          collectVoiceVlanMap(device.ip),
+        ]);
+        Object.entries(dot1dPorts).forEach(([suffix, bridgePortRaw]) => {
+          const mac = macFromOidSuffix(suffix);
+          if (!mac || normalizeMacLoose(mac) !== searchHex) return;
+          const bridgePort = String(bridgePortRaw || "").trim();
+          const ifIndex = String(basePortIfIndex[bridgePort] || "").trim();
+          const ifName = String(ifNames[ifIndex] || ifDescr[ifIndex] || `if${ifIndex || "?"}`).trim();
+          const qbridgeHit = Object.entries(qBridgePorts).find(([qSuffix]) => {
+            const parsed = parseQBridgeSuffix(qSuffix);
+            return normalizeMacLoose(parsed.mac) === searchHex;
+          });
+          const vlan = qbridgeHit ? parseQBridgeSuffix(qbridgeHit[0]).vlan : undefined;
+          results.push({
+            deviceId: device.id,
+            deviceName: device.name,
+            ip: device.ip,
+            vendor: device.vendor,
+            mac,
+            interface: ifName,
+            ifIndex,
+            vlan,
+            voiceVlan: voiceMap[ifIndex],
+            source: "dot1dTpFdbPort",
+            timestamp: new Date().toISOString(),
+          });
+        });
+      } catch {
+        /* keep partial results from other devices */
+      }
+    });
+    logAction(actorName(req), "MAC Search", `MAC ${normalizeMac(searchHex)} -> ${results.length} hit(s)`, "automation");
+    return res.json({ success: true, mac: normalizeMac(searchHex), results });
+  });
+
+  app.get("/api/automation/voice-vlan/:deviceId", checkRole(["admin", "operator", "viewer"]), async (req, res) => {
+    const deviceId = String(req.params.deviceId || "");
+    const device = inventory.find((d) => d.id === deviceId);
+    if (!device) return res.status(404).json({ error: "Device not found" });
+    const map = await collectVoiceVlanMap(device.ip);
+    return res.json({
+      success: true,
+      deviceId,
+      oid: snmpConfig.macSearch?.voiceVlanMacOid || "",
+      records: Object.entries(map).map(([ifIndex, vlan]) => ({ ifIndex, vlan })),
+    });
   });
 
   // API: System Configuration
@@ -3719,6 +4101,54 @@ async function startServer() {
     res.json({ snmp: snmpConfig });
   });
 
+  app.get("/api/backup/config", checkRole(["admin", "operator", "viewer"]), (_req, res) => {
+    res.json({
+      config: {
+        ...backupConfig,
+        credentials: {
+          username: backupConfig.credentials?.username || "",
+          domain: backupConfig.credentials?.domain || "",
+          hasPassword: Boolean(backupConfig.credentials?.password),
+        },
+      },
+      scheduler: {
+        enabled: backupConfig.enabled,
+        lastTickAt: backupSchedulerLastTickAt,
+        running: backupRunLock,
+      },
+    });
+  });
+
+  app.post("/api/backup/config", checkRole(["admin", "operator"]), (req, res) => {
+    const body = req.body as Partial<BackupConfig>;
+    backupConfig.enabled = body.enabled === true;
+    backupConfig.intervalHours = Math.max(1, Math.min(168, Number(body.intervalHours || backupConfig.intervalHours || 6)));
+    backupConfig.networkSharePath = String(body.networkSharePath || backupConfig.networkSharePath || "").trim();
+    backupConfig.scope = {
+      mode: body.scope?.mode === "filtered" ? "filtered" : "all",
+      deviceIds: Array.isArray(body.scope?.deviceIds) ? body.scope?.deviceIds.map((x) => String(x)) : [],
+      vendors: Array.isArray(body.scope?.vendors) ? body.scope?.vendors.map((x) => String(x)) : [],
+      branches: Array.isArray(body.scope?.branches) ? body.scope?.branches.map((x) => String(x)) : [],
+    };
+    backupConfig.credentials = {
+      username: String(body.credentials?.username || backupConfig.credentials?.username || "").trim(),
+      domain: String(body.credentials?.domain || backupConfig.credentials?.domain || "").trim(),
+      password: String(body.credentials?.password || backupConfig.credentials?.password || ""),
+    };
+    logAction(actorName(req), "Backup Config Update", `enabled=${backupConfig.enabled}, interval=${backupConfig.intervalHours}h`, "config");
+    return res.json({ success: true, config: backupConfig });
+  });
+
+  app.post("/api/backup/run", checkRole(["admin", "operator"]), async (req, res) => {
+    if (backupRunLock) return res.status(409).json({ error: "Backup run already in progress" });
+    const result = await runBackupJob(actorName(req));
+    return res.json({ success: result.status !== "failed", run: result });
+  });
+
+  app.get("/api/backup/history", checkRole(["admin", "operator", "viewer"]), (_req, res) => {
+    res.json({ runs: backupHistory.slice(0, 30) });
+  });
+
   app.get("/api/snmp/templates", checkRole(['admin', 'operator', 'viewer']), (_req, res) => {
     res.json({ templates: snmpTemplates });
   });
@@ -3806,7 +4236,7 @@ async function startServer() {
 
   // API: SNMP Configuration
   app.post("/api/config/snmp", checkRole(['admin']), (req, res) => {
-    const { community, version, communities, timeoutMs, retries, port } = req.body;
+    const { community, version, communities, timeoutMs, retries, port, macSearch } = req.body;
     const actor = actorName(req);
     if (typeof community === "string" && community.trim()) snmpConfig.community = community.trim();
     if (Array.isArray(communities)) {
@@ -3816,6 +4246,15 @@ async function startServer() {
     if (Number.isFinite(Number(timeoutMs))) snmpConfig.timeoutMs = Math.max(300, Math.min(5000, Number(timeoutMs)));
     if (Number.isFinite(Number(retries))) snmpConfig.retries = Math.max(0, Math.min(3, Number(retries)));
     if (Number.isFinite(Number(port))) snmpConfig.port = Math.max(1, Math.min(65535, Number(port)));
+    if (macSearch && typeof macSearch === "object") {
+      snmpConfig.macSearch = {
+        ...snmpConfig.macSearch,
+        dot1dTpFdbPortOid: String(macSearch.dot1dTpFdbPortOid || snmpConfig.macSearch.dot1dTpFdbPortOid).trim(),
+        dot1dBasePortIfIndexOid: String(macSearch.dot1dBasePortIfIndexOid || snmpConfig.macSearch.dot1dBasePortIfIndexOid).trim(),
+        dot1qTpFdbPortOid: String(macSearch.dot1qTpFdbPortOid || snmpConfig.macSearch.dot1qTpFdbPortOid).trim(),
+        voiceVlanMacOid: String(macSearch.voiceVlanMacOid || snmpConfig.macSearch.voiceVlanMacOid).trim(),
+      };
+    }
     logAction(actor, 'SNMP Config Update', `Changed SNMP settings (Version: ${version})`, 'config');
     res.json({ success: true, message: "SNMP configuration saved.", snmp: snmpConfig });
   });

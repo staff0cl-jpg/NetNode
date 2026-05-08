@@ -56,6 +56,20 @@ type InventoryDevice = {
   vendor?: string;
 };
 
+type MacSearchResult = {
+  deviceId: string;
+  deviceName: string;
+  ip: string;
+  vendor: string;
+  mac: string;
+  interface?: string;
+  ifIndex?: string;
+  vlan?: number;
+  voiceVlan?: number;
+  source: string;
+  timestamp: string;
+};
+
 interface AutomationProps {
   role?: string;
   username?: string;
@@ -96,6 +110,9 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
   const [jobsLoading, setJobsLoading] = React.useState(false);
 
   const [errorText, setErrorText] = React.useState('');
+  const [macInput, setMacInput] = React.useState('');
+  const [macSearching, setMacSearching] = React.useState(false);
+  const [macResults, setMacResults] = React.useState<MacSearchResult[]>([]);
 
   const headers = React.useMemo(
     () => ({
@@ -283,6 +300,28 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
 
   const selectedJob = jobs.find((j) => j.id === activeJobId);
 
+  const runMacSearch = async () => {
+    setErrorText('');
+    setMacSearching(true);
+    try {
+      const response = await fetch('/api/automation/mac-search', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ mac: macInput.trim() }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setErrorText(data?.error || t('automationMacSearchFailed'));
+        return;
+      }
+      setMacResults(Array.isArray(data.results) ? data.results : []);
+    } catch {
+      setErrorText(t('automationMacSearchFailed'));
+    } finally {
+      setMacSearching(false);
+    }
+  };
+
   return (
     <div className="p-4 md:p-8 animate-in slide-in-from-bottom-5 duration-700 space-y-6">
       <header>
@@ -298,6 +337,44 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
         <section className="xl:col-span-2 space-y-6">
+          <div className="bg-[#25262b] border border-[#373a40] rounded overflow-hidden">
+            <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
+              <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('automationMacSearchTitle')}</h3>
+            </div>
+            <div className="p-4 md:p-6 space-y-4">
+              <div className="flex flex-col md:flex-row gap-3">
+                <input
+                  value={macInput}
+                  onChange={(e) => setMacInput(e.target.value)}
+                  className="flex-1 bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                  placeholder={t('automationMacSearchPlaceholder')}
+                />
+                <button
+                  type="button"
+                  disabled={macSearching || !macInput.trim()}
+                  onClick={runMacSearch}
+                  className="px-4 py-2 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-[10px] font-bold uppercase tracking-widest disabled:opacity-50"
+                >
+                  {macSearching ? t('loading') : t('automationMacSearchButton')}
+                </button>
+              </div>
+              <div className="max-h-[260px] overflow-auto space-y-2">
+                {!macResults.length && <div className="text-xs text-[#909296]">{t('automationMacSearchNoResults')}</div>}
+                {macResults.map((result, idx) => (
+                  <div key={`${result.deviceId}-${idx}`} className="border border-[#373a40] rounded p-3 bg-[#141517]">
+                    <div className="text-xs text-white font-semibold">
+                      {result.deviceName} ({result.ip}) - {result.interface || '-'}
+                    </div>
+                    <div className="text-[11px] text-[#909296] mt-1">
+                      MAC {result.mac} | VLAN {result.vlan ?? '-'} | Voice VLAN {result.voiceVlan ?? '-'} | {result.vendor}
+                    </div>
+                    <div className="text-[10px] text-[#5c5f66] mt-1">{result.timestamp}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
           <div className="bg-[#25262b] border border-[#373a40] rounded overflow-hidden">
             <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
               <Bot className="text-[#228be6]" size={18} />
