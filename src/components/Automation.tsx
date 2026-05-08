@@ -312,6 +312,26 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
     return Array.from(items).sort((a, b) => a.localeCompare(b));
   }, [inventory, inventoryMeta.branches, voiceCityFilter]);
 
+  const macBranchOptions = React.useMemo(() => {
+    const inventoryBranches = new Set<string>();
+    inventory.forEach((device) => {
+      const branch = String(device.branch || '').trim();
+      if (branch) inventoryBranches.add(branch);
+    });
+    const merged = new Set<string>(inventoryBranches);
+    (inventoryMeta.branches || []).forEach((branch) => {
+      const normalized = String(branch || '').trim();
+      if (normalized) merged.add(normalized);
+    });
+    return Array.from(merged).sort((a, b) => a.localeCompare(b));
+  }, [inventory, inventoryMeta.branches]);
+
+  const macBranchDeviceCount = React.useMemo(() => {
+    const normalizedBranch = macBranchFilter.trim().toLowerCase();
+    if (!normalizedBranch) return 0;
+    return inventory.filter((d) => String(d.branch || '').trim().toLowerCase() === normalizedBranch).length;
+  }, [inventory, macBranchFilter]);
+
   const availableSwitches = React.useMemo(
     () =>
       inventory
@@ -445,6 +465,13 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
   }, [availableBranches, voiceBranchFilter]);
 
   React.useEffect(() => {
+    if (macScope !== 'branch') return;
+    if (macBranchFilter && !macBranchOptions.includes(macBranchFilter)) {
+      setMacBranchFilter('');
+    }
+  }, [macBranchFilter, macBranchOptions, macScope]);
+
+  React.useEffect(() => {
     if (voiceSwitchFilter && !availableSwitches.some((device) => device.id === voiceSwitchFilter)) {
       setVoiceSwitchFilter('');
       setVoiceVlanPreview([]);
@@ -543,7 +570,12 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
         body: JSON.stringify({
           mac: macInput.trim(),
           deviceIds,
-          branch: macScope === 'region' ? macRegionPrefix.trim() : undefined,
+          branch:
+            macScope === 'branch'
+              ? macBranchFilter.trim() || undefined
+              : macScope === 'region'
+                ? macRegionPrefix.trim() || undefined
+                : undefined,
           mode: macMode,
           maxHops: Math.max(1, Math.min(50, Number(macMaxHops) || 10)),
         }),
@@ -919,12 +951,26 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
                 <p className="text-[10px] text-[#5c5f66]">{t(macScopeHintKey)}</p>
               </div>
               {macScope === 'branch' && (
-                <input
-                  value={macBranchFilter}
-                  onChange={(e) => setMacBranchFilter(e.target.value)}
-                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                  placeholder={t('automationBranchFilter')}
-                />
+                <div className="space-y-2">
+                  <select
+                    value={macBranchFilter}
+                    onChange={(e) => setMacBranchFilter(e.target.value)}
+                    className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                  >
+                    <option value="">{t('automationBranchSelectPlaceholder')}</option>
+                    {macBranchOptions.map((branch) => (
+                      <option key={branch} value={branch}>
+                        {branch}
+                      </option>
+                    ))}
+                  </select>
+                  {macBranchFilter && macBranchDeviceCount === 0 && (
+                    <p className="text-[11px] text-[#fab005]">{t('automationMacBranchNoDevicesHint')}</p>
+                  )}
+                </div>
+              )}
+              {macScope === 'branch' && macBranchOptions.length === 0 && (
+                <p className="text-[11px] text-[#909296]">{t('automationMacBranchOptionsEmpty')}</p>
               )}
               {macScope === 'region' && (
                 <select

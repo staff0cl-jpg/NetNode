@@ -88,23 +88,6 @@ const TOPO_NODE_HEIGHT = 80;
 const TOPO_LAYER_GAP = 156;
 const TOPO_CLUSTER_STEP_X = 390;
 const TOPO_RING_STEP = 136;
-const ZONE_PADDING_X = 70;
-const ZONE_PADDING_TOP = 58;
-const ZONE_PADDING_BOTTOM = 44;
-const ZONE_BOX_MIN_WIDTH = 300;
-const ZONE_BOX_MIN_HEIGHT = 190;
-const ZONE_BOX_MARGIN_X = 96;
-const ZONE_BOX_MARGIN_Y = 86;
-const UNZONED_KEY = '__unzoned__';
-
-type ZoneBox = { key: string; label: string; x: number; y: number; width: number; height: number; count: number };
-type RoutedTopologyLink = TopoLink & { routePoints: number[]; labelX: number; labelY: number };
-
-const getSwitchZoneKey = (sw?: Pick<Switch, 'name' | 'zoneKey' | 'zone'>) => {
-  const explicit = String(sw?.zoneKey || '').trim();
-  if (explicit) return explicit;
-  return deriveZoneKey(sw?.name || '') || String(sw?.zone || '').trim();
-};
 
 function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: number): NodeWithPos[] {
   if (switches.length === 0) return [];
@@ -762,117 +745,6 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
 
   globalRelaxCollisions();
 
-  const packZoneBoxes = () => {
-    const zoneGroups = new Map<string, { id: string; x: number; y: number; lane: Lane }[]>();
-    points.forEach((p) => {
-      const sw = byId.get(p.id);
-      const zoneKey = getSwitchZoneKey(sw) || UNZONED_KEY;
-      if (!zoneGroups.has(zoneKey)) zoneGroups.set(zoneKey, []);
-      zoneGroups.get(zoneKey)!.push(p);
-    });
-    if (zoneGroups.size <= 1) return;
-
-    type ZoneDraft = {
-      key: string;
-      points: { id: string; x: number; y: number; lane: Lane }[];
-      minX: number;
-      minY: number;
-      centerX: number;
-      centerY: number;
-      width: number;
-      height: number;
-      externalLinks: number;
-      barycenterX: number;
-      barycenterY: number;
-    };
-
-    const zoneByNode = new Map<string, string>();
-    zoneGroups.forEach((group, zoneKey) => group.forEach((p) => zoneByNode.set(p.id, zoneKey)));
-    const zoneRawCenters = new Map<string, { x: number; y: number }>();
-    zoneGroups.forEach((group, zoneKey) => {
-      const minX = Math.min(...group.map((p) => p.x));
-      const maxX = Math.max(...group.map((p) => p.x + TOPO_NODE_WIDTH));
-      const minY = Math.min(...group.map((p) => p.y));
-      const maxY = Math.max(...group.map((p) => p.y + TOPO_NODE_HEIGHT));
-      zoneRawCenters.set(zoneKey, { x: (minX + maxX) / 2, y: (minY + maxY) / 2 });
-    });
-
-    const externalCount = new Map<string, number>();
-    const neighborSums = new Map<string, { x: number; y: number; weight: number }>();
-    links.forEach((link) => {
-      const sourceZone = zoneByNode.get(link.source);
-      const targetZone = zoneByNode.get(link.target);
-      if (!sourceZone || !targetZone || sourceZone === targetZone) return;
-      externalCount.set(sourceZone, (externalCount.get(sourceZone) || 0) + 1);
-      externalCount.set(targetZone, (externalCount.get(targetZone) || 0) + 1);
-      const sourceCenter = zoneRawCenters.get(sourceZone);
-      const targetCenter = zoneRawCenters.get(targetZone);
-      if (sourceCenter && targetCenter) {
-        const sourceSum = neighborSums.get(sourceZone) || { x: 0, y: 0, weight: 0 };
-        sourceSum.x += targetCenter.x;
-        sourceSum.y += targetCenter.y;
-        sourceSum.weight += 1;
-        neighborSums.set(sourceZone, sourceSum);
-        const targetSum = neighborSums.get(targetZone) || { x: 0, y: 0, weight: 0 };
-        targetSum.x += sourceCenter.x;
-        targetSum.y += sourceCenter.y;
-        targetSum.weight += 1;
-        neighborSums.set(targetZone, targetSum);
-      }
-    });
-
-    const drafts: ZoneDraft[] = Array.from(zoneGroups.entries()).map(([key, group]) => {
-      const minX = Math.min(...group.map((p) => p.x));
-      const maxX = Math.max(...group.map((p) => p.x + TOPO_NODE_WIDTH));
-      const minY = Math.min(...group.map((p) => p.y));
-      const maxY = Math.max(...group.map((p) => p.y + TOPO_NODE_HEIGHT));
-      const neighbor = neighborSums.get(key);
-      const center = zoneRawCenters.get(key) || { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
-      return {
-        key,
-        points: group,
-        minX,
-        minY,
-        centerX: center.x,
-        centerY: center.y,
-        width: Math.max(ZONE_BOX_MIN_WIDTH, maxX - minX + ZONE_PADDING_X * 2),
-        height: Math.max(ZONE_BOX_MIN_HEIGHT, maxY - minY + ZONE_PADDING_TOP + ZONE_PADDING_BOTTOM),
-        externalLinks: externalCount.get(key) || 0,
-        barycenterX: neighbor?.weight ? neighbor.x / neighbor.weight : center.x,
-        barycenterY: neighbor?.weight ? neighbor.y / neighbor.weight : center.y,
-      };
-    });
-
-    drafts.sort((a, b) => {
-      if (a.externalLinks !== b.externalLinks) return b.externalLinks - a.externalLinks;
-      if (a.barycenterY !== b.barycenterY) return a.barycenterY - b.barycenterY;
-      if (a.barycenterX !== b.barycenterX) return a.barycenterX - b.barycenterX;
-      if (a.centerY !== b.centerY) return a.centerY - b.centerY;
-      if (a.centerX !== b.centerX) return a.centerX - b.centerX;
-      return a.key.localeCompare(b.key);
-    });
-
-    const maxRowWidth = Math.max(1180, Math.floor(cw * 1.65), Math.ceil(Math.sqrt(drafts.length)) * 460);
-    let cursorX = margin;
-    let cursorY = margin;
-    let rowHeight = 0;
-    drafts.forEach((zone) => {
-      if (cursorX > margin && cursorX + zone.width > maxRowWidth) {
-        cursorX = margin;
-        cursorY += rowHeight + ZONE_BOX_MARGIN_Y;
-        rowHeight = 0;
-      }
-      zone.points.forEach((p) => {
-        p.x = cursorX + ZONE_PADDING_X + (p.x - zone.minX);
-        p.y = cursorY + ZONE_PADDING_TOP + (p.y - zone.minY);
-      });
-      rowHeight = Math.max(rowHeight, zone.height);
-      cursorX += zone.width + ZONE_BOX_MARGIN_X;
-    });
-  };
-
-  packZoneBoxes();
-
   return switches.map((s) => {
     const p = idToPoint.get(s.id) || { x: width / 2, y: height / 2, lane: 'unknown' as Lane };
     return {
@@ -905,10 +777,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   const [isRightPanning, setIsRightPanning] = useState(false);
   const [isNodeDragging, setIsNodeDragging] = useState(false);
   const panLastPointRef = useRef<{ x: number; y: number } | null>(null);
-  const suppressNodeContextMenuRef = useRef(false);
   const linkDraftPointerStartRef = useRef<{ x: number; y: number } | null>(null);
-  const linkDraftIsGestureRef = useRef(false);
-  const draftLinkStartedAtRef = useRef(0);
   const [topologyMode, setTopologyMode] = useState<TopologyMode>('ip');
   const [selectedRegion, setSelectedRegion] = useState<string>('');
   const [selectedZone, setSelectedZone] = useState<string>('');
@@ -963,7 +832,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   const zones = React.useMemo(() => {
     const set = new Set<string>();
     regionSwitches.forEach((s) => {
-      const zone = getSwitchZoneKey(s);
+      const zone = deriveZoneKey(s.name);
       if (zone) set.add(zone);
     });
     return Array.from(set).sort((a, b) => a.localeCompare(b));
@@ -981,7 +850,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     () =>
       regionSwitches.filter((s) => {
         if (selectedZone === '__all__') return true;
-        return selectedZone ? getSwitchZoneKey(s) === selectedZone : false;
+        return selectedZone ? deriveZoneKey(s.name) === selectedZone : false;
       }),
     [regionSwitches, selectedZone]
   );
@@ -989,7 +858,6 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     const override = String(zoneLabelOverrides[zoneKey] || '').trim();
     return override || zoneKey;
   }, [zoneLabelOverrides]);
-  const regionSwitchIds = React.useMemo(() => new Set(regionSwitches.map((s) => s.id)), [regionSwitches]);
   const topologySwitchIds = React.useMemo(() => new Set(zoneSwitches.map((s) => s.id)), [zoneSwitches]);
 
   useEffect(() => {
@@ -1101,17 +969,18 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   useEffect(() => {
     const w = containerRef.current?.offsetWidth || canvasSize.width;
     const h = containerRef.current?.offsetHeight || canvasSize.height;
-    const layoutLinks = links.filter((l) => regionSwitchIds.has(l.source) && regionSwitchIds.has(l.target));
+    const visibleLinks = links.filter((l) => topologySwitchIds.has(l.source) && topologySwitchIds.has(l.target));
     const timer = window.setTimeout(() => {
-      const computed = computeLayout(regionSwitches, layoutLinks, w, h);
-      const withSavedLayout = computed.map((n) => {
-        const saved = savedLayout[n.id];
-        return saved ? { ...n, x: saved.x, y: saved.y } : n;
-      });
-      setNodes(withSavedLayout.filter((n) => topologySwitchIds.has(n.id)));
+      const computed = computeLayout(zoneSwitches, visibleLinks, w, h);
+      setNodes(
+        computed.map((n) => {
+          const saved = savedLayout[n.id];
+          return saved ? { ...n, x: saved.x, y: saved.y } : n;
+        })
+      );
     }, 80);
     return () => window.clearTimeout(timer);
-  }, [regionSwitches, regionSwitchIds, topologySwitchIds, links, canvasSize.width, canvasSize.height, savedLayout]);
+  }, [zoneSwitches, topologySwitchIds, links, canvasSize.width, canvasSize.height, savedLayout]);
 
   const handleAutoLayout = async () => {
     if (!canEditTopology) return;
@@ -1171,11 +1040,10 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       }
       const w = containerRef.current?.offsetWidth || canvasSize.width;
       const h = containerRef.current?.offsetHeight || canvasSize.height;
-      const nextLinks = data.links || [];
-      const layoutLinks = nextLinks.filter((l) => regionSwitchIds.has(l.source) && regionSwitchIds.has(l.target));
-      const computed = computeLayout(regionSwitches, layoutLinks, w, h);
+      const visibleLinks = (data.links || []).filter((l) => topologySwitchIds.has(l.source) && topologySwitchIds.has(l.target));
+      const computed = computeLayout(zoneSwitches, visibleLinks, w, h);
       // Auto-layout must take precedence over previously saved coordinates for this active tab.
-      setNodes(computed.filter((n) => topologySwitchIds.has(n.id)));
+      setNodes(computed);
       const nextPositions = computed.reduce<Record<string, { x: number; y: number }>>((acc, n) => {
         acc[n.id] = { x: n.x, y: n.y };
         return acc;
@@ -1426,171 +1294,34 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     () => links.filter((l) => topologySwitchIds.has(l.source) && topologySwitchIds.has(l.target)),
     [links, topologySwitchIds]
   );
-  const nodeById = React.useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
-  const zoneBoxes = React.useMemo<ZoneBox[]>(() => {
-    const groups = new Map<string, NodeWithPos[]>();
+  const zoneBoxes = React.useMemo(() => {
+    const map = new Map<string, NodeWithPos[]>();
     nodes.forEach((node) => {
-      const zoneKey = getSwitchZoneKey(node) || UNZONED_KEY;
-      if (!groups.has(zoneKey)) groups.set(zoneKey, []);
-      groups.get(zoneKey)!.push(node);
+      const zoneKey = deriveZoneKey(node.name);
+      if (!zoneKey) return;
+      if (!map.has(zoneKey)) map.set(zoneKey, []);
+      map.get(zoneKey)!.push(node);
     });
-    return Array.from(groups.entries())
-      .map(([key, group]) => {
-        const minX = Math.min(...group.map((node) => node.x));
-        const maxX = Math.max(...group.map((node) => node.x + TOPO_NODE_WIDTH));
-        const minY = Math.min(...group.map((node) => node.y));
-        const maxY = Math.max(...group.map((node) => node.y + TOPO_NODE_HEIGHT));
+    return Array.from(map.entries())
+      .map(([zoneKey, zoneNodes]) => {
+        const minX = Math.min(...zoneNodes.map((n) => n.x));
+        const maxX = Math.max(...zoneNodes.map((n) => n.x + TOPO_NODE_WIDTH));
+        const minY = Math.min(...zoneNodes.map((n) => n.y));
+        const maxY = Math.max(...zoneNodes.map((n) => n.y + TOPO_NODE_HEIGHT));
+        const padX = 32;
+        const padTop = 28;
+        const padBottom = 24;
         return {
-          key,
-          label: key === UNZONED_KEY ? t('topologyUnzonedZone') : zoneLabel(key),
-          x: minX - ZONE_PADDING_X,
-          y: minY - ZONE_PADDING_TOP,
-          width: Math.max(ZONE_BOX_MIN_WIDTH, maxX - minX + ZONE_PADDING_X * 2),
-          height: Math.max(ZONE_BOX_MIN_HEIGHT, maxY - minY + ZONE_PADDING_TOP + ZONE_PADDING_BOTTOM),
-          count: group.length,
+          zoneKey,
+          label: zoneLabel(zoneKey),
+          x: minX - padX,
+          y: minY - padTop,
+          width: maxX - minX + padX * 2,
+          height: maxY - minY + padTop + padBottom,
         };
       })
-      .sort((a, b) => (a.y - b.y) || (a.x - b.x) || a.key.localeCompare(b.key));
-  }, [nodes, t, zoneLabel]);
-  const routedVisibleLinks = React.useMemo<RoutedTopologyLink[]>(() => {
-    const zoneByNode = new Map<string, string>();
-    nodes.forEach((node) => zoneByNode.set(node.id, getSwitchZoneKey(node) || UNZONED_KEY));
-    const boxByZone = new Map(zoneBoxes.map((box) => [box.key, box]));
-    const zoneCenter = (zoneKey: string) => {
-      const box = boxByZone.get(zoneKey);
-      return box ? { x: box.x + box.width / 2, y: box.y + box.height / 2 } : { x: 0, y: 0 };
-    };
-    const linkKey = (link: TopoLink, index: number) => link.id || `${link.source}::${link.target}::${index}`;
-    type Side = 'left' | 'right' | 'top' | 'bottom';
-    type EndpointDraft = { endpointKey: string; zoneKey: string; side: Side; otherCenter: { x: number; y: number }; sortKey: string };
-    const endpointDrafts: EndpointDraft[] = [];
-    const routedBase = visibleLinks.map((link, index) => {
-      const sourceZone = zoneByNode.get(link.source);
-      const targetZone = zoneByNode.get(link.target);
-      const sourceBox = sourceZone ? boxByZone.get(sourceZone) : undefined;
-      const targetBox = targetZone ? boxByZone.get(targetZone) : undefined;
-      const id = linkKey(link, index);
-      if (!sourceZone || !targetZone || !sourceBox || !targetBox || sourceZone === targetZone) {
-        return { link, id, sourceZone, targetZone, sourceSide: null as Side | null, targetSide: null as Side | null };
-      }
-      const sourceCenter = zoneCenter(sourceZone);
-      const targetCenter = zoneCenter(targetZone);
-      const horizontal = Math.abs(targetCenter.x - sourceCenter.x) >= Math.abs(targetCenter.y - sourceCenter.y);
-      const sourceSide: Side = horizontal
-        ? (targetCenter.x >= sourceCenter.x ? 'right' : 'left')
-        : (targetCenter.y >= sourceCenter.y ? 'bottom' : 'top');
-      const targetSide: Side = horizontal
-        ? (targetCenter.x >= sourceCenter.x ? 'left' : 'right')
-        : (targetCenter.y >= sourceCenter.y ? 'top' : 'bottom');
-      endpointDrafts.push({
-        endpointKey: `${id}:source`,
-        zoneKey: sourceZone,
-        side: sourceSide,
-        otherCenter: targetCenter,
-        sortKey: `${targetZone}\u0000${link.target}\u0000${id}`,
-      });
-      endpointDrafts.push({
-        endpointKey: `${id}:target`,
-        zoneKey: targetZone,
-        side: targetSide,
-        otherCenter: sourceCenter,
-        sortKey: `${sourceZone}\u0000${link.source}\u0000${id}`,
-      });
-      return { link, id, sourceZone, targetZone, sourceSide, targetSide };
-    });
-
-    const portByEndpoint = new Map<string, { x: number; y: number }>();
-    const buckets = new Map<string, EndpointDraft[]>();
-    endpointDrafts.forEach((draft) => {
-      const bucketKey = `${draft.zoneKey}:${draft.side}`;
-      if (!buckets.has(bucketKey)) buckets.set(bucketKey, []);
-      buckets.get(bucketKey)!.push(draft);
-    });
-    buckets.forEach((drafts) => {
-      drafts.sort((a, b) => {
-        if (a.side === 'left' || a.side === 'right') {
-          if (a.otherCenter.y !== b.otherCenter.y) return a.otherCenter.y - b.otherCenter.y;
-          if (a.otherCenter.x !== b.otherCenter.x) return a.otherCenter.x - b.otherCenter.x;
-        } else {
-          if (a.otherCenter.x !== b.otherCenter.x) return a.otherCenter.x - b.otherCenter.x;
-          if (a.otherCenter.y !== b.otherCenter.y) return a.otherCenter.y - b.otherCenter.y;
-        }
-        return a.sortKey.localeCompare(b.sortKey);
-      });
-      drafts.forEach((draft, index) => {
-        const box = boxByZone.get(draft.zoneKey);
-        if (!box) return;
-        const ratio = (index + 1) / (drafts.length + 1);
-        if (draft.side === 'left' || draft.side === 'right') {
-          const usable = Math.max(48, box.height - ZONE_PADDING_TOP - ZONE_PADDING_BOTTOM);
-          portByEndpoint.set(draft.endpointKey, {
-            x: draft.side === 'left' ? box.x : box.x + box.width,
-            y: box.y + ZONE_PADDING_TOP + usable * ratio,
-          });
-        } else {
-          const usable = Math.max(80, box.width - ZONE_PADDING_X * 2);
-          portByEndpoint.set(draft.endpointKey, {
-            x: box.x + ZONE_PADDING_X + usable * ratio,
-            y: draft.side === 'top' ? box.y : box.y + box.height,
-          });
-        }
-      });
-    });
-
-    const pairBuckets = new Map<string, string[]>();
-    routedBase.forEach((item) => {
-      if (!item.sourceZone || !item.targetZone || item.sourceZone === item.targetZone) return;
-      const [a, b] = [item.sourceZone, item.targetZone].sort((x, y) => x.localeCompare(y));
-      const pairKey = `${a}\u0000${b}`;
-      if (!pairBuckets.has(pairKey)) pairBuckets.set(pairKey, []);
-      pairBuckets.get(pairKey)!.push(item.id);
-    });
-    pairBuckets.forEach((ids) => ids.sort((a, b) => a.localeCompare(b)));
-
-    return routedBase.map((item, index) => {
-      const startNode = nodeById.get(item.link.source);
-      const endNode = nodeById.get(item.link.target);
-      const start = startNode ? { x: startNode.x + TOPO_NODE_WIDTH / 2, y: startNode.y + TOPO_NODE_HEIGHT / 2 } : { x: 0, y: 0 };
-      const end = endNode ? { x: endNode.x + TOPO_NODE_WIDTH / 2, y: endNode.y + TOPO_NODE_HEIGHT / 2 } : { x: 0, y: 0 };
-      if (!item.sourceZone || !item.targetZone || item.sourceZone === item.targetZone || !item.sourceSide || !item.targetSide) {
-        return {
-          ...item.link,
-          routePoints: [start.x, start.y, end.x, end.y],
-          labelX: (start.x + end.x) / 2,
-          labelY: (start.y + end.y) / 2 - 10,
-        };
-      }
-      const sourcePort = portByEndpoint.get(`${item.id}:source`) || start;
-      const targetPort = portByEndpoint.get(`${item.id}:target`) || end;
-      const [pairA, pairB] = [item.sourceZone, item.targetZone].sort((a, b) => a.localeCompare(b));
-      const pairIds = pairBuckets.get(`${pairA}\u0000${pairB}`) || [item.id];
-      const laneOffset = (pairIds.indexOf(item.id) - (pairIds.length - 1) / 2) * 14;
-      const horizontal = item.sourceSide === 'left' || item.sourceSide === 'right';
-      const routePoints = horizontal
-        ? [
-            start.x, start.y,
-            sourcePort.x, sourcePort.y,
-            (sourcePort.x + targetPort.x) / 2 + laneOffset, sourcePort.y,
-            (sourcePort.x + targetPort.x) / 2 + laneOffset, targetPort.y,
-            targetPort.x, targetPort.y,
-            end.x, end.y,
-          ]
-        : [
-            start.x, start.y,
-            sourcePort.x, sourcePort.y,
-            sourcePort.x, (sourcePort.y + targetPort.y) / 2 + laneOffset,
-            targetPort.x, (sourcePort.y + targetPort.y) / 2 + laneOffset,
-            targetPort.x, targetPort.y,
-            end.x, end.y,
-          ];
-      return {
-        ...item.link,
-        routePoints,
-        labelX: (sourcePort.x + targetPort.x) / 2,
-        labelY: (sourcePort.y + targetPort.y) / 2 - 10,
-      };
-    });
-  }, [nodeById, nodes, visibleLinks, zoneBoxes]);
+      .sort((a, b) => a.zoneKey.localeCompare(b.zoneKey));
+  }, [nodes, zoneLabel]);
   const editingLink = React.useMemo(
     () => visibleLinks.find((l) => l.id === editingLinkId) || null,
     [visibleLinks, editingLinkId]
@@ -1870,8 +1601,6 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           setEditingLinkId(null);
           setLinkDraft(null);
           linkDraftPointerStartRef.current = null;
-          linkDraftIsGestureRef.current = false;
-          suppressNodeContextMenuRef.current = false;
         }}
       >
         <Stage
@@ -1899,15 +1628,6 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
             if (linkDraft) {
               const evt = e.evt as MouseEvent;
               const p = toStageCoords(evt.clientX, evt.clientY);
-              const start = linkDraftPointerStartRef.current;
-              if (start && !linkDraftIsGestureRef.current) {
-                const dx = evt.clientX - start.x;
-                const dy = evt.clientY - start.y;
-                if (Math.hypot(dx, dy) >= 6) {
-                  linkDraftIsGestureRef.current = true;
-                  suppressNodeContextMenuRef.current = true;
-                }
-              }
               setLinkDraft((prev) => (prev ? { ...prev, x2: p.x, y2: p.y } : prev));
               return;
             }
@@ -1927,60 +1647,44 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           onMouseUp={() => {
             setIsRightPanning(false);
             panLastPointRef.current = null;
-            suppressNodeContextMenuRef.current = false;
             linkDraftPointerStartRef.current = null;
-            linkDraftIsGestureRef.current = false;
             setLinkDraft(null);
           }}
           onMouseLeave={() => {
             setIsRightPanning(false);
             panLastPointRef.current = null;
-            suppressNodeContextMenuRef.current = false;
             linkDraftPointerStartRef.current = null;
-            linkDraftIsGestureRef.current = false;
             setLinkDraft(null);
           }}
           onWheel={handleWheelZoom}
         >
-          <Layer listening={false}>
-            {zoneBoxes.map((zone) => (
-              <React.Fragment key={`zone-box-${zone.key}`}>
-                <Rect
-                  x={zone.x}
-                  y={zone.y}
-                  width={zone.width}
-                  height={zone.height}
-                  fill="#111827"
-                  opacity={0.34}
-                  stroke="#12b886"
-                  strokeWidth={1.4}
-                  dash={[10, 7]}
-                  cornerRadius={12}
-                />
-                <Rect
-                  x={zone.x}
-                  y={zone.y}
-                  width={zone.width}
-                  height={32}
-                  fill="#12b886"
-                  opacity={0.12}
-                  cornerRadius={[12, 12, 0, 0]}
-                />
-              </React.Fragment>
-            ))}
-          </Layer>
           <Layer>
-            {routedVisibleLinks.map((link, i) => {
+            {zoneBoxes.map((zone) => (
+              <Rect
+                key={`zone-box-${zone.zoneKey}`}
+                x={zone.x}
+                y={zone.y}
+                width={zone.width}
+                height={zone.height}
+                cornerRadius={10}
+                stroke="#12b886"
+                strokeWidth={1}
+                fill="#12b886"
+                opacity={0.08}
+                listening={false}
+              />
+            ))}
+            {visibleLinks.map((link, i) => {
+              const start = getNodeCenter(link.source);
+              const end = getNodeCenter(link.target);
               const linkId = link.id || `${link.source}::${link.target}::${i}`;
               return (
                 <React.Fragment key={`link-${linkId}`}>
                   <Line
-                    points={link.routePoints}
+                    points={[start.x, start.y, end.x, end.y]}
                     stroke="#228be6"
                     strokeWidth={1}
                     opacity={0.5}
-                    lineCap="round"
-                    lineJoin="round"
                     onMouseDown={(e) => {
                       e.cancelBubble = true;
                     }}
@@ -1990,8 +1694,8 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                     }}
                   />
                   <Text
-                    x={link.labelX}
-                    y={link.labelY}
+                    x={(start.x + end.x) / 2}
+                    y={(start.y + end.y) / 2 - 10}
                     text={getLinkLabel(link)}
                     fill={editingLinkId === link.id ? "#ffffff" : "#5c5f66"}
                     fontSize={9}
@@ -2054,10 +1758,8 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                   onMouseDown={(e) => {
                     e.cancelBubble = true;
                     const evt = e.evt as MouseEvent;
-                    if (canEditTopology && evt.button === 2) {
+                    if (canEditTopology && evt.button === 1) {
                       evt.preventDefault();
-                      suppressNodeContextMenuRef.current = false;
-                      linkDraftIsGestureRef.current = false;
                       linkDraftPointerStartRef.current = { x: evt.clientX, y: evt.clientY };
                       const center = getNodeCenter(node.id);
                       setLinkDraft({ sourceId: node.id, x1: center.x, y1: center.y, x2: center.x, y2: center.y });
@@ -2067,25 +1769,14 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                     e.cancelBubble = true;
                     setIsNodeDragging(false);
                     const evt = e.evt as MouseEvent;
-                    if (canEditTopology && evt.button === 2 && linkDraft?.sourceId && linkDraft.sourceId !== node.id) {
-                      draftLinkStartedAtRef.current = Date.now();
+                    if (canEditTopology && evt.button === 1 && linkDraft?.sourceId && linkDraft.sourceId !== node.id) {
                       createManualLink(linkDraft.sourceId, node.id);
-                      suppressNodeContextMenuRef.current = true;
                       linkDraftPointerStartRef.current = null;
-                      linkDraftIsGestureRef.current = false;
                       setLinkDraft(null);
                     }
                   }}
                   onContextMenu={(e) => {
                     e.evt.preventDefault();
-                    const justStartedDraft = Date.now() - draftLinkStartedAtRef.current < 360;
-                    if (suppressNodeContextMenuRef.current || (linkDraftIsGestureRef.current && !!linkDraft) || justStartedDraft) {
-                      suppressNodeContextMenuRef.current = false;
-                      linkDraftPointerStartRef.current = null;
-                      linkDraftIsGestureRef.current = false;
-                      setLinkDraft(null);
-                      return;
-                    }
                     if (linkDraft) {
                       setLinkDraft(null);
                       linkDraftPointerStartRef.current = null;
@@ -2108,17 +1799,16 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                 />
               </React.Fragment>
             ))}
-          </Layer>
-          <Layer listening={false}>
             {zoneBoxes.map((zone) => (
               <Text
-                key={`zone-label-${zone.key}`}
-                x={zone.x + 16}
-                y={zone.y + 10}
-                text={`${zone.label} (${zone.count})`}
-                fill="#d3f9d8"
+                key={`zone-label-${zone.zoneKey}`}
+                x={zone.x + 10}
+                y={zone.y + 8}
+                text={zone.label}
+                fill="#63e6be"
                 fontSize={11}
                 fontStyle="bold"
+                listening={false}
               />
             ))}
           </Layer>

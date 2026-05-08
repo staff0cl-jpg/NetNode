@@ -488,6 +488,15 @@ export const translations: Translations = {
     ru: 'Поиск только по устройствам выбранного филиала.',
     en: 'Search only devices in the selected branch.',
   },
+  automationBranchSelectPlaceholder: { ru: 'Выберите филиал', en: 'Select branch' },
+  automationMacBranchNoDevicesHint: {
+    ru: 'В выбранном филиале пока нет устройств в инвентаре. Поиск может вернуть пустой результат.',
+    en: 'The selected branch has no devices in inventory yet. Search may return no results.',
+  },
+  automationMacBranchOptionsEmpty: {
+    ru: 'Нет доступных филиалов для выбора. Добавьте устройства вручную или дождитесь автообнаружения.',
+    en: 'No branch options available. Add devices manually or wait for autodiscovery.',
+  },
   automationRegionPrefixLabel: { ru: 'Код филиала', en: 'Branch code' },
   automationRegionPrefixPlaceholder: { ru: 'Выберите филиал (например ULN, KRD)', en: 'Select branch (e.g. ULN, KRD)' },
   automationScopeHintRegion: {

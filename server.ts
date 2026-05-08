@@ -3677,7 +3677,14 @@ type MacSearchEvent = {
     });
   }
 
-  function buildMacSearchMatcher(rawMac: string): { ok: true; matchType: "exact" | "suffix"; normalizedInput: string; displayMac: string; matcher: (mac: string) => boolean } | { ok: false; error: string } {
+  function buildMacSearchMatcher(rawMac: string): {
+    ok: true;
+    matchType: "exact" | "suffix";
+    normalizedInput: string;
+    displayMac: string;
+    matcher: (mac: string) => boolean;
+    matchesNormalizedMac: (normalizedMac: string) => boolean;
+  } | { ok: false; error: string } {
     const normalizedInput = normalizeMacLoose(rawMac);
     if (!normalizedInput) {
       return { ok: false, error: "Invalid MAC format" };
@@ -3690,6 +3697,7 @@ type MacSearchEvent = {
         normalizedInput,
         displayMac,
         matcher: (mac: string) => normalizeMacLoose(mac) === normalizedInput,
+        matchesNormalizedMac: (normalizedMac: string) => String(normalizedMac || "") === normalizedInput,
       };
     }
     if (normalizedInput.length < 4 || normalizedInput.length % 2 !== 0) {
@@ -3703,6 +3711,7 @@ type MacSearchEvent = {
       normalizedInput: suffix,
       displayMac,
       matcher: (mac: string) => normalizeMacLoose(mac).endsWith(suffix),
+      matchesNormalizedMac: (normalizedMac: string) => String(normalizedMac || "").endsWith(suffix),
     };
   }
 
@@ -3740,9 +3749,18 @@ type MacSearchEvent = {
           getLagMembership(device.ip),
         ]);
         const ciscoAggHints = getCiscoAggregateHints(ciscoHints, lag);
+        const qBridgeByNormalizedMac = new Map<string, number[]>();
+        Object.entries(qBridgePorts).forEach(([qSuffix]) => {
+          const parsed = parseQBridgeSuffix(qSuffix);
+          const normalized = normalizeMacLoose(parsed.mac);
+          if (!normalized) return;
+          if (!qBridgeByNormalizedMac.has(normalized)) qBridgeByNormalizedMac.set(normalized, []);
+          if (parsed.vlan !== undefined) qBridgeByNormalizedMac.get(normalized)!.push(parsed.vlan);
+        });
         Object.entries(dot1dPorts).forEach(([suffix, bridgePortRaw]) => {
           const mac = macFromOidSuffix(suffix);
           if (!mac || !matcher(mac)) return;
+          const normalizedMac = normalizeMacLoose(mac);
           const bridgePort = String(bridgePortRaw || "").trim();
           const ifIndex = String(basePortIfIndex[bridgePort] || "").trim();
           const ifName = String(ifNames[ifIndex] || ifDescr[ifIndex] || `if${ifIndex || "?"}`).trim();
@@ -3751,11 +3769,8 @@ type MacSearchEvent = {
           const isLag = lag.aggIndexes.has(ifIndex) || isLikelyLagInterface(ifName, alias, descr, ifType[ifIndex]);
           const isTrunk = isLikelyTrunkPort(ifName, alias, descr, ifType[ifIndex]) || ciscoHints.has(ifIndex) || ciscoAggHints.has(ifIndex);
           const source = isLag ? "dot1dTpFdbPort:lag" : isTrunk ? "dot1dTpFdbPort:trunk" : "dot1dTpFdbPort:access";
-          const qbridgeHit = Object.entries(qBridgePorts).find(([qSuffix]) => {
-            const parsed = parseQBridgeSuffix(qSuffix);
-            return matcher(parsed.mac);
-          });
-          const vlan = qbridgeHit ? parseQBridgeSuffix(qbridgeHit[0]).vlan : undefined;
+          const qbridgeVlans = normalizedMac ? qBridgeByNormalizedMac.get(normalizedMac) || [] : [];
+          const vlan = qbridgeVlans.length ? qbridgeVlans[0] : undefined;
           const matchedOui = findMatchedOui(mac);
           const expectedVoiceVlan = voiceMap[ifIndex];
           const detectedVoiceVlan = vlan;
@@ -4004,7 +4019,12 @@ type MacSearchEvent = {
         finalStatus = "ambiguous";
         ambiguityNotes.push(`Neighbor ${neighbor.name} returned ${nextHits.length} candidate ports; deterministic first candidate selected.`);
       }
-      current = rankTraceCandidates(nextHits)[0];
+      const edgePreferred = nextHits.filter((hit) => {
+        const type = detectPortType(hit);
+        return type === "access" || type === "unknown";
+      });
+      const nextPool = edgePreferred.length ? edgePreferred : nextHits;
+      current = rankTraceCandidates(nextPool)[0];
 
       if (depth === maxHops - 1) {
         finalStatus = "depth_limit";
@@ -4030,7 +4050,8 @@ type MacSearchEvent = {
       : null;
     const baseTargets = requestedIds ? inventory.filter((d) => requestedIds.has(d.id)) : [...inventory];
     const branchCode = normalizeBranchCode(req.body?.branch || req.body?.regionPrefix);
-    const targets = branchCode
+    const isStrictSingleSelected = Boolean(requestedIds && requestedIds.size === 1 && baseTargets.length === 1);
+    const targets = branchCode && !isStrictSingleSelected
       ? baseTargets.filter((d) => normalizeBranchCode(d.branch) === branchCode)
       : baseTargets;
     const mode = String(req.body?.mode || "single").trim().toLowerCase() === "trace" ? "trace" : "single";
@@ -4045,7 +4066,7 @@ type MacSearchEvent = {
       status: "info",
       message: `Starting ${mode} search for ${macMatcher.displayMac} (${macMatcher.matchType}) across ${targets.length} device(s).`,
     });
-    if (branchCode) {
+    if (branchCode && !isStrictSingleSelected) {
       addEvent({
         stage: "request",
         status: "info",
@@ -4067,6 +4088,19 @@ type MacSearchEvent = {
     const hops: MacTraceHop[] = [];
     const ambiguityNotes: string[] = [];
     if (!results.length) {
+      if (isStrictSingleSelected && baseTargets[0]) {
+        const selected = baseTargets[0];
+        addEvent({
+          stage: "trace",
+          status: "warning",
+          message:
+            `Not found on selected device ${selected.name} (${selected.ip}): no MAC table entry matched ${macMatcher.displayMac} (${macMatcher.matchType}). ` +
+            `Не найдено на выбранном устройстве ${selected.name} (${selected.ip}): в таблице MAC нет записи, совпадающей с ${macMatcher.displayMac} (${macMatcher.matchType}).`,
+          deviceId: selected.id,
+          deviceName: selected.name,
+          ip: selected.ip,
+        });
+      }
       addEvent({
         stage: "trace",
         status: "warning",
