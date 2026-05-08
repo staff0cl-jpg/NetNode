@@ -35,20 +35,22 @@ const NotificationCenter: React.FC = () => {
         return (
           <div
             key={item.id}
-            className={`pointer-events-auto rounded border ${style.border} ${style.bg} p-3 shadow-xl backdrop-blur`}
+            className={`notification-toast notification-toast--${item.type} pointer-events-auto rounded border ${style.border} ${style.bg} p-3 shadow-xl backdrop-blur`}
             role="status"
             aria-live="polite"
           >
             <div className="flex items-start gap-2">
-              {style.icon}
+              <span className="notification-toast__icon">{style.icon}</span>
               <div className="min-w-0 flex-1">
-                <p className="text-xs font-semibold text-white">{item.title || style.title}</p>
-                <p className="mt-0.5 text-xs text-[#c1c2c5] whitespace-pre-wrap break-words">{item.message}</p>
+                <p className="notification-toast__title text-xs font-semibold text-white">{item.title || style.title}</p>
+                <p className="notification-toast__message mt-0.5 text-xs text-[#c1c2c5] whitespace-pre-wrap break-words">
+                  {item.message}
+                </p>
               </div>
               <button
                 type="button"
                 aria-label={t('notifyClose')}
-                className="text-[#909296] hover:text-white"
+                className="notification-toast__close text-[#909296] hover:text-white"
                 onClick={() => removeNotification(item.id)}
               >
                 <X size={14} />

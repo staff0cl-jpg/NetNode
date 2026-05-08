@@ -58,6 +58,54 @@ body {
 [data-theme="light"] .active\:bg-\[\#37b24d\]:active { background-color: #38b14f !important; }
 [data-theme="light"] .focus\:ring-\[\#228be6\]:focus { --tw-ring-color: rgba(34, 139, 230, 0.3) !important; }
 
+/* Notification toasts: keep dark defaults, improve light theme contrast */
+[data-theme="light"] .notification-toast {
+  box-shadow: 0 10px 25px rgba(15, 23, 42, 0.08);
+}
+
+[data-theme="light"] .notification-toast__title {
+  color: #111827 !important;
+}
+
+[data-theme="light"] .notification-toast__message {
+  color: #374151 !important;
+}
+
+[data-theme="light"] .notification-toast__close {
+  color: #4b5563 !important;
+}
+
+[data-theme="light"] .notification-toast__close:hover {
+  color: #111827 !important;
+}
+
+[data-theme="light"] .notification-toast--success {
+  background-color: #edf9f0 !important;
+  border-color: #74c98a !important;
+}
+
+[data-theme="light"] .notification-toast--success .notification-toast__icon svg {
+  color: #1f8f3a !important;
+}
+
+[data-theme="light"] .notification-toast--error {
+  background-color: #fff1f1 !important;
+  border-color: #f08a8a !important;
+}
+
+[data-theme="light"] .notification-toast--error .notification-toast__icon svg {
+  color: #cc2f2f !important;
+}
+
+[data-theme="light"] .notification-toast--info {
+  background-color: #eff7ff !important;
+  border-color: #8fc2f4 !important;
+}
+
+[data-theme="light"] .notification-toast--info .notification-toast__icon svg {
+  color: #1d6fd1 !important;
+}
+
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;

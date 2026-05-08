@@ -43,7 +43,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
   const [subcategoryFilter, setSubcategoryFilter] = useState<string>('all');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [isBulkProcessing, setIsBulkProcessing] = useState(false);
-  const [sortConfig, setSortConfig] = useState<{ key: keyof Switch | 'vendorModel' | 'warningScore'; direction: 'asc' | 'desc' } | null>(null);
+  const [sortConfig, setSortConfig] = useState<{ key: keyof Switch | 'vendorModel' | 'warningCount'; direction: 'asc' | 'desc' } | null>(null);
   const [isAdding, setIsAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [newSwitch, setNewSwitch] = useState<Partial<Switch>>({
@@ -267,7 +267,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
     a.click();
   };
 
-  const handleSort = (key: keyof Switch | 'vendorModel' | 'warningScore') => {
+  const handleSort = (key: keyof Switch | 'vendorModel' | 'warningCount') => {
     let direction: 'asc' | 'desc' = 'asc';
     if (sortConfig && sortConfig.key === key && sortConfig.direction === 'asc') {
       direction = 'desc';
@@ -343,17 +343,17 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
       if (sortConfig.key === 'vendorModel') {
         aValue = `${a.vendor} ${a.model}`.toLowerCase();
         bValue = `${b.vendor} ${b.model}`.toLowerCase();
-      } else if (sortConfig.key === 'warningScore') {
-        aValue = Number(a.warningScore || 0);
-        bValue = Number(b.warningScore || 0);
+      } else if (sortConfig.key === 'warningCount') {
+        aValue = (a.warningReasons || []).length;
+        bValue = (b.warningReasons || []).length;
       } else if (sortConfig.key === 'status') {
         const severityRank = (s: Switch) => {
           if (s.warningSeverity === 'critical' || s.status === 'offline') return 3;
           if (s.warningSeverity === 'warning' || s.status === 'warning') return 2;
           return 1;
         };
-        aValue = severityRank(a) * 1000 + Number(a.warningScore || 0);
-        bValue = severityRank(b) * 1000 + Number(b.warningScore || 0);
+        aValue = severityRank(a) * 1000 + (a.warningReasons || []).length;
+        bValue = severityRank(b) * 1000 + (b.warningReasons || []).length;
       } else if (sortConfig.key === 'ip') {
         aValue = parseIpv4(a.ip) ?? Number.MAX_SAFE_INTEGER;
         bValue = parseIpv4(b.ip) ?? Number.MAX_SAFE_INTEGER;
@@ -582,13 +582,13 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                   <SortIcon active={sortConfig?.key === 'status'} direction={sortConfig?.direction} />
                 </div>
               </th>
-              <th onClick={() => handleSort('warningScore')} className="cursor-pointer hover:text-white transition-colors">
+              <th onClick={() => handleSort('warningCount')} className="cursor-pointer hover:text-white transition-colors">
                 <div className="flex items-center gap-2">
                   <span>{t('warningsLabel')}</span>
                   <span title={t('warningsTooltip')} className="inline-flex text-[#909296] hover:text-white">
                     <CircleHelp size={12} />
                   </span>
-                  <SortIcon active={sortConfig?.key === 'warningScore'} direction={sortConfig?.direction} />
+                  <SortIcon active={sortConfig?.key === 'warningCount'} direction={sortConfig?.direction} />
                 </div>
               </th>
               <th onClick={() => handleSort('name')} className="cursor-pointer hover:text-white transition-colors">
@@ -666,15 +666,9 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
                           ? "z-badge-warning"
                           : "z-badge-success"
                     )}
-                    title={(sw.warningReasons || []).join('; ') || t('warningsTooltip')}
+                    title={`${(sw.warningReasons || []).length} ${t('warningsCountLabel')}${(sw.warningReasons || []).length > 0 ? `: ${(sw.warningReasons || []).join('; ')}` : ''}`}
                   >
-                    {(sw.warningSeverity === 'critical' || sw.status === 'offline')
-                      ? t('warningSeverityCritical')
-                      : (sw.warningSeverity === 'warning' || sw.status === 'warning')
-                        ? t('warningSeverityWarning')
-                        : t('warningSeverityNone')
-                    }
-                    {`: ${Number(sw.warningScore || 0)}`}
+                    {(sw.warningReasons || []).length}
                   </span>
                 </td>
                 <td className="font-bold text-white tracking-tight">{sw.name}</td>
