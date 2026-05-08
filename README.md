@@ -17,20 +17,38 @@ NETNODE is an on-premise network operations application for inventory, discovery
   - Device registry with branch/city/zone/vendor/model/category/subcategory
   - Region tabs + category tabs (Switches, Routers, FC switches, UPS, All except Other)
   - Sorting for visible columns (including numeric IPv4 and numeric uptime sort)
+  - Warnings column uses count-based semantics (number of active warnings per device)
+  - Localized warning reasons (RU/EN) in tooltip, including structured reasons (device unreachable, high CPU, down trunk ports)
   - Row actions menu (copy IP, open HTTPS UI, quick device info)
   - Bulk actions and CSV export
   - SNMP template binding + custom OIDs per device
 
 - **Topology**
-  - Link graph with manual drag and saved node layout
+  - Link graph with saved node layout and role-based edit controls
   - Auto-layout and link rebuild flow
   - Manual link add/delete
+  - Quick node actions on double left click (SSH connect / Open Web UI)
+  - Manual link creation by right-button drag from one node to another
   - Interactive link label rename directly on map
+  - Multi-select rectangle and group move for selected nodes
   - Protection of manual links and manually renamed link labels during rebuild
+  - Hierarchy/layout improvements with zone-based grouping
+  - Zone normalization/transliteration for stable grouping keys and consistent labels
+  - Warning color mapping for node severity (`online`, `warning`, `critical`)
   - Right-click pan on empty canvas area (no mode switch button required)
   - Separate topology views:
     - `L2/L3` (regular IP network devices)
     - `FC` (fibre channel switches)
+
+- **Notifications and UX Feedback**
+  - Unified in-app notifications (`success`, `error`, `info`) with auto-dismiss and manual close
+  - Notification titles/messages are localized through RU/EN i18n keys
+  - Discovery flows (scan/watch) use user-facing localized status toasts for started/running/completed/error states
+
+- **Settings (Branding and Theme)**
+  - Product branding controls: product name + PNG logo workflow (upload -> process -> apply)
+  - Theme switching (`dark`/`light`) applies immediately in UI and is persisted via system config
+  - Public/login surfaces consume applied branding (name/logo/theme) from server configuration
 
 - **Discovery and Monitoring**
   - SNMP-based discovery (no SSH-based autodiscovery in watch flow)

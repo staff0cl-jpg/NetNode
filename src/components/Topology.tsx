@@ -79,6 +79,12 @@ type TopologyVersionPreview = {
   totalTargetLinks: number;
 };
 type LinkDraft = { sourceId: string; x1: number; y1: number; x2: number; y2: number } | null;
+type SelectionDraft = { x1: number; y1: number; x2: number; y2: number } | null;
+type GroupDragState = {
+  anchorId: string;
+  anchorStart: { x: number; y: number };
+  originPositions: Record<string, { x: number; y: number }>;
+} | null;
 
 type NodeWithPos = Switch & { x: number; y: number };
 type TopologyMode = 'ip' | 'fc';
@@ -88,14 +94,18 @@ const TOPO_NODE_HEIGHT = 80;
 const TOPO_ZONE_PAD_X = 44;
 const TOPO_ZONE_PAD_TOP = 34;
 const TOPO_ZONE_PAD_BOTTOM = 30;
-const TOPO_ROW_TOP_Y = 90;
-const TOPO_ROW_SECOND_Y = 300;
-const TOPO_ROW_THIRD_Y = 510;
+const TOPO_ROW_TOP_Y = 34;
+const TOPO_ROW_SECOND_Y = 170;
+const TOPO_ROW_THIRD_Y = 306;
 const TOPO_ROW_HEIGHT = TOPO_NODE_HEIGHT + 52;
 const TOPO_COLUMN_GAP = TOPO_NODE_WIDTH + 66;
 const TOPO_ZONE_GAP_X = 100;
+const TOPO_ZONE_GAP_Y = 120;
+const TOPO_ROW_STAGGER_X = 90;
 const TOPO_ZONE_MIN_WIDTH = TOPO_NODE_WIDTH + TOPO_ZONE_PAD_X * 2;
 const TOPO_MAX_COLUMNS = 7;
+const TOPO_STAGE_SIDE_PADDING = 35;
+const TOPO_LAYOUT_MAX_WIDTH = 1500;
 
 const sortSwitchesByNameThenId = (a: Switch, b: Switch) => {
   const an = String(a.name || '').toLowerCase();
@@ -146,7 +156,7 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
   if (switches.length === 0) return [];
   void links;
   void ch;
-  const stageWidth = Math.max(cw, 1200);
+  const stageWidth = Math.max(cw, 1100);
   const zones = new Map<string, Switch[]>();
   switches.forEach((sw) => {
     const zoneKey = deriveZoneKey(sw.name) || '__ungrouped__';
@@ -166,6 +176,11 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
         Math.max(1, cisco.length) * TOPO_NODE_WIDTH + Math.max(0, cisco.length - 1) * (TOPO_COLUMN_GAP - TOPO_NODE_WIDTH),
         otherCols * TOPO_NODE_WIDTH + Math.max(0, otherCols - 1) * (TOPO_COLUMN_GAP - TOPO_NODE_WIDTH),
       ];
+      const otherRows = Math.max(1, Math.ceil(others.length / otherCols));
+      const contentBottom =
+        TOPO_ROW_THIRD_Y +
+        (otherRows - 1) * TOPO_ROW_HEIGHT +
+        TOPO_NODE_HEIGHT;
       return {
         zoneKey,
         mikrotik,
@@ -173,12 +188,30 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
         others,
         otherCols,
         width: Math.max(TOPO_ZONE_MIN_WIDTH, Math.max(...rowWidths) + TOPO_ZONE_PAD_X * 2),
+        height: Math.max(
+          TOPO_NODE_HEIGHT + TOPO_ZONE_PAD_TOP + TOPO_ZONE_PAD_BOTTOM,
+          contentBottom + TOPO_ZONE_PAD_BOTTOM
+        ),
       };
     });
 
-  const totalWidth = zonePlans.reduce((sum, plan) => sum + plan.width, 0) + Math.max(0, zonePlans.length - 1) * TOPO_ZONE_GAP_X;
-  let nextZoneX = Math.max(35, stageWidth / 2 - totalWidth / 2);
   const pos = new Map<string, { x: number; y: number }>();
+  const maxLayoutWidth = Math.min(TOPO_LAYOUT_MAX_WIDTH, Math.max(760, stageWidth - TOPO_STAGE_SIDE_PADDING * 2));
+  const rows: Array<{ plans: typeof zonePlans; width: number; height: number }> = [];
+  let currentRow: { plans: typeof zonePlans; width: number; height: number } = { plans: [], width: 0, height: 0 };
+
+  zonePlans.forEach((plan) => {
+    const nextWidth = currentRow.width === 0 ? plan.width : currentRow.width + TOPO_ZONE_GAP_X + plan.width;
+    if (currentRow.plans.length && nextWidth > maxLayoutWidth) {
+      rows.push(currentRow);
+      currentRow = { plans: [plan], width: plan.width, height: plan.height };
+      return;
+    }
+    currentRow.plans.push(plan);
+    currentRow.width = nextWidth;
+    currentRow.height = Math.max(currentRow.height, plan.height);
+  });
+  if (currentRow.plans.length) rows.push(currentRow);
 
   const placeRow = (items: Switch[], zoneX: number, zoneWidth: number, baseY: number, maxCols: number) => {
     if (!items.length) return;
@@ -196,15 +229,21 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
     }
   };
 
-  zonePlans.forEach((plan) => {
-    placeRow(plan.mikrotik, nextZoneX, plan.width, TOPO_ROW_TOP_Y, Math.max(1, plan.mikrotik.length || 1));
-    placeRow(plan.cisco, nextZoneX, plan.width, TOPO_ROW_SECOND_Y, Math.max(1, plan.cisco.length || 1));
-    placeRow(plan.others, nextZoneX, plan.width, TOPO_ROW_THIRD_Y, plan.otherCols);
-    nextZoneX += plan.width + TOPO_ZONE_GAP_X;
+  let rowY = 90;
+  rows.forEach((row, rowIndex) => {
+    const rowOffset = rowIndex % 2 === 1 ? TOPO_ROW_STAGGER_X : 0;
+    let zoneX = Math.max(TOPO_STAGE_SIDE_PADDING, stageWidth / 2 - row.width / 2 + rowOffset);
+    row.plans.forEach((plan) => {
+      placeRow(plan.mikrotik, zoneX, plan.width, rowY + TOPO_ROW_TOP_Y, Math.max(1, Math.min(3, plan.mikrotik.length || 1)));
+      placeRow(plan.cisco, zoneX, plan.width, rowY + TOPO_ROW_SECOND_Y, Math.max(1, Math.min(4, plan.cisco.length || 1)));
+      placeRow(plan.others, zoneX, plan.width, rowY + TOPO_ROW_THIRD_Y, plan.otherCols);
+      zoneX += plan.width + TOPO_ZONE_GAP_X;
+    });
+    rowY += row.height + TOPO_ZONE_GAP_Y;
   });
 
   return switches.map((sw) => {
-    const p = pos.get(sw.id) || { x: 35, y: TOPO_ROW_THIRD_Y };
+    const p = pos.get(sw.id) || { x: 35, y: 90 + TOPO_ROW_THIRD_Y };
     return { ...sw, x: p.x, y: p.y };
   });
 }
@@ -289,6 +328,9 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   const [previewLoading, setPreviewLoading] = useState(false);
   const [restoreLoading, setRestoreLoading] = useState(false);
   const [linkDraft, setLinkDraft] = useState<LinkDraft>(null);
+  const [selectionDraft, setSelectionDraft] = useState<SelectionDraft>(null);
+  const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
+  const groupDragRef = useRef<GroupDragState>(null);
   const topologySwitches = React.useMemo(() => {
     const ipAllowed = new Set(['switch', 'router', 'коммутатор', 'маршрутизатор']);
     const fcAllowed = new Set(['fc switch', 'fibre channel switch', 'fiber channel switch', 'fc коммутатор']);
@@ -348,6 +390,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     return override || zoneKey;
   }, [zoneLabelOverrides]);
   const topologySwitchIds = React.useMemo(() => new Set(zoneSwitches.map((s) => s.id)), [zoneSwitches]);
+  const selectedNodeIdSet = React.useMemo(() => new Set(selectedNodeIds), [selectedNodeIds]);
 
   useEffect(() => {
     let cancelled = false;
@@ -673,6 +716,26 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     }
   };
 
+  const persistLayoutPositions = React.useCallback(
+    async (positions: Record<string, { x: number; y: number }>) => {
+      if (!Object.keys(positions).length) return;
+      try {
+        await fetch('/api/topology/layout', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-user-role': role || 'viewer',
+            'x-user-name': username || 'unknown'
+          },
+          body: JSON.stringify({ positions, branch: selectedRegion || undefined, topologyMode }),
+        });
+      } catch (error) {
+        console.error('Failed to save layout:', error);
+      }
+    },
+    [role, selectedRegion, topologyMode, username]
+  );
+
   const getNodeCenter = (id: string) => {
     const node = nodes.find((n) => n.id === id);
     if (!node) return { x: 0, y: 0 };
@@ -687,6 +750,19 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       y: (clientY - rect.top - stagePos.y) / scale,
     };
   };
+
+  const selectionRect = React.useMemo(() => {
+    if (!selectionDraft) return null;
+    const x = Math.min(selectionDraft.x1, selectionDraft.x2);
+    const y = Math.min(selectionDraft.y1, selectionDraft.y2);
+    const width = Math.abs(selectionDraft.x2 - selectionDraft.x1);
+    const height = Math.abs(selectionDraft.y2 - selectionDraft.y1);
+    return { x, y, width, height };
+  }, [selectionDraft]);
+
+  useEffect(() => {
+    setSelectedNodeIds((prev) => prev.filter((id) => nodes.some((n) => n.id === id)));
+  }, [nodes]);
 
   const createManualLink = async (source: string, target: string, comment?: string) => {
     if (!canEditTopology) return;
@@ -888,6 +964,14 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   const handleOpenWeb = (sw: Switch) => {
     window.open(`http://${sw.ip}`, '_blank', 'noopener,noreferrer');
   };
+
+  const openNodeActionMenu = React.useCallback((node: Switch, clientX: number, clientY: number) => {
+    setContextMenu({
+      node,
+      x: clientX,
+      y: clientY,
+    });
+  }, []);
 
   const handleRenameRegionInline = async () => {
     const from = String(editingRegion || '').trim();
@@ -1131,8 +1215,17 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           onMouseDown={(e) => {
             const evt = e.evt as MouseEvent;
             if (linkDraft) return;
-            if (evt.button !== 2 || isNodeDragging) return;
             const stage = e.target.getStage();
+            if (evt.button === 0 && !isNodeDragging) {
+              if (!stage || e.target !== stage) return;
+              evt.preventDefault();
+              const p = toStageCoords(evt.clientX, evt.clientY);
+              setContextMenu(null);
+              setEditingLinkId(null);
+              setSelectionDraft({ x1: p.x, y1: p.y, x2: p.x, y2: p.y });
+              return;
+            }
+            if (evt.button !== 2 || isNodeDragging) return;
             if (!stage || e.target !== stage) return;
             evt.preventDefault();
             setContextMenu(null);
@@ -1141,6 +1234,12 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
             panLastPointRef.current = { x: evt.clientX, y: evt.clientY };
           }}
           onMouseMove={(e) => {
+            if (selectionDraft) {
+              const evt = e.evt as MouseEvent;
+              const p = toStageCoords(evt.clientX, evt.clientY);
+              setSelectionDraft((prev) => (prev ? { ...prev, x2: p.x, y2: p.y } : prev));
+              return;
+            }
             if (linkDraft) {
               const evt = e.evt as MouseEvent;
               const p = toStageCoords(evt.clientX, evt.clientY);
@@ -1161,6 +1260,29 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
             setStagePos((p) => ({ x: p.x + dx, y: p.y + dy }));
           }}
           onMouseUp={() => {
+            if (selectionDraft) {
+              const x = Math.min(selectionDraft.x1, selectionDraft.x2);
+              const y = Math.min(selectionDraft.y1, selectionDraft.y2);
+              const width = Math.abs(selectionDraft.x2 - selectionDraft.x1);
+              const height = Math.abs(selectionDraft.y2 - selectionDraft.y1);
+              if (width < 4 && height < 4) {
+                setSelectedNodeIds([]);
+              } else {
+                const nextSelected = nodes
+                  .filter((node) => {
+                    const nx1 = node.x;
+                    const ny1 = node.y;
+                    const nx2 = node.x + TOPO_NODE_WIDTH;
+                    const ny2 = node.y + TOPO_NODE_HEIGHT;
+                    const sx2 = x + width;
+                    const sy2 = y + height;
+                    return nx1 < sx2 && nx2 > x && ny1 < sy2 && ny2 > y;
+                  })
+                  .map((node) => node.id);
+                setSelectedNodeIds(nextSelected);
+              }
+              setSelectionDraft(null);
+            }
             setIsRightPanning(false);
             panLastPointRef.current = null;
             linkDraftPointerStartRef.current = null;
@@ -1171,6 +1293,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
             panLastPointRef.current = null;
             linkDraftPointerStartRef.current = null;
             setLinkDraft(null);
+            setSelectionDraft(null);
           }}
           onWheel={handleWheelZoom}
         >
@@ -1236,6 +1359,19 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                 opacity={0.9}
               />
             )}
+            {selectionRect && (
+              <Rect
+                x={selectionRect.x}
+                y={selectionRect.y}
+                width={selectionRect.width}
+                height={selectionRect.height}
+                stroke="#4dabf7"
+                strokeWidth={1.5}
+                dash={[6, 4]}
+                fill="rgba(77, 171, 247, 0.12)"
+                listening={false}
+              />
+            )}
 
             {nodes.map((node) => (
               <React.Fragment key={node.id}>
@@ -1245,21 +1381,63 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                   width={160}
                   height={80}
                   fill="#25262b"
-                  stroke={NODE_COLORS[getNodeSeverity(node)]}
-                  strokeWidth={2}
+                  stroke={selectedNodeIdSet.has(node.id) ? '#4dabf7' : NODE_COLORS[getNodeSeverity(node)]}
+                  strokeWidth={selectedNodeIdSet.has(node.id) ? 3 : 2}
                   cornerRadius={4}
                   draggable={canEditTopology}
                   onDragStart={(e) => {
                     e.cancelBubble = true;
                     setIsNodeDragging(true);
+                    if (selectedNodeIdSet.has(node.id) && selectedNodeIds.length > 1) {
+                      const originPositions: Record<string, { x: number; y: number }> = {};
+                      nodes.forEach((n) => {
+                        if (selectedNodeIdSet.has(n.id)) originPositions[n.id] = { x: n.x, y: n.y };
+                      });
+                      groupDragRef.current = {
+                        anchorId: node.id,
+                        anchorStart: { x: node.x, y: node.y },
+                        originPositions,
+                      };
+                    } else {
+                      groupDragRef.current = null;
+                    }
                   }}
                   onDragEnd={(e) => {
                     e.cancelBubble = true;
                     setIsNodeDragging(false);
+                    const dragState = groupDragRef.current;
+                    if (dragState && dragState.anchorId === node.id) {
+                      const dx = e.target.x() - dragState.anchorStart.x;
+                      const dy = e.target.y() - dragState.anchorStart.y;
+                      const movedPositions = Object.fromEntries(
+                        Object.entries(dragState.originPositions).map(([id, p]) => [
+                          id,
+                          { x: p.x + dx, y: p.y + dy },
+                        ])
+                      );
+                      setNodes((prev) =>
+                        prev.map((n) => (movedPositions[n.id] ? { ...n, ...movedPositions[n.id] } : n))
+                      );
+                      setSavedLayout((prev) => ({ ...prev, ...movedPositions }));
+                      persistLayoutPositions(movedPositions);
+                      groupDragRef.current = null;
+                      return;
+                    }
                     handleDragEnd(node.id, e);
                   }}
                   onDragMove={(e) => {
                     e.cancelBubble = true;
+                    const dragState = groupDragRef.current;
+                    if (!dragState || dragState.anchorId !== node.id) return;
+                    const dx = e.target.x() - dragState.anchorStart.x;
+                    const dy = e.target.y() - dragState.anchorStart.y;
+                    setNodes((prev) =>
+                      prev.map((n) => {
+                        const origin = dragState.originPositions[n.id];
+                        if (!origin) return n;
+                        return { ...n, x: origin.x + dx, y: origin.y + dy };
+                      })
+                    );
                   }}
                   onMouseEnter={() => {
                     const stage = stageRef.current;
@@ -1291,14 +1469,20 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                       setLinkDraft(null);
                       return;
                     }
-                    if (evt.button === 1) {
-                      evt.preventDefault();
-                      setContextMenu({
-                        node,
-                        x: evt.clientX,
-                        y: evt.clientY,
-                      });
-                    }
+                  }}
+                  onDblClick={(e) => {
+                    e.cancelBubble = true;
+                    const evt = e.evt as MouseEvent;
+                    if (evt.button !== 0) return;
+                    evt.preventDefault();
+                    openNodeActionMenu(node, evt.clientX, evt.clientY);
+                  }}
+                  onDblTap={(e) => {
+                    e.cancelBubble = true;
+                    const evt = e.evt as TouchEvent;
+                    const touch = evt.changedTouches?.[0] || evt.touches?.[0];
+                    if (!touch) return;
+                    openNodeActionMenu(node, touch.clientX, touch.clientY);
                   }}
                   onContextMenu={(e) => {
                     e.evt.preventDefault();
