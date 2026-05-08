@@ -175,6 +175,17 @@ export const translations: Translations = {
   topologyZoneRenameHint: { ru: 'Двойной клик или двойной тап по зоне для переименования отображаемой метки.', en: 'Double-click or double-tap a zone to rename its display label.' },
   topologyZoneRenamePlaceholder: { ru: 'Метка зоны (пусто = авто)', en: 'Zone label (empty = auto)' },
   topologyZoneRenameFailed: { ru: 'Не удалось переименовать отображаемую метку зоны.', en: 'Failed to rename zone display label.' },
+  topologyLayoutRunning: { ru: 'Выполняется...', en: 'Running...' },
+  topologyLayoutProgressTitle: { ru: 'Обновление топологии', en: 'Topology layout' },
+  topologyLayoutRunStarted: { ru: 'Запущено авто-выравнивание и обновление trunk-связей. Это может занять до 30 секунд.', en: 'Auto-layout and trunk refresh started. This can take up to 30 seconds.' },
+  topologyLayoutCompletedTitle: { ru: 'Топология обновлена', en: 'Topology updated' },
+  topologyLayoutCompletedSummary: { ru: 'Отображено связей: {links}. Trunk: {trunks}.', en: 'Visible links: {links}. Trunks: {trunks}.' },
+  topologyLayoutFailedTitle: { ru: 'Авто-выравнивание не выполнено', en: 'Auto-layout failed' },
+  topologyLayoutFailedFriendly: { ru: 'Не удалось завершить авто-выравнивание. Проверьте доступность backend и повторите.', en: 'Could not complete auto-layout. Check backend availability and retry.' },
+  topologyLayoutTimeoutTitle: { ru: 'Превышено время ожидания', en: 'Request timed out' },
+  topologyLayoutTimeout: { ru: 'Авто-выравнивание заняло слишком много времени. Попробуйте снова через несколько секунд.', en: 'Auto-layout took too long. Please retry in a few seconds.' },
+  topologyNoTrunksAfterLayoutTitle: { ru: 'Trunk не обнаружены', en: 'No trunks found' },
+  topologyNoTrunksAfterLayout: { ru: 'После обновления не найдено trunk-связей в текущем фильтре. Проверьте branch/zone или данные линков.', en: 'No trunk links were found for the current filter after layout. Check branch/zone scope or link data.' },
 
   // Login
   authGateway: { ru: 'Шлюз управления инфраструктурой', en: 'Infrastructure Control Gateway' },

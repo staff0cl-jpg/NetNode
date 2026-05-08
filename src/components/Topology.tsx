@@ -1,9 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Stage, Layer, Rect, Text, Line, Circle } from 'react-konva';
-import { Share2, Box, ZoomIn, ZoomOut, RotateCcw, Globe, TerminalSquare } from 'lucide-react';
+import { Share2, Box, ZoomIn, ZoomOut, RotateCcw, Globe, TerminalSquare, Loader2 } from 'lucide-react';
 import { Switch } from '../types';
 import { useTranslation } from '../lib/i18n';
 import { deriveZoneKey } from '../lib/zoneKey';
+import { useNotifications } from '../lib/notifications';
 
 const safeErrorText = (value: unknown, fallback = 'Unknown error') =>
   String(value || fallback)
@@ -103,14 +104,15 @@ const TOPO_ZONE_GAP_X = 180;
 const TOPO_ZONE_GAP_Y = 120;
 const TOPO_ROW_STAGGER_X = 120;
 const TOPO_VENDOR_LAYER_GAP_Y = 130;
-const TOPO_VENDOR_MAX_COLUMNS = 7;
+const TOPO_VENDOR_MAX_COLUMNS = 9;
 const TOPO_ZONE_MIN_WIDTH = TOPO_NODE_WIDTH + TOPO_ZONE_PAD_X * 2;
-const TOPO_MAX_COLUMNS = 10;
-const TOPO_MAX_ZONE_COLUMNS_PER_ROW = 7;
+const TOPO_MAX_COLUMNS = 14;
+const TOPO_MAX_ZONE_COLUMNS_PER_ROW = 10;
 const TOPO_STAGE_SIDE_PADDING = 35;
-const TOPO_LAYOUT_MAX_WIDTH = 2400;
+const TOPO_LAYOUT_MAX_WIDTH = 3200;
 const TOPO_LAYOUT_FIT_SCALE = 0.82;
 const TOPO_BARYCENTER_ITERATIONS = 6;
+const TOPO_AUTO_LAYOUT_TIMEOUT_MS = 30000;
 
 const TOPO_TRUNK_STROKE = '#ff922b';
 const TOPO_TRUNK_LABEL_FILL = 'rgba(255, 146, 43, 0.18)';
@@ -425,7 +427,6 @@ const mergeManualAnchors = (
     const saved = savedLayout[n.id];
     if (!saved) return n;
     if (!Number.isFinite(saved.x) || !Number.isFinite(saved.y)) return n;
-    if (isPriorityVendorSwitch(n)) return n;
     if (isLikelyLegacyAutoPosition(n, saved, legacyPositions)) return n;
     return { ...n, x: Number(saved.x), y: Number(saved.y) };
   });
@@ -451,6 +452,7 @@ function topologyScopeQuery(topologyMode: TopologyMode, branch?: string) {
 
 const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH }) => {
   const { t } = useTranslation();
+  const { notifySuccess, notifyError, notifyInfo } = useNotifications();
   const canEditTopology = role === 'admin' || role === 'operator';
   const containerRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<any>(null);
@@ -489,6 +491,8 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   const [linkDraft, setLinkDraft] = useState<LinkDraft>(null);
   const [selectionDraft, setSelectionDraft] = useState<SelectionDraft>(null);
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
+  const [hoveredLinkId, setHoveredLinkId] = useState<string | null>(null);
+  const [isAutoLayoutRunning, setIsAutoLayoutRunning] = useState(false);
   const groupDragRef = useRef<GroupDragState>(null);
   const topologySwitches = React.useMemo(() => {
     const ipAllowed = new Set(['switch', 'router', 'коммутатор', 'маршрутизатор']);
@@ -670,15 +674,78 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     return () => window.clearTimeout(timer);
   }, [zoneSwitches, topologySwitchIds, links, canvasSize.width, canvasSize.height, savedLayout]);
 
+  const fetchWithTimeout = React.useCallback(
+    async (input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = TOPO_AUTO_LAYOUT_TIMEOUT_MS) => {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        return await fetch(input, { ...init, signal: controller.signal });
+      } finally {
+        window.clearTimeout(timeoutId);
+      }
+    },
+    []
+  );
+
+  const applyTopologyPayload = React.useCallback(
+    (
+      payload: {
+        links?: TopoLink[];
+        layout?: Record<string, { x: number; y: number }>;
+        zoneLabelOverrides?: Record<string, string>;
+      },
+      preserveClientManualPositions = false
+    ) => {
+      const nextLinks = payload.links || [];
+      const nextLayout = payload.layout || {};
+      const mergedLayout = preserveClientManualPositions ? { ...nextLayout, ...savedLayout } : nextLayout;
+      setLinks(nextLinks);
+      setSavedLayout(mergedLayout);
+      setZoneLabelOverrides(payload.zoneLabelOverrides || {});
+      const w = containerRef.current?.offsetWidth || canvasSize.width;
+      const h = containerRef.current?.offsetHeight || canvasSize.height;
+      const visible = nextLinks.filter((l) => topologySwitchIds.has(l.source) && topologySwitchIds.has(l.target));
+      const computed = computeLayout(zoneSwitches, visible, w, h);
+      const legacy = computeLegacyFlatLayout(zoneSwitches, visible, w, h);
+      const legacyPositions = new Map(legacy.map((n) => [n.id, { x: n.x, y: n.y }]));
+      setNodes(mergeManualAnchors(computed, mergedLayout, legacyPositions));
+      return {
+        visibleCount: visible.length,
+        trunkCount: visible.filter((l) => isTrunkTopologyLink(l, `${String(l.portA || '')} ${String(l.portB || '')}`)).length,
+      };
+    },
+    [canvasSize.height, canvasSize.width, savedLayout, topologySwitchIds, zoneSwitches]
+  );
+
+  const refreshLinksScoped = React.useCallback(async () => {
+    const response = await fetchWithTimeout(`/api/topology/links${topologyScopeQuery(topologyMode, selectedRegion || undefined)}`, {
+      headers: {
+        'x-user-role': role || 'viewer',
+        'x-user-name': username || 'unknown'
+      }
+    });
+    const data: {
+      links?: TopoLink[];
+      layout?: Record<string, { x: number; y: number }>;
+      zoneLabelOverrides?: Record<string, string>;
+      error?: string;
+    } = await readApiPayload(response, 'Topology load failed');
+    if (!response.ok) throw new Error(operationFailedMessage('Topology load', data, response.status));
+    return data;
+  }, [fetchWithTimeout, role, selectedRegion, topologyMode, username]);
+
   const handleAutoLayout = async () => {
     if (!canEditTopology) return;
     if (!selectedRegion) {
       alert(t('topologySelectTabFirst'));
       return;
     }
+    if (isAutoLayoutRunning) return;
     try {
+      setIsAutoLayoutRunning(true);
+      notifyInfo('topologyLayoutRunStarted', 'topologyLayoutProgressTitle');
       if (topologyMode !== 'fc') {
-        const rebuild = await fetch('/api/topology/links/rebuild', {
+        const rebuild = await fetchWithTimeout('/api/topology/links/rebuild', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -692,22 +759,12 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           console.warn('Topology rebuild failed, using existing links', apiErrorDetailText(err, rebuild.status));
         }
       }
-      const response = await fetch(`/api/topology/links${topologyScopeQuery(topologyMode, selectedRegion || undefined)}`, {
-        headers: {
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
-        }
-      });
-      const data: {
-        links?: TopoLink[];
-        layout?: Record<string, { x: number; y: number }>;
-        zoneLabelOverrides?: Record<string, string>;
-        error?: string;
-      } = await readApiPayload(response, 'Topology load failed');
-      if (!response.ok) throw new Error(operationFailedMessage('Topology load', data, response.status));
-      setLinks(data.links || []);
-      setSavedLayout(data.layout || {});
-      setZoneLabelOverrides(data.zoneLabelOverrides || {});
+      let data = await refreshLinksScoped();
+      if (!Array.isArray(data.links) || data.links.length === 0) {
+        await new Promise((resolve) => window.setTimeout(resolve, 450));
+        data = await refreshLinksScoped();
+      }
+      const applied = applyTopologyPayload(data, true);
       refreshTopologyVersions();
 
       // After rebuilding topology for this tab, classify inventory subcategories by trunk count (SNMP).
@@ -726,19 +783,25 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           // ignore classification errors
         }
       }
-      const w = containerRef.current?.offsetWidth || canvasSize.width;
-      const h = containerRef.current?.offsetHeight || canvasSize.height;
-      const visibleLinks = (data.links || []).filter((l) => topologySwitchIds.has(l.source) && topologySwitchIds.has(l.target));
-      const computed = computeLayout(zoneSwitches, visibleLinks, w, h);
-      const freshLayout = data.layout || {};
-      const legacy = computeLegacyFlatLayout(zoneSwitches, visibleLinks, w, h);
-      const legacyPositions = new Map(legacy.map((n) => [n.id, { x: n.x, y: n.y }]));
-      const merged = mergeManualAnchors(computed, freshLayout, legacyPositions);
-      setNodes(merged);
-      setSavedLayout(freshLayout);
+      notifySuccess(
+        t('topologyLayoutCompletedSummary')
+          .replace('{links}', String(applied.visibleCount))
+          .replace('{trunks}', String(applied.trunkCount)),
+        'topologyLayoutCompletedTitle'
+      );
+      if (applied.trunkCount === 0) {
+        notifyInfo('topologyNoTrunksAfterLayout', 'topologyNoTrunksAfterLayoutTitle', 9000);
+      }
     } catch (error) {
       console.error('Failed to refresh topology:', error);
-      alert(operationFailedMessage('Topology auto-layout', error instanceof Error ? error.message : error));
+      const isTimeout = error instanceof DOMException && error.name === 'AbortError';
+      notifyError(
+        isTimeout ? 'topologyLayoutTimeout' : 'topologyLayoutFailedFriendly',
+        isTimeout ? 'topologyLayoutTimeoutTitle' : 'topologyLayoutFailedTitle',
+        9000
+      );
+    } finally {
+      setIsAutoLayoutRunning(false);
     }
   };
 
@@ -1051,6 +1114,26 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     return `${a} <-> ${b}`;
   }, []);
   const renderedLinks = React.useMemo(() => {
+    const nodeById = new Map(nodes.map((node) => [node.id, node]));
+    const zoneOf = (id: string) => {
+      const node = nodeById.get(id);
+      if (!node) return '__ungrouped__';
+      if (isMikroTikSwitch(node)) return '__vendor_mikrotik__';
+      if (isCiscoSwitch(node)) return '__vendor_cisco__';
+      return deriveZoneKey(node.name) || '__ungrouped__';
+    };
+    const getAnchorPoint = (node: NodeWithPos, peer: NodeWithPos, preferHorizontal: boolean) => {
+      const dx = peer.x - node.x;
+      const dy = peer.y - node.y;
+      if (preferHorizontal || Math.abs(dx) >= Math.abs(dy)) {
+        return dx >= 0
+          ? { x: node.x + TOPO_NODE_WIDTH, y: node.y + TOPO_NODE_HEIGHT / 2 }
+          : { x: node.x, y: node.y + TOPO_NODE_HEIGHT / 2 };
+      }
+      return dy >= 0
+        ? { x: node.x + TOPO_NODE_WIDTH / 2, y: node.y + TOPO_NODE_HEIGHT }
+        : { x: node.x + TOPO_NODE_WIDTH / 2, y: node.y };
+    };
     const grouped = new Map<string, TopoLink[]>();
     visibleLinks.forEach((link) => {
       const a = String(link.source || '');
@@ -1066,8 +1149,29 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
         return ak.localeCompare(bk);
       });
       return orderedGroup.map((link, idx) => {
-        const start = getNodeCenter(link.source);
-        const end = getNodeCenter(link.target);
+        const sourceNode = nodeById.get(link.source);
+        const targetNode = nodeById.get(link.target);
+        const fallbackStart = getNodeCenter(link.source);
+        const fallbackEnd = getNodeCenter(link.target);
+        if (!sourceNode || !targetNode) {
+          return {
+            link,
+            idx,
+            isTrunk: false,
+            linePoints: [fallbackStart.x, fallbackStart.y, fallbackEnd.x, fallbackEnd.y] as number[],
+            labelText: getLinkLabel(link),
+            labelX: (fallbackStart.x + fallbackEnd.x) / 2,
+            labelY: (fallbackStart.y + fallbackEnd.y) / 2,
+            labelWidth: 84,
+            labelHeight: 16,
+            deemphasized: true,
+          };
+        }
+        const sourceZone = zoneOf(sourceNode.id);
+        const targetZone = zoneOf(targetNode.id);
+        const preferHorizontal = sourceZone !== targetZone;
+        const start = getAnchorPoint(sourceNode, targetNode, preferHorizontal);
+        const end = getAnchorPoint(targetNode, sourceNode, preferHorizontal);
         const dx = end.x - start.x;
         const dy = end.y - start.y;
         const len = Math.max(1, Math.hypot(dx, dy));
@@ -1084,22 +1188,33 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
         const isTrunk = isTrunkTopologyLink(link, labelText);
         const displayLabel = isTrunk ? `TRUNK ${labelText}` : labelText;
         const laneDistance = Math.abs(idx - (orderedGroup.length - 1) / 2);
-        const labelLineOffset = 22 + laneDistance * 4;
+        const labelLineOffset = 16 + laneDistance * 3;
         const tangentShift = (idx % 2 === 0 ? 1 : -1) * Math.ceil(idx / 2) * 12;
         const labelX = (x1 + x2) / 2 + nx * labelLineOffset + tx * tangentShift;
         const labelY = (y1 + y2) / 2 + ny * labelLineOffset + ty * tangentShift;
         const labelWidth = Math.max(52, Math.ceil(displayLabel.length * 6.1 + 16));
         const labelHeight = 16;
+        const linePoints: number[] = isTrunk
+          ? (() => {
+              const pairKey = `${sourceZone}|${targetZone}`;
+              let hash = 0;
+              for (let i = 0; i < pairKey.length; i++) hash = (hash * 31 + pairKey.charCodeAt(i)) | 0;
+              const laneBias = ((Math.abs(hash) % 7) - 3) * 34;
+              const corridorX = (x1 + x2) / 2 + laneBias + laneOffset * 1.1;
+              return [x1, y1, corridorX, y1, corridorX, y2, x2, y2];
+            })()
+          : [x1, y1, x2, y2];
         return {
           link,
           idx,
           isTrunk,
-          linePoints: [x1, y1, x2, y2] as [number, number, number, number],
+          linePoints,
           labelText: displayLabel,
           labelX,
           labelY,
           labelWidth,
           labelHeight,
+          deemphasized: !isTrunk && !link.manual,
         };
       });
     }).sort((a, b) => Number(a.isTrunk) - Number(b.isTrunk));
@@ -1186,10 +1301,11 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
               <button
                 type="button"
                 onClick={handleAutoLayout}
-                className="flex items-center gap-2 px-3 py-1.5 bg-[#2c2e33] text-[#c1c2c5] hover:text-white rounded text-[10px] font-bold uppercase transition-all border border-[#373a40]"
+                disabled={isAutoLayoutRunning}
+                className="flex items-center gap-2 px-3 py-1.5 bg-[#2c2e33] text-[#c1c2c5] hover:text-white rounded text-[10px] font-bold uppercase transition-all border border-[#373a40] disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                <Box size={14} />
-                {t('autoLayout')}
+                {isAutoLayoutRunning ? <Loader2 size={14} className="animate-spin" /> : <Box size={14} />}
+                {isAutoLayoutRunning ? t('topologyLayoutRunning') : t('autoLayout')}
               </button>
             )}
             {canEditTopology && (
@@ -1491,13 +1607,15 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
               const lineColor = isTrunk ? TOPO_TRUNK_STROKE : link.manual ? TOPO_MANUAL_LINK_STROKE : TOPO_REGULAR_LINK_STROKE;
               const labelX = rendered.labelX - rendered.labelWidth / 2;
               const labelY = rendered.labelY - rendered.labelHeight / 2;
+              const linkIdentity = link.id || `${link.source}:${link.target}:${rendered.idx}`;
+              const showLabel = isTrunk || isEditing || hoveredLinkId === linkIdentity || !!link.manual;
               return (
                 <React.Fragment key={`link-${linkId}`}>
                   <Line
                     points={rendered.linePoints}
                     stroke={isEditing ? '#ffffff' : lineColor}
                     strokeWidth={isTrunk ? 4.4 : 1.6}
-                    opacity={isTrunk ? 0.96 : 0.46}
+                    opacity={isTrunk ? 0.96 : rendered.deemphasized ? 0.22 : 0.5}
                     dash={isTrunk ? undefined : [8, 6]}
                     lineCap="round"
                     lineJoin="round"
@@ -1507,48 +1625,58 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                     onMouseDown={(e) => {
                       e.cancelBubble = true;
                     }}
+                    onMouseEnter={() => setHoveredLinkId(linkIdentity)}
+                    onMouseLeave={() => setHoveredLinkId((prev) => (prev === linkIdentity ? null : prev))}
                     onDblClick={(e) => {
                       e.cancelBubble = true;
                       openLinkEditor(link);
                     }}
                   />
-                  <Rect
-                    x={labelX}
-                    y={labelY}
-                    width={rendered.labelWidth}
-                    height={rendered.labelHeight}
-                    cornerRadius={6}
-                    fill={isTrunk ? TOPO_TRUNK_LABEL_FILL : TOPO_REGULAR_LABEL_FILL}
-                    stroke={isEditing ? '#ffffff' : isTrunk ? TOPO_TRUNK_LABEL_STROKE : TOPO_REGULAR_LABEL_STROKE}
-                    strokeWidth={isEditing ? 1.2 : isTrunk ? 1.1 : 0.8}
-                    opacity={isTrunk ? 1 : 0.88}
-                    onMouseDown={(e) => {
-                      e.cancelBubble = true;
-                    }}
-                    onDblClick={(e) => {
-                      e.cancelBubble = true;
-                      openLinkEditor(link);
-                    }}
-                  />
-                  <Text
-                    x={labelX}
-                    y={labelY + 1}
-                    width={rendered.labelWidth}
-                    height={rendered.labelHeight}
-                    text={rendered.labelText}
-                    fill={isEditing ? "#ffffff" : isTrunk ? "#fff4e6" : "#ced4da"}
-                    fontSize={10}
-                    fontStyle="bold"
-                    align="center"
-                    verticalAlign="middle"
-                    onMouseDown={(e) => {
-                      e.cancelBubble = true;
-                    }}
-                    onDblClick={(e) => {
-                      e.cancelBubble = true;
-                      openLinkEditor(link);
-                    }}
-                  />
+                  {showLabel && (
+                    <>
+                      <Rect
+                        x={labelX}
+                        y={labelY}
+                        width={rendered.labelWidth}
+                        height={rendered.labelHeight}
+                        cornerRadius={6}
+                        fill={isTrunk ? TOPO_TRUNK_LABEL_FILL : TOPO_REGULAR_LABEL_FILL}
+                        stroke={isEditing ? '#ffffff' : isTrunk ? TOPO_TRUNK_LABEL_STROKE : TOPO_REGULAR_LABEL_STROKE}
+                        strokeWidth={isEditing ? 1.2 : isTrunk ? 1.1 : 0.8}
+                        opacity={isTrunk ? 1 : 0.72}
+                        onMouseDown={(e) => {
+                          e.cancelBubble = true;
+                        }}
+                        onMouseEnter={() => setHoveredLinkId(linkIdentity)}
+                        onMouseLeave={() => setHoveredLinkId((prev) => (prev === linkIdentity ? null : prev))}
+                        onDblClick={(e) => {
+                          e.cancelBubble = true;
+                          openLinkEditor(link);
+                        }}
+                      />
+                      <Text
+                        x={labelX}
+                        y={labelY + 1}
+                        width={rendered.labelWidth}
+                        height={rendered.labelHeight}
+                        text={rendered.labelText}
+                        fill={isEditing ? "#ffffff" : isTrunk ? "#fff4e6" : "#ced4da"}
+                        fontSize={10}
+                        fontStyle="bold"
+                        align="center"
+                        verticalAlign="middle"
+                        onMouseDown={(e) => {
+                          e.cancelBubble = true;
+                        }}
+                        onMouseEnter={() => setHoveredLinkId(linkIdentity)}
+                        onMouseLeave={() => setHoveredLinkId((prev) => (prev === linkIdentity ? null : prev))}
+                        onDblClick={(e) => {
+                          e.cancelBubble = true;
+                          openLinkEditor(link);
+                        }}
+                      />
+                    </>
+                  )}
                 </React.Fragment>
               );
             })}
