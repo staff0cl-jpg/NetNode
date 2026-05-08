@@ -745,6 +745,69 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
 
   globalRelaxCollisions();
 
+  type ZonePackItem = {
+    zoneKey: string;
+    nodes: { id: string; x: number; y: number; lane: Lane }[];
+    minX: number;
+    minY: number;
+    boxWidth: number;
+    boxHeight: number;
+  };
+  const zonePadX = 32;
+  const zonePadTop = 28;
+  const zonePadBottom = 24;
+  const zoneGapX = 34;
+  const zoneGapY = 30;
+  const zonePackMargin = 44;
+  const zoneMinWidth = TOPO_NODE_WIDTH + zonePadX * 2 + 28;
+  const zoneMinHeight = TOPO_NODE_HEIGHT + zonePadTop + zonePadBottom + 20;
+  const zonePackMaxWidth = Math.max(720, width - zonePackMargin * 2);
+  const zoneGroups = new Map<string, { id: string; x: number; y: number; lane: Lane }[]>();
+  points.forEach((point) => {
+    const sw = byId.get(point.id);
+    if (!sw) return;
+    const zoneKey = deriveZoneKey(sw.name);
+    if (!zoneKey) return;
+    if (!zoneGroups.has(zoneKey)) zoneGroups.set(zoneKey, []);
+    zoneGroups.get(zoneKey)!.push(point);
+  });
+  const zoneItems: ZonePackItem[] = Array.from(zoneGroups.entries())
+    .map(([zoneKey, zoneNodes]) => {
+      const minX = Math.min(...zoneNodes.map((n) => n.x));
+      const maxX = Math.max(...zoneNodes.map((n) => n.x + TOPO_NODE_WIDTH));
+      const minY = Math.min(...zoneNodes.map((n) => n.y));
+      const maxY = Math.max(...zoneNodes.map((n) => n.y + TOPO_NODE_HEIGHT));
+      return {
+        zoneKey,
+        nodes: [...zoneNodes].sort((a, b) => a.id.localeCompare(b.id)),
+        minX,
+        minY,
+        boxWidth: Math.max(zoneMinWidth, maxX - minX + zonePadX * 2),
+        boxHeight: Math.max(zoneMinHeight, maxY - minY + zonePadTop + zonePadBottom),
+      };
+    })
+    .sort((a, b) => a.zoneKey.localeCompare(b.zoneKey));
+  let packCursorX = zonePackMargin;
+  let packCursorY = zonePackMargin;
+  let packRowHeight = 0;
+  zoneItems.forEach((item) => {
+    if (packCursorX > zonePackMargin && packCursorX + item.boxWidth > zonePackMargin + zonePackMaxWidth) {
+      packCursorX = zonePackMargin;
+      packCursorY += packRowHeight + zoneGapY;
+      packRowHeight = 0;
+    }
+    const zoneX = packCursorX;
+    const zoneY = packCursorY;
+    item.nodes.forEach((nodePoint) => {
+      const localX = nodePoint.x - item.minX;
+      const localY = nodePoint.y - item.minY;
+      nodePoint.x = zoneX + zonePadX + localX;
+      nodePoint.y = zoneY + zonePadTop + localY;
+    });
+    packCursorX += item.boxWidth + zoneGapX;
+    packRowHeight = Math.max(packRowHeight, item.boxHeight);
+  });
+
   return switches.map((s) => {
     const p = idToPoint.get(s.id) || { x: width / 2, y: height / 2, lane: 'unknown' as Lane };
     return {

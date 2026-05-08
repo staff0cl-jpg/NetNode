@@ -234,9 +234,8 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
   const [macEvents, setMacEvents] = React.useState<MacSearchEvent[]>([]);
   const [macMode, setMacMode] = React.useState<'trace' | 'single'>('trace');
   const [macMaxHops, setMacMaxHops] = React.useState<number>(10);
-  const [macScope, setMacScope] = React.useState<'all' | 'branch' | 'region' | 'selected'>('all');
+  const [macScope, setMacScope] = React.useState<'all' | 'branch' | 'selected'>('all');
   const [macBranchFilter, setMacBranchFilter] = React.useState('');
-  const [macRegionPrefix, setMacRegionPrefix] = React.useState('');
   const [macSelectedDeviceIds, setMacSelectedDeviceIds] = React.useState<string[]>([]);
   const [snmpConfig, setSnmpConfig] = React.useState({
     macSearch: {
@@ -570,12 +569,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
         body: JSON.stringify({
           mac: macInput.trim(),
           deviceIds,
-          branch:
-            macScope === 'branch'
-              ? macBranchFilter.trim() || undefined
-              : macScope === 'region'
-                ? macRegionPrefix.trim() || undefined
-                : undefined,
+          branch: macScope === 'branch' ? macBranchFilter.trim() || undefined : undefined,
           mode: macMode,
           maxHops: Math.max(1, Math.min(50, Number(macMaxHops) || 10)),
         }),
@@ -833,8 +827,6 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
       ? 'automationScopeHintAll'
       : macScope === 'branch'
         ? 'automationScopeHintBranch'
-        : macScope === 'region'
-          ? 'automationScopeHintRegion'
         : 'automationScopeHintSelected';
   const actionButtonBase =
     'px-4 py-2 rounded text-[10px] font-bold uppercase tracking-widest transition-colors disabled:opacity-50';
@@ -925,8 +917,8 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
               )}
               <div className="space-y-2">
                 <p className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('automationTargetScope')}</p>
-                <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
-                  {(['all', 'branch', 'region', 'selected'] as const).map((value) => (
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  {(['all', 'branch', 'selected'] as const).map((value) => (
                     <button
                       key={value}
                       type="button"
@@ -941,10 +933,8 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
                       {value === 'all'
                         ? t('automationScopeAll')
                         : value === 'branch'
-                          ? t('automationBranchFilter')
-                          : value === 'region'
-                            ? t('automationRegionPrefixLabel')
-                            : t('automationSelectDevices')}
+                          ? t('automationRegionPrefixLabel')
+                          : t('automationSelectDevices')}
                     </button>
                   ))}
                 </div>
@@ -971,20 +961,6 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
               )}
               {macScope === 'branch' && macBranchOptions.length === 0 && (
                 <p className="text-[11px] text-[#909296]">{t('automationMacBranchOptionsEmpty')}</p>
-              )}
-              {macScope === 'region' && (
-                <select
-                  value={macRegionPrefix}
-                  onChange={(e) => setMacRegionPrefix(e.target.value)}
-                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                >
-                  <option value="">{t('automationRegionPrefixPlaceholder')}</option>
-                  {availableBranches.map((branch) => (
-                    <option key={branch} value={branch}>
-                      {branch}
-                    </option>
-                  ))}
-                </select>
               )}
               {macScope === 'selected' && (
                 <select
