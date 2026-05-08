@@ -5,9 +5,11 @@ import { cn } from '../lib/utils';
 
 interface LoginProps {
   onLogin: (user: { id: string, username: string, role: string }) => void;
+  productName?: string;
+  logoDataUrl?: string;
 }
 
-const Login: React.FC<LoginProps> = ({ onLogin }) => {
+const Login: React.FC<LoginProps> = ({ onLogin, productName = 'NETNODE', logoDataUrl = '' }) => {
   const { t, language, setLanguage } = useTranslation();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -50,10 +52,14 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
 
       <div className="w-full max-w-md animate-in fade-in zoom-in duration-500">
         <div className="text-center mb-10">
-          <div className="inline-flex items-center justify-center w-16 h-16 bg-[#228be6]/10 rounded-2xl mb-4 border border-[#228be6]/20">
-            <Lock className="text-[#228be6]" size={32} />
+          <div className="inline-flex items-center justify-center w-16 h-16 bg-[#228be6]/10 rounded-2xl mb-4 border border-[#228be6]/20 overflow-hidden">
+            {logoDataUrl ? (
+              <img src={logoDataUrl} alt={productName} className="w-full h-full object-contain p-2" />
+            ) : (
+              <Lock className="text-[#228be6]" size={32} />
+            )}
           </div>
-          <h1 className="text-4xl font-black text-white tracking-tighter uppercase italic">NetNode</h1>
+          <h1 className="text-4xl font-black text-white tracking-tighter uppercase italic">{productName}</h1>
           <p className="text-[#909296] text-sm font-mono mt-2">{t('authGateway')}</p>
         </div>
 

@@ -28,25 +28,35 @@ body {
 }
 
 [data-theme="light"] {
-  --bg-main: #f3f4f6;
-  --bg-sidebar: #ffffff;
-  --bg-card: #ffffff;
-  --bg-hover: #eef2f7;
+  --bg-main: #edf1f5;
+  --bg-sidebar: #f7f9fc;
+  --bg-card: #f9fbfd;
+  --bg-hover: #e9eef5;
   --text-main: #1f2937;
-  --text-dim: #4b5563;
-  --border: #d1d5db;
+  --text-dim: #566172;
+  --border: #d7dee8;
 }
 
-[data-theme="light"] .bg-\[\#1a1b1e\] { background-color: #f3f4f6 !important; }
-[data-theme="light"] .bg-\[\#141517\] { background-color: #ffffff !important; }
-[data-theme="light"] .bg-\[\#25262b\] { background-color: #ffffff !important; }
-[data-theme="light"] .bg-\[\#1c1d21\] { background-color: #f9fafb !important; }
-[data-theme="light"] .bg-\[\#2c2e33\] { background-color: #eef2f7 !important; }
-[data-theme="light"] .border-\[\#373a40\] { border-color: #d1d5db !important; }
+[data-theme="light"] .bg-\[\#1a1b1e\] { background-color: #edf1f5 !important; }
+[data-theme="light"] .bg-\[\#141517\] { background-color: #f7f9fc !important; }
+[data-theme="light"] .bg-\[\#25262b\] { background-color: #f9fbfd !important; }
+[data-theme="light"] .bg-\[\#1c1d21\] { background-color: #f3f6fa !important; }
+[data-theme="light"] .bg-\[\#2c2e33\] { background-color: #e9eef5 !important; }
+[data-theme="light"] .border-\[\#373a40\] { border-color: #d7dee8 !important; }
 [data-theme="light"] .text-white { color: #111827 !important; }
 [data-theme="light"] .text-\[\#c1c2c5\] { color: #1f2937 !important; }
 [data-theme="light"] .text-\[\#909296\] { color: #4b5563 !important; }
 [data-theme="light"] .text-\[\#5c5f66\] { color: #6b7280 !important; }
+[data-theme="light"] .hover\:bg-\[\#1c7ed6\]:hover { background-color: #1f87e0 !important; }
+[data-theme="light"] .hover\:bg-\[\#37b24d\]:hover { background-color: #3ab854 !important; }
+[data-theme="light"] .hover\:bg-\[\#f08c00\]:hover { background-color: #f3a41a !important; }
+[data-theme="light"] .hover\:bg-\[\#141517\]:hover { background-color: #edf2f8 !important; }
+[data-theme="light"] .hover\:bg-\[\#25262b\]:hover { background-color: #edf2f8 !important; }
+[data-theme="light"] .hover\:bg-\[\#2c2e33\]:hover { background-color: #e3eaf3 !important; }
+[data-theme="light"] .hover\:bg-\[\#373a40\]:hover { background-color: #dce4ee !important; }
+[data-theme="light"] .active\:bg-\[\#1c7ed6\]:active { background-color: #1d82d9 !important; }
+[data-theme="light"] .active\:bg-\[\#37b24d\]:active { background-color: #38b14f !important; }
+[data-theme="light"] .focus\:ring-\[\#228be6\]:focus { --tw-ring-color: rgba(34, 139, 230, 0.3) !important; }
 
 ::-webkit-scrollbar {
   width: 8px;

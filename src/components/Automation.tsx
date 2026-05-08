@@ -3,6 +3,7 @@ import { Bot, PlayCircle, CheckCircle2, ListChecks, RefreshCw, Square, Shield, H
 import { useTranslation } from '../lib/i18n';
 import { useNotifications } from '../lib/notifications';
 import { cn } from '../lib/utils';
+import { friendlyErrorMessage, logTechnicalError, readApiPayload as readFriendlyApiPayload } from '../lib/friendlyErrors';
 
 const safeErrorText = (value: unknown, fallback = 'Unknown error') =>
   String(value || fallback)
@@ -757,9 +758,10 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
         method: 'POST',
         headers,
       });
-      const data = await readApiPayload(response, 'Backup run now failed');
+      const data = await readFriendlyApiPayload(response, 'Backup run now failed');
       if (!response.ok || data?.success === false) {
-        notifyError(operationFailedMessage('Backup run now', data, response.status));
+        logTechnicalError('Backup run now failed', data, response.status);
+        notifyError(friendlyErrorMessage({ t, httpStatus: response.status, detail: data }));
         return;
       }
       notifyInfo('Backup job started');
@@ -770,7 +772,8 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
       }
       notifySuccess('Backup run completed');
     } catch (e) {
-      notifyError(operationFailedMessage('Backup run now request', e instanceof Error ? e.message : e));
+      logTechnicalError('Backup run request failed', e);
+      notifyError(friendlyErrorMessage({ t, detail: e }));
     }
   };
 

@@ -32,6 +32,18 @@ export const translations: Translations = {
   notifyErrorTitle: { ru: 'Ошибка', en: 'Error' },
   notifyInfoTitle: { ru: 'Информация', en: 'Info' },
   notifyClose: { ru: 'Закрыть уведомление', en: 'Close notification' },
+  friendlyErrorGeneric: { ru: 'Не удалось выполнить действие. Попробуйте еще раз.', en: 'Could not complete the action. Please try again.' },
+  friendlyErrorAuthSignin: { ru: 'Сессия истекла. Войдите снова.', en: 'Your session expired. Please sign in again.' },
+  friendlyErrorAuthForbidden: { ru: 'Недостаточно прав для этого действия.', en: 'You do not have permission for this action.' },
+  friendlyErrorNetworkTimeout: { ru: 'Сеть отвечает слишком долго. Повторите попытку.', en: 'The network is taking too long to respond. Please retry.' },
+  friendlyErrorDiscoveryAlreadyRunning: {
+    ru: 'Сканирование уже выполняется. Дождитесь завершения текущего запуска.',
+    en: 'A discovery run is already in progress. Wait for it to finish.',
+  },
+  friendlyErrorJobStartNoId: {
+    ru: 'Запуск принят, но идентификатор задачи не получен. Обновите статус позже.',
+    en: 'Start was accepted, but no job ID was returned. Check status again later.',
+  },
 
   // Dashboard
   infraOverview: { ru: 'Обзор инфраструктуры', en: 'Infrastructure Overview' },
@@ -574,12 +586,11 @@ export const translations: Translations = {
   },
   russianLanguage: { ru: 'Русский', en: 'Russian' },
   englishLanguage: { ru: 'Английский', en: 'English' },
-  dcLabel: { ru: 'DC Label (верхняя панель)', en: 'DC label (top bar)' },
-  dcLabelPlaceholder: { ru: 'DC-EAST :: MOSCOW', en: 'DC-EAST :: MOSCOW' },
   settingsProductNameLabel: { ru: 'Название продукта', en: 'Product label' },
   settingsThemeLabel: { ru: 'Тема интерфейса', en: 'Application theme' },
   settingsThemeDark: { ru: 'Темная', en: 'Dark' },
   settingsThemeLight: { ru: 'Светлая', en: 'Light' },
+  settingsThemeSaveFailed: { ru: 'Не удалось сохранить тему', en: 'Failed to save theme' },
   settingsLogoLabel: { ru: 'Логотип приложения (PNG)', en: 'Application logo (PNG)' },
   settingsLogoHelp: {
     ru: 'Только PNG. При загрузке светлый/белый фон можно сделать прозрачным.',
@@ -587,6 +598,10 @@ export const translations: Translations = {
   },
   settingsLogoThreshold: { ru: 'Порог белого фона', en: 'White-background threshold' },
   settingsLogoApplyThreshold: { ru: 'Применить порог', en: 'Apply threshold' },
+  settingsLogoApply: { ru: 'Применить логотип', en: 'Apply logo' },
+  settingsLogoPendingApply: { ru: 'Есть изменения, нажмите «Применить логотип»', en: 'Changes pending, click "Apply logo"' },
+  settingsLogoReadyToApply: { ru: 'Логотип подготовлен, нажмите «Применить логотип»', en: 'Logo is ready, click "Apply logo"' },
+  settingsLogoThresholdApplied: { ru: 'Порог применен к предпросмотру', en: 'Threshold applied to preview' },
   settingsLogoSaved: { ru: 'Логотип сохранен', en: 'Logo saved' },
   settingsLogoUploadFailed: { ru: 'Ошибка загрузки логотипа', en: 'Logo upload failed' },
   settingsLogoProcessFailed: { ru: 'Не удалось обработать изображение', en: 'Failed to process image' },

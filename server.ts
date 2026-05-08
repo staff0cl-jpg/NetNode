@@ -781,7 +781,12 @@ function clientErrorPayload(source: string, error: unknown, extra: Record<string
 }
 
 function isPlaceholderTrunkName(value: string): boolean {
-  return /^\s*trk(?:[\s_-]*\d+)?\s*$/i.test(String(value || ""));
+  const raw = String(value || "").trim();
+  if (!raw) return false;
+  if (/^\s*trk(?:[\s_-]*\d+)?\s*$/i.test(raw)) return true;
+  // Ignore auto-generated LAG labels like Bridge-Aggregation4 / Bridge-Aggregation4 Interface.
+  const normalized = raw.toLowerCase().replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim();
+  return /^bridge aggregation\s*\d+$/.test(normalized) || /^bridge aggregation\s*\d+\s+interface$/.test(normalized);
 }
 
 function hasDescriptiveTrunkLabel(...values: string[]): boolean {

@@ -4,6 +4,7 @@ import { useTranslation } from '../lib/i18n';
 import { useNotifications } from '../lib/notifications';
 import { cn } from '../lib/utils';
 import { MAX_LOGO_SIZE_BYTES, processLogoWhiteToTransparent, validatePngFile } from '../lib/logo';
+import { friendlyErrorMessage, logTechnicalError, readApiPayload } from '../lib/friendlyErrors';
 
 type LdapProfileForm = {
   enabled: boolean;
@@ -52,68 +53,15 @@ const emptyLdapProfile = (): LdapProfileForm => ({
   tlsRejectUnauthorized: true,
 });
 
-const safeErrorText = (value: unknown, fallback = 'Unknown error') =>
-  String(value || fallback)
-    .replace(/(password|community|secret|token|passphrase)\s*[:=]\s*[^,\s;]+/gi, '$1=<redacted>')
-    .replace(/(ssh:\/\/[^:\s]+:)[^@\s]+@/gi, '$1<redacted>@')
-    .slice(0, 500);
-
-const apiErrorDetailText = (value: unknown, httpStatus?: number) => {
-  if (value && typeof value === 'object') {
-    const payload = value as Record<string, unknown>;
-    const parts = [
-      payload.error || payload.message,
-      payload.detail ? `Detail: ${payload.detail}` : '',
-      payload.remediation ? `Next step: ${payload.remediation}` : '',
-    ]
-      .filter(Boolean)
-      .map((part) => safeErrorText(part));
-    const meta = [
-      payload.source ? `server: ${safeErrorText(payload.source)}` : '',
-      payload.code ? `code: ${safeErrorText(payload.code)}` : '',
-      httpStatus ? `http ${httpStatus}` : '',
-    ].filter(Boolean);
-    if (meta.length) parts.push(`(${meta.join(', ')})`);
-    return parts.join(' ') || safeErrorText(undefined);
-  }
-  return safeErrorText(value);
-};
-
-const readApiPayload = async (response: Response, fallback: string) => {
-  const raw = await response.text();
-  const contentType = response.headers.get('content-type') || '';
-  try {
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    const looksLikeHtml = /text\/html/i.test(contentType) || /^\s*<!doctype html/i.test(raw) || /^\s*<html/i.test(raw);
-    if (looksLikeHtml) {
-      if (response.status === 504) {
-        return {
-          error: 'Gateway timeout from proxy',
-          detail: 'The backend task took too long for the reverse proxy timeout.',
-          source: 'proxy',
-          code: 'gateway_timeout',
-        };
-      }
-      return {
-        error: 'Unexpected HTML error response from proxy',
-        source: 'proxy',
-        code: 'proxy_html_error',
-      };
-    }
-    return { error: safeErrorText(raw, fallback) };
-  }
-};
-
-const operationFailedMessage = (operation: string, detail?: unknown, httpStatus?: number) =>
-  `${operation} failed${detail ? `: ${apiErrorDetailText(detail, httpStatus)}` : ''}`;
-
 interface SettingsProps {
   role?: string;
   username?: string;
 }
 
 type SettingsTabKey = 'general' | 'discovery' | 'ssh' | 'ldap' | 'automation' | 'adminMeta';
+type ThemeMode = 'dark' | 'light';
+
+const APP_CONFIG_UPDATED_EVENT = 'netnode:config-updated';
 
 const Settings: React.FC<SettingsProps> = ({ role, username }) => {
   const { t } = useTranslation();
@@ -140,10 +88,10 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
     serverNow: string;
   } | null>(null);
   const [defaultLanguage, setDefaultLanguage] = React.useState('ru');
-  const [siteLabel, setSiteLabel] = React.useState('UNSET');
   const [productName, setProductName] = React.useState('NETNODE');
-  const [theme, setTheme] = React.useState<'dark' | 'light'>('dark');
-  const [logoDataUrl, setLogoDataUrl] = React.useState('');
+  const [theme, setTheme] = React.useState<ThemeMode>('dark');
+  const [appliedLogoDataUrl, setAppliedLogoDataUrl] = React.useState('');
+  const [logoDraftDataUrl, setLogoDraftDataUrl] = React.useState('');
   const [logoThreshold, setLogoThreshold] = React.useState(245);
   const [logoProcessing, setLogoProcessing] = React.useState(false);
   const [automationDefaults, setAutomationDefaults] = React.useState({
@@ -214,9 +162,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         if (data.config && data.config.defaultLanguage) {
           setDefaultLanguage(data.config.defaultLanguage);
         }
-        if (data.config && data.config.siteLabel) {
-          setSiteLabel(data.config.siteLabel);
-        }
         if (data.config && typeof data.config.productName === 'string') {
           setProductName(data.config.productName || 'NETNODE');
         }
@@ -224,7 +169,9 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
           setTheme(data.config.theme === 'light' ? 'light' : 'dark');
         }
         if (data.config && typeof data.config.logoDataUrl === 'string') {
-          setLogoDataUrl(data.config.logoDataUrl);
+          const nextLogo = data.config.logoDataUrl;
+          setAppliedLogoDataUrl(nextLogo);
+          setLogoDraftDataUrl(nextLogo);
         }
         if (data.config && data.config.automationDefaults) {
           setAutomationDefaults({
@@ -416,9 +363,8 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
 
   const saveSystemConfig = async (payload: {
     defaultLanguage?: string;
-    siteLabel?: string;
     productName?: string;
-    theme?: 'dark' | 'light';
+    theme?: ThemeMode;
     logoDataUrl?: string;
     automationDefaults?: any;
   }) => {
@@ -432,10 +378,25 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         },
         body: JSON.stringify(payload),
       });
+      return true;
     } catch (err) {
       notifyError('Failed to save config');
+      return false;
     }
   };
+
+  const emitConfigUpdate = React.useCallback((payload: { theme?: ThemeMode; logoDataUrl?: string }) => {
+    window.dispatchEvent(new CustomEvent(APP_CONFIG_UPDATED_EVENT, { detail: payload }));
+  }, []);
+
+  const saveThemeImmediately = React.useCallback(async (nextTheme: ThemeMode) => {
+    setTheme(nextTheme);
+    emitConfigUpdate({ theme: nextTheme });
+    const ok = await saveSystemConfig({ theme: nextTheme });
+    if (!ok) {
+      notifyError(t('settingsThemeSaveFailed'));
+    }
+  }, [emitConfigUpdate, notifyError, t]);
 
   const handleLogoUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -446,9 +407,8 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       await validatePngFile(file);
       const { originalDataUrl, processedDataUrl } = await processLogoWhiteToTransparent(file, logoThreshold);
       const safeLogo = processedDataUrl || originalDataUrl;
-      setLogoDataUrl(safeLogo);
-      await saveSystemConfig({ logoDataUrl: safeLogo });
-      notifySuccess(t('settingsLogoSaved'));
+      setLogoDraftDataUrl(safeLogo);
+      notifySuccess(t('settingsLogoReadyToApply'));
     } catch (error) {
       const message = error instanceof Error ? error.message : t('settingsLogoUploadFailed');
       notifyError(message);
@@ -458,18 +418,31 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
   };
 
   const applyLogoThreshold = async () => {
-    if (!logoDataUrl) return;
+    if (!logoDraftDataUrl) return;
     try {
-      const response = await fetch(logoDataUrl);
+      const response = await fetch(logoDraftDataUrl);
       const blob = await response.blob();
       const logoFile = new File([blob], 'logo.png', { type: 'image/png' });
       const { originalDataUrl, processedDataUrl } = await processLogoWhiteToTransparent(logoFile, logoThreshold);
       const safeLogo = processedDataUrl || originalDataUrl;
-      setLogoDataUrl(safeLogo);
-      await saveSystemConfig({ logoDataUrl: safeLogo });
-      notifySuccess(t('settingsLogoSaved'));
+      setLogoDraftDataUrl(safeLogo);
+      notifySuccess(t('settingsLogoThresholdApplied'));
     } catch {
       notifyError(t('settingsLogoProcessFailed'));
+    }
+  };
+
+  const applyLogoDraft = async () => {
+    if (!logoDraftDataUrl || logoDraftDataUrl === appliedLogoDataUrl) return;
+    setLogoProcessing(true);
+    try {
+      const ok = await saveSystemConfig({ logoDataUrl: logoDraftDataUrl });
+      if (!ok) return;
+      setAppliedLogoDataUrl(logoDraftDataUrl);
+      emitConfigUpdate({ logoDataUrl: logoDraftDataUrl });
+      notifySuccess(t('settingsLogoSaved'));
+    } finally {
+      setLogoProcessing(false);
     }
   };
 
@@ -522,12 +495,14 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       });
       const data = await readApiPayload(response, 'Discovery scan failed');
       if (!response.ok) {
-        notifyError(operationFailedMessage('Discovery scan', data, response.status));
+        logTechnicalError('Discovery scan failed', data, response.status);
+        notifyError(friendlyErrorMessage({ t, httpStatus: response.status, detail: data }));
         return;
       }
       const jobId = String(data.jobId || '').trim();
       if (!jobId) {
-        notifyError('Discovery started, but no job id was returned.');
+        logTechnicalError('Discovery scan missing job ID', data);
+        notifyError(t('friendlyErrorJobStartNoId'));
         return;
       }
       notifyInfo('Discovery started');
@@ -543,7 +518,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         });
         const statusData = await readApiPayload(statusResp, 'Discovery status check failed');
         if (!statusResp.ok) {
-          throw new Error(operationFailedMessage('Discovery status check', statusData, statusResp.status));
+          throw { status: statusResp.status, detail: statusData };
         }
         if (statusData.status === 'running') {
           if (attempts >= maxAttempts) {
@@ -551,12 +526,18 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             return;
           }
           window.setTimeout(() => {
-            poll().catch((e) => notifyError(operationFailedMessage('Discovery status check', e instanceof Error ? e.message : e)));
+            poll().catch((e) => {
+              const status = (e as { status?: number })?.status;
+              const detail = (e as { detail?: unknown })?.detail ?? e;
+              logTechnicalError('Discovery status check failed', detail, status);
+              notifyError(friendlyErrorMessage({ t, httpStatus: status, detail }));
+            });
           }, 2000);
           return;
         }
         if (statusData.status === 'error') {
-          notifyError(operationFailedMessage('Discovery scan', statusData));
+          logTechnicalError('Discovery scan completed with error', statusData);
+          notifyError(friendlyErrorMessage({ t, detail: statusData }));
           return;
         }
         const summary = statusData.summary || {};
@@ -564,9 +545,15 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
           `${t('discoveryScanned')}: ${summary.scanned ?? 0}\nSkipped existing: ${summary.skippedExisting ?? 0}\nSNMP found: ${summary.snmpFound ?? 0}\n${t('discoveryAdded')}: ${summary.added ?? 0}`
         );
       };
-      poll().catch((e) => notifyError(operationFailedMessage('Discovery scan', e instanceof Error ? e.message : e)));
+      poll().catch((e) => {
+        const status = (e as { status?: number })?.status;
+        const detail = (e as { detail?: unknown })?.detail ?? e;
+        logTechnicalError('Discovery scan polling failed', detail, status);
+        notifyError(friendlyErrorMessage({ t, httpStatus: status, detail }));
+      });
     } catch (e) {
-      notifyError(operationFailedMessage('Discovery scan request', e instanceof Error ? e.message : e));
+      logTechnicalError('Discovery scan request failed', e);
+      notifyError(friendlyErrorMessage({ t, detail: e }));
     }
   };
 
@@ -606,12 +593,14 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       });
       const data = await readApiPayload(response, 'Discovery watch run start failed');
       if (!response.ok) {
-        notifyError(operationFailedMessage('Discovery watch run start', data, response.status));
+        logTechnicalError('Discovery watch run start failed', data, response.status);
+        notifyError(friendlyErrorMessage({ t, httpStatus: response.status, detail: data }));
         return;
       }
       const jobId = String(data.jobId || '').trim();
       if (!jobId) {
-        notifyError('Discovery watch run was accepted but no job id was returned');
+        logTechnicalError('Discovery watch run missing job ID', data);
+        notifyError(t('friendlyErrorJobStartNoId'));
         return;
       }
       notifyInfo('Discovery watch run started');
@@ -628,7 +617,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         });
         const statusData = await readApiPayload(statusResp, 'Discovery watch status check failed');
         if (!statusResp.ok) {
-          throw new Error(operationFailedMessage('Discovery watch status check', statusData, statusResp.status));
+          throw { status: statusResp.status, detail: statusData };
         }
 
         if (Array.isArray(statusData.profiles)) setWatchProfiles(statusData.profiles);
@@ -650,22 +639,34 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             return;
           }
           window.setTimeout(() => {
-            poll().catch((e) => notifyError(operationFailedMessage('Discovery watch status check', e instanceof Error ? e.message : e)));
+            poll().catch((e) => {
+              const status = (e as { status?: number })?.status;
+              const detail = (e as { detail?: unknown })?.detail ?? e;
+              logTechnicalError('Discovery watch status check failed', detail, status);
+              notifyError(friendlyErrorMessage({ t, httpStatus: status, detail }));
+            });
           }, 2000);
           return;
         }
 
         if (statusData.status === 'error') {
-          notifyError(operationFailedMessage('Discovery watch run', statusData, 500));
+          logTechnicalError('Discovery watch run completed with error', statusData, 500);
+          notifyError(friendlyErrorMessage({ t, httpStatus: 500, detail: statusData }));
           return;
         }
 
         notifySuccess(`Profiles run: ${(statusData.runs || []).length}`);
       };
 
-      poll().catch((e) => notifyError(operationFailedMessage('Discovery watch run', e instanceof Error ? e.message : e)));
+      poll().catch((e) => {
+        const status = (e as { status?: number })?.status;
+        const detail = (e as { detail?: unknown })?.detail ?? e;
+        logTechnicalError('Discovery watch run polling failed', detail, status);
+        notifyError(friendlyErrorMessage({ t, httpStatus: status, detail }));
+      });
     } catch (e) {
-      notifyError(operationFailedMessage('Discovery watch run start request', e instanceof Error ? e.message : e));
+      logTechnicalError('Discovery watch run request failed', e);
+      notifyError(friendlyErrorMessage({ t, detail: e }));
     }
   };
 
@@ -937,8 +938,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                 <button
                   type="button"
                   onClick={() => {
-                    setTheme('dark');
-                    saveSystemConfig({ theme: 'dark' });
+                    saveThemeImmediately('dark');
                   }}
                   className={cn(
                     'px-4 py-2 rounded text-[10px] font-bold uppercase tracking-widest border transition-all',
@@ -952,8 +952,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                 <button
                   type="button"
                   onClick={() => {
-                    setTheme('light');
-                    saveSystemConfig({ theme: 'light' });
+                    saveThemeImmediately('light');
                   }}
                   className={cn(
                     'px-4 py-2 rounded text-[10px] font-bold uppercase tracking-widest border transition-all',
@@ -968,9 +967,9 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             </div>
             <div className="max-w-xl space-y-3 mt-6 min-w-0">
               <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('settingsLogoLabel')}</label>
-              {logoDataUrl ? (
+              {logoDraftDataUrl ? (
                 <div className="w-16 h-16 rounded border border-[#373a40] bg-[#141517] p-1">
-                  <img src={logoDataUrl} alt="App logo" className="w-full h-full object-contain" />
+                  <img src={logoDraftDataUrl} alt="App logo" className="w-full h-full object-contain" />
                 </div>
               ) : null}
               <input
@@ -983,6 +982,19 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
               <p className="text-[9px] text-[#5c5f66]">
                 {t('settingsLogoHelp')} ({Math.floor(MAX_LOGO_SIZE_BYTES / 1024 / 1024)}MB max)
               </p>
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={applyLogoDraft}
+                  disabled={!logoDraftDataUrl || logoDraftDataUrl === appliedLogoDataUrl || logoProcessing}
+                  className="px-3 py-1.5 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-[10px] font-bold uppercase tracking-widest transition-all disabled:opacity-40 disabled:pointer-events-none"
+                >
+                  {t('settingsLogoApply')}
+                </button>
+                {logoDraftDataUrl !== appliedLogoDataUrl ? (
+                  <span className="text-[10px] text-[#fab005]">{t('settingsLogoPendingApply')}</span>
+                ) : null}
+              </div>
               <div className="space-y-1">
                 <label className="text-[10px] text-[#909296]">{t('settingsLogoThreshold')}</label>
                 <div className="flex items-center gap-3">
@@ -999,28 +1011,10 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                 <button
                   type="button"
                   onClick={applyLogoThreshold}
-                  disabled={!logoDataUrl}
+                  disabled={!logoDraftDataUrl || logoProcessing}
                   className="px-3 py-1.5 bg-[#25262b] border border-[#373a40] text-[#c1c2c5] hover:text-white rounded text-[10px] font-bold uppercase tracking-widest transition-all disabled:opacity-40 disabled:pointer-events-none"
                 >
                   {t('settingsLogoApplyThreshold')}
-                </button>
-              </div>
-            </div>
-            <div className="max-w-xl space-y-2 mt-6 min-w-0">
-              <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('dcLabel')}</label>
-              <div className="flex flex-col sm:flex-row gap-3">
-                <input
-                  value={siteLabel}
-                  onChange={(e) => setSiteLabel(e.target.value)}
-                  className="flex-1 min-w-0 bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white focus:border-[#228be6] outline-none"
-                  placeholder={t('dcLabelPlaceholder')}
-                />
-                <button
-                  type="button"
-                  onClick={() => saveSystemConfig({ siteLabel })}
-                  className="px-4 py-2 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-[10px] font-bold uppercase tracking-widest transition-all"
-                >
-                  {t('save')}
                 </button>
               </div>
             </div>

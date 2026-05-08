@@ -17,6 +17,22 @@ import { APP_VERSION } from './lib/version';
 import { Menu } from 'lucide-react';
 
 type ThemeMode = 'dark' | 'light';
+const APP_CONFIG_UPDATED_EVENT = 'netnode:config-updated';
+type PublicBanner = {
+  siteLabel: string;
+  productName: string;
+  logoDataUrl: string;
+  theme: ThemeMode;
+  appUptime: string;
+};
+
+const DEFAULT_BANNER: PublicBanner = {
+  siteLabel: 'UNSET',
+  productName: 'NETNODE',
+  logoDataUrl: '',
+  theme: 'dark',
+  appUptime: '0d 0h 0m',
+};
 
 function AppContent() {
   const { t } = useTranslation();
@@ -26,13 +42,7 @@ function AppContent() {
   const [switches, setSwitches] = useState<Switch[]>([]);
   const [loading, setLoading] = useState(true);
   const [sshTarget, setSshTarget] = useState<Switch | null>(null);
-  const [banner, setBanner] = useState({
-    siteLabel: 'UNSET',
-    productName: 'NETNODE',
-    logoDataUrl: '',
-    theme: 'dark' as ThemeMode,
-    appUptime: '0d 0h 0m',
-  });
+  const [banner, setBanner] = useState<PublicBanner>(DEFAULT_BANNER);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   const fetchInventory = async () => {
@@ -82,6 +92,27 @@ function AppContent() {
   }, []);
 
   React.useEffect(() => {
+    const fetchPublicConfig = async () => {
+      try {
+        const response = await fetch('/api/config/public');
+        if (!response.ok) return;
+        const data = await response.json();
+        setBanner((prev) => ({
+          ...prev,
+          siteLabel: data.siteLabel || DEFAULT_BANNER.siteLabel,
+          productName: data.productName || DEFAULT_BANNER.productName,
+          logoDataUrl: data.logoDataUrl || DEFAULT_BANNER.logoDataUrl,
+          theme: data.theme === 'light' ? 'light' : 'dark',
+        }));
+      } catch {
+        /* ignore: keep defaults when public config unavailable */
+      }
+    };
+
+    fetchPublicConfig();
+  }, []);
+
+  React.useEffect(() => {
     if (user) {
       fetchInventory();
       // Poll every 5 seconds to catch discovery results
@@ -127,6 +158,21 @@ function AppContent() {
     document.body.setAttribute('data-theme', banner.theme === 'light' ? 'light' : 'dark');
   }, [banner.theme]);
 
+  React.useEffect(() => {
+    const handleConfigUpdated = (event: Event) => {
+      const customEvent = event as CustomEvent<{ theme?: ThemeMode; logoDataUrl?: string }>;
+      const { theme, logoDataUrl } = customEvent.detail || {};
+      if (!theme && typeof logoDataUrl !== 'string') return;
+      setBanner((prev) => ({
+        ...prev,
+        theme: theme ?? prev.theme,
+        logoDataUrl: typeof logoDataUrl === 'string' ? logoDataUrl : prev.logoDataUrl,
+      }));
+    };
+    window.addEventListener(APP_CONFIG_UPDATED_EVENT, handleConfigUpdated as EventListener);
+    return () => window.removeEventListener(APP_CONFIG_UPDATED_EVENT, handleConfigUpdated as EventListener);
+  }, []);
+
   const handleLogout = async () => {
     try {
       await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
@@ -153,7 +199,13 @@ function AppContent() {
   }
 
   if (!user) {
-    return <Login onLogin={(userData) => setUser(userData)} />;
+    return (
+      <Login
+        onLogin={(userData) => setUser(userData)}
+        productName={banner.productName}
+        logoDataUrl={banner.logoDataUrl}
+      />
+    );
   }
 
   const isAdmin = user.role === 'admin';

@@ -5,6 +5,7 @@ import { Switch } from '../types';
 import { useTranslation } from '../lib/i18n';
 import { useNotifications } from '../lib/notifications';
 import { deriveZoneKey } from '../lib/zoneKey';
+import { friendlyErrorMessage, logTechnicalError } from '../lib/friendlyErrors';
 
 const safeErrorText = (value: unknown, fallback = 'Unknown error') =>
   String(value || fallback)
@@ -126,13 +127,19 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
     return ka === kb ? a.localeCompare(b) : ka.localeCompare(kb);
   };
 
-  const isRouterLike = (s: Switch) =>
-    lower(s.category) === 'router' ||
-    lower(s.category) === 'маршрутизатор' ||
-    lower(s.vendor) === 'mikrotik';
-  const isExplicitCore = (s: Switch) =>
-    lower(s.subcategory) === 'core' ||
-    lower(s.vendor) === 'cisco';
+  const deviceText = (s: Switch) => `${lower(s.vendor)} ${lower(s.model)} ${lower(s.category)} ${lower(s.subcategory)} ${toName(s)}`;
+  const isMikroTik = (s: Switch) => lower(s.vendor) === 'mikrotik' || /\bmikrotik\b/i.test(deviceText(s));
+  const isCiscoVendor = (s: Switch) => lower(s.vendor) === 'cisco' || /\bcisco\b/i.test(deviceText(s));
+  const isCiscoCoreLike = (s: Switch) => {
+    if (!isCiscoVendor(s)) return false;
+    const subcategory = lower(s.subcategory);
+    const category = lower(s.category);
+    if (subcategory === 'core' || subcategory === 'core-switch' || subcategory === 'router') return true;
+    if (category === 'router' || category === 'маршрутизатор') return true;
+    return /\b(core|core-switch|nexus|catalyst\s*9\d{2,3}|asr|isr)\b/i.test(deviceText(s));
+  };
+  const isRouterLike = (s: Switch) => isMikroTik(s);
+  const isExplicitCore = (s: Switch) => !isMikroTik(s) && isCiscoCoreLike(s);
   const isDistribution = (s: Switch) => lower(s.subcategory) === 'distribution';
   const isAccess = (s: Switch) =>
     lower(s.subcategory) === 'access' ||
@@ -147,7 +154,7 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
     if (isAccess(s)) return { lane: 'access' as Lane, score: 4 };
     const deg = degree.get(s.id) || 0;
     if (deg <= 1) return { lane: 'unknown' as Lane, score: 1 };
-    if (deg >= 5) return { lane: 'core' as Lane, score: 2 };
+    if (deg >= 5) return { lane: 'distribution' as Lane, score: 2 };
     if (deg >= 3) return { lane: 'distribution' as Lane, score: 2 };
     return { lane: 'access' as Lane, score: 2 };
   };
@@ -553,20 +560,31 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
     const baseX = islandStartX + col * islandColumnWidth + islandColumnWidth / 2 - TOPO_NODE_WIDTH / 2;
     const baseY = margin + row * islandRowHeight;
     const ordered = stableSort(component.nodes, (s) => degree.get(s.id) || 0);
-    const hubs = ordered.filter((s) => isRouterLike(s) || isExplicitCore(s) || (degree.get(s.id) || 0) === component.maxDegree);
-    const hub = hubs[0] || ordered[0];
-    if (!hub) return;
-    const hubLane = isRouterLike(hub) ? 'router' : 'core';
-    laneMap.set(hub.id, hubLane);
-    pos.set(hub.id, { x: baseX, y: baseY });
-
-    const rest = ordered.filter((s) => s.id !== hub.id);
-    const middle = rest.filter((s) => isDistribution(s) || (degree.get(s.id) || 0) > 1);
+    const topRouters = ordered.filter((s) => isRouterLike(s));
+    const ciscoCores = ordered.filter((s) => !topRouters.some((r) => r.id === s.id) && isExplicitCore(s));
+    const rest = ordered.filter((s) => !topRouters.some((r) => r.id === s.id) && !ciscoCores.some((c) => c.id === s.id));
+    const middle = rest.filter((s) => isDistribution(s) || ((degree.get(s.id) || 0) > 1 && !isAccess(s)));
     const leaves = rest.filter((s) => !middle.some((m) => m.id === s.id));
+
+    topRouters.forEach((s) => laneMap.set(s.id, 'router'));
+    ciscoCores.forEach((s) => laneMap.set(s.id, 'core'));
     middle.forEach((s) => laneMap.set(s.id, 'distribution'));
     leaves.forEach((s) => laneMap.set(s.id, 'access'));
-    placeRow(middle, baseX, baseY + 118, 3);
-    placeRow(leaves, baseX, baseY + (middle.length ? 224 : 118), 4);
+
+    let rowY = baseY;
+    if (topRouters.length) {
+      placeRow(topRouters, baseX, rowY, 3);
+      rowY += 118;
+    }
+    if (ciscoCores.length) {
+      placeRow(ciscoCores, baseX, rowY, 3);
+      rowY += 118;
+    }
+    if (middle.length) {
+      placeRow(middle, baseX, rowY, 3);
+      rowY += 106;
+    }
+    placeRow(leaves, baseX, rowY, 4);
   });
 
   const points = switches.map((s) => {
@@ -1085,10 +1103,15 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
         }
       });
       const data = await response.json().catch(() => null);
-      if (!response.ok) throw new Error(data?.error || t('topologyPreviewFailed'));
+      if (!response.ok) {
+        logTechnicalError('Topology preview failed', data, response.status);
+        notifyError(friendlyErrorMessage({ t, httpStatus: response.status, detail: data, fallbackKey: 'topologyPreviewFailed' }));
+        return;
+      }
       setVersionPreview(data?.summary || null);
     } catch (error) {
-      notifyError(error instanceof Error ? error.message : t('topologyPreviewFailed'));
+      logTechnicalError('Topology preview request failed', error);
+      notifyError(friendlyErrorMessage({ t, detail: error, fallbackKey: 'topologyPreviewFailed' }));
     } finally {
       setPreviewLoading(false);
     }
@@ -1112,7 +1135,11 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
         body: JSON.stringify({ versionId: selectedVersionId, branch: selectedRegion || undefined, topologyMode }),
       });
       const data = await response.json().catch(() => null);
-      if (!response.ok) throw new Error(data?.error || t('topologyRestoreFailed'));
+      if (!response.ok) {
+        logTechnicalError('Topology restore failed', data, response.status);
+        notifyError(friendlyErrorMessage({ t, httpStatus: response.status, detail: data, fallbackKey: 'topologyRestoreFailed' }));
+        return;
+      }
       setLinks(data?.links || []);
       setSavedLayout(data?.layout || {});
       setZoneLabelOverrides((data?.zoneLabelOverrides || {}) as Record<string, string>);
@@ -1122,7 +1149,8 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       setVersionsOpen(false);
       notifySuccess(t('topologyRestoreToVersion'));
     } catch (error) {
-      notifyError(error instanceof Error ? error.message : t('topologyRestoreFailed'));
+      logTechnicalError('Topology restore request failed', error);
+      notifyError(friendlyErrorMessage({ t, detail: error, fallbackKey: 'topologyRestoreFailed' }));
     } finally {
       setRestoreLoading(false);
     }
@@ -1239,7 +1267,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       }
     } catch (error) {
       console.error('Failed to refresh topology:', error);
-      notifyError(operationFailedMessage('Topology auto-layout', error instanceof Error ? error.message : error));
+      notifyError(friendlyErrorMessage({ t, detail: error }));
     }
   };
 
@@ -1286,11 +1314,14 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       });
       const data = await response.json().catch(() => null);
       if (!response.ok) {
-        throw new Error(data?.error || t('topologyZoneRenameFailed'));
+        logTechnicalError('Topology zone rename failed', data, response.status);
+        notifyError(friendlyErrorMessage({ t, httpStatus: response.status, detail: data, fallbackKey: 'topologyZoneRenameFailed' }));
+        return;
       }
       setZoneLabelOverrides((data?.zoneLabelOverrides || {}) as Record<string, string>);
     } catch (error) {
-      notifyError(error instanceof Error ? error.message : t('topologyZoneRenameFailed'));
+      logTechnicalError('Topology zone rename request failed', error);
+      notifyError(friendlyErrorMessage({ t, detail: error, fallbackKey: 'topologyZoneRenameFailed' }));
     }
   }, [editingZoneKey, editingZoneValue, role, selectedRegion, t, topologyMode, username, zoneLabelOverrides, notifyError]);
 
@@ -1312,7 +1343,9 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       });
       const data = await response.json().catch(() => null);
       if (!response.ok) {
-        throw new Error(data?.error || 'Failed to undo topology change');
+        logTechnicalError('Topology undo failed', data, response.status);
+        notifyError(friendlyErrorMessage({ t, httpStatus: response.status, detail: data, fallbackKey: 'topologyUndoFailed' }));
+        return;
       }
       setLinks(data?.links || []);
       setSavedLayout(data?.layout || {});
@@ -1320,7 +1353,8 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       refreshTopologyVersions();
       notifySuccess(t('topologyUndo'));
     } catch (error) {
-      notifyError(error instanceof Error ? error.message : t('topologyUndoFailed'));
+      logTechnicalError('Topology undo request failed', error);
+      notifyError(friendlyErrorMessage({ t, detail: error, fallbackKey: 'topologyUndoFailed' }));
     }
   };
 
@@ -1382,6 +1416,13 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     if (!node) return { x: 0, y: 0 };
     return { x: node.x + 80, y: node.y + 40 };
   };
+  const getLinkLabel = React.useCallback((link: TopoLink) => {
+    const a = String(link.portA || '').trim();
+    const b = String(link.portB || '').trim();
+    if (link.manual && !b) return a;
+    if (!b) return a;
+    return `${a} <-> ${b}`;
+  }, []);
 
   const toStageCoords = (clientX: number, clientY: number) => {
     const rect = stageRef.current?.container()?.getBoundingClientRect?.();
@@ -1466,6 +1507,95 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     () => links.filter((l) => topologySwitchIds.has(l.source) && topologySwitchIds.has(l.target)),
     [links, topologySwitchIds]
   );
+  const renderedLinks = React.useMemo(() => {
+    type PairBucket = { keyA: string; keyB: string; items: Array<{ link: TopoLink; index: number }> };
+    const buckets = new Map<string, PairBucket>();
+    visibleLinks.forEach((link, index) => {
+      const keyA = String(link.source);
+      const keyB = String(link.target);
+      const [a, b] = keyA.localeCompare(keyB) <= 0 ? [keyA, keyB] : [keyB, keyA];
+      const pairKey = `${a}::${b}`;
+      if (!buckets.has(pairKey)) buckets.set(pairKey, { keyA: a, keyB: b, items: [] });
+      buckets.get(pairKey)!.items.push({ link, index });
+    });
+
+    const laneSpacing = 16;
+    const labelLiftBase = 16;
+    const labelPerLaneLift = 6;
+    const labelAlongStep = 18;
+    const maxLabelAlongOffset = 42;
+
+    const results: Array<{
+      link: TopoLink;
+      index: number;
+      key: string;
+      startX: number;
+      startY: number;
+      endX: number;
+      endY: number;
+      midX: number;
+      midY: number;
+      labelX: number;
+      labelY: number;
+      lane: number;
+      laneCount: number;
+    }> = [];
+
+    Array.from(buckets.values()).forEach((bucket) => {
+      const sorted = [...bucket.items].sort((a, b) => {
+        const aLabel = getLinkLabel(a.link).toLowerCase();
+        const bLabel = getLinkLabel(b.link).toLowerCase();
+        if (aLabel !== bLabel) return aLabel.localeCompare(bLabel);
+        const aId = String(a.link.id || '');
+        const bId = String(b.link.id || '');
+        if (aId !== bId) return aId.localeCompare(bId);
+        return a.index - b.index;
+      });
+
+      const centerA = getNodeCenter(bucket.keyA);
+      const centerB = getNodeCenter(bucket.keyB);
+      const dx = centerB.x - centerA.x;
+      const dy = centerB.y - centerA.y;
+      const length = Math.hypot(dx, dy) || 1;
+      const nx = -dy / length;
+      const ny = dx / length;
+      const tx = dx / length;
+      const ty = dy / length;
+
+      sorted.forEach((item, laneIndex) => {
+        const lane = laneIndex - (sorted.length - 1) / 2;
+        const laneOffset = lane * laneSpacing;
+        const alongOffset = Math.max(-maxLabelAlongOffset, Math.min(maxLabelAlongOffset, lane * labelAlongStep));
+        const labelLift = labelLiftBase + Math.abs(lane) * labelPerLaneLift;
+        const startX = centerA.x + nx * laneOffset;
+        const startY = centerA.y + ny * laneOffset;
+        const endX = centerB.x + nx * laneOffset;
+        const endY = centerB.y + ny * laneOffset;
+        const midX = (startX + endX) / 2;
+        const midY = (startY + endY) / 2;
+        const labelX = midX + tx * alongOffset + nx * (laneOffset * 0.28);
+        const labelY = midY + ty * alongOffset - labelLift;
+        const key = item.link.id || `${item.link.source}::${item.link.target}::${item.index}`;
+        results.push({
+          link: item.link,
+          index: item.index,
+          key,
+          startX,
+          startY,
+          endX,
+          endY,
+          midX,
+          midY,
+          labelX,
+          labelY,
+          lane,
+          laneCount: sorted.length,
+        });
+      });
+    });
+
+    return results;
+  }, [visibleLinks, nodes, getLinkLabel]);
   const zoneBoxes = React.useMemo(() => {
     const map = new Map<string, NodeWithPos[]>();
     nodes.forEach((node) => {
@@ -1507,13 +1637,6 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       y: (((start.y + end.y) / 2) - 10) * scale + stagePos.y,
     };
   }, [editingLink, nodes, scale, stagePos]);
-  const getLinkLabel = React.useCallback((link: TopoLink) => {
-    const a = String(link.portA || '').trim();
-    const b = String(link.portB || '').trim();
-    if (link.manual && !b) return a;
-    if (!b) return a;
-    return `${a} <-> ${b}`;
-  }, []);
   const openLinkEditor = React.useCallback((link: TopoLink) => {
     if (!canEditTopology) return;
     if (!link.id) return;
@@ -1570,8 +1693,21 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       setEditingRegion(null);
       setEditingRegionValue('');
     } catch (e) {
-      notifyError(e instanceof Error ? e.message : 'Failed to rename region');
+      logTechnicalError('Topology region rename failed', e);
+      notifyError(friendlyErrorMessage({ t, detail: e }));
     }
+  };
+
+  const getNodeStatusColor = (node: Switch) => {
+    const severity = String(node.warningSeverity || '').trim().toLowerCase();
+    if (severity === 'critical') return '#fa5252';
+    if (severity === 'warning') return '#ffd43b';
+
+    const status = String(node.status || '').trim().toLowerCase();
+    if (status === 'offline' || status === 'critical') return '#fa5252';
+    if (status === 'warning') return '#ffd43b';
+    if (status === 'online' || status === 'ok') return '#40c057';
+    return '#fa5252';
   };
 
   return (
@@ -1846,14 +1982,20 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                 listening={false}
               />
             ))}
-            {visibleLinks.map((link, i) => {
-              const start = getNodeCenter(link.source);
-              const end = getNodeCenter(link.target);
-              const linkId = link.id || `${link.source}::${link.target}::${i}`;
+            {renderedLinks.map((entry) => {
+              const { link, key, startX, startY, endX, endY, labelX, labelY, laneCount } = entry;
+              const linkLabel = getLinkLabel(link);
+              const approxTextWidth = Math.max(36, Math.min(220, linkLabel.length * 5.5));
+              const labelPadX = 5;
+              const labelPadY = 2;
+              const pillX = labelX - approxTextWidth / 2 - labelPadX;
+              const pillY = labelY - labelPadY;
+              const pillWidth = approxTextWidth + labelPadX * 2;
+              const pillHeight = 13;
               return (
-                <React.Fragment key={`link-${linkId}`}>
+                <React.Fragment key={`link-${key}`}>
                   <Line
-                    points={[start.x, start.y, end.x, end.y]}
+                    points={[startX, startY, endX, endY]}
                     stroke="#228be6"
                     strokeWidth={1}
                     opacity={0.5}
@@ -1865,10 +2007,21 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                       openLinkEditor(link);
                     }}
                   />
+                  <Rect
+                    x={pillX}
+                    y={pillY}
+                    width={pillWidth}
+                    height={pillHeight}
+                    cornerRadius={7}
+                    fill="#1f2024"
+                    opacity={laneCount > 1 ? 0.86 : 0.72}
+                    listening={false}
+                  />
                   <Text
-                    x={(start.x + end.x) / 2}
-                    y={(start.y + end.y) / 2 - 10}
-                    text={getLinkLabel(link)}
+                    x={labelX - approxTextWidth / 2}
+                    y={labelY}
+                    width={approxTextWidth}
+                    text={linkLabel}
                     fill={editingLinkId === link.id ? "#ffffff" : "#5c5f66"}
                     fontSize={9}
                     align="center"
@@ -1901,7 +2054,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                   width={160}
                   height={80}
                   fill="#25262b"
-                  stroke={node.status === 'online' ? '#40c057' : '#fa5252'}
+                  stroke={getNodeStatusColor(node)}
                   strokeWidth={2}
                   cornerRadius={4}
                   draggable={canEditTopology}
@@ -1967,7 +2120,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                   x={node.x + 145}
                   y={node.y + 15}
                   radius={4}
-                  fill={node.status === 'online' ? '#40c057' : '#fa5252'}
+                  fill={getNodeStatusColor(node)}
                 />
               </React.Fragment>
             ))}
