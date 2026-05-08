@@ -1,6 +1,7 @@
 import React from 'react';
 import { Key, Shield, HardDrive, Database } from 'lucide-react';
 import { useTranslation } from '../lib/i18n';
+import { useNotifications } from '../lib/notifications';
 import { cn } from '../lib/utils';
 
 type LdapProfileForm = {
@@ -115,6 +116,7 @@ type SettingsTabKey = 'general' | 'discovery' | 'ssh' | 'ldap' | 'automation' | 
 
 const Settings: React.FC<SettingsProps> = ({ role, username }) => {
   const { t } = useTranslation();
+  const { notifySuccess, notifyError, notifyInfo } = useNotifications();
   const isAdmin = role === 'admin';
   const isOperator = role === 'admin' || role === 'operator';
   const [activeTab, setActiveTab] = React.useState<SettingsTabKey>('general');
@@ -391,9 +393,9 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
           operator: { ...emptyLdapProfile(), ...data.ldap.operator },
         });
       }
-      alert(t('ldapSaved'));
+      notifySuccess(t('ldapSaved'));
     } catch {
-      alert('LDAP save failed');
+      notifyError('LDAP save failed');
     }
   };
 
@@ -409,7 +411,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         body: JSON.stringify(payload),
       });
     } catch (err) {
-      alert('Failed to save config');
+      notifyError('Failed to save config');
     }
   };
 
@@ -433,9 +435,13 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         body: JSON.stringify(body),
       });
       const data = await response.json();
-      alert(data.ok ? `OK: ${data.message}` : `${data.message || 'LDAP test failed'}`);
+      if (data.ok) {
+        notifySuccess(`OK: ${data.message}`);
+      } else {
+        notifyError(`${data.message || 'LDAP test failed'}`);
+      }
     } catch {
-      alert('LDAP test request failed');
+      notifyError('LDAP test request failed');
     }
   };
 
@@ -458,14 +464,15 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       });
       const data = await readApiPayload(response, 'Discovery scan failed');
       if (!response.ok) {
-        alert(operationFailedMessage('Discovery scan', data, response.status));
+        notifyError(operationFailedMessage('Discovery scan', data, response.status));
         return;
       }
       const jobId = String(data.jobId || '').trim();
       if (!jobId) {
-        alert('Discovery started, but no job id was returned.');
+        notifyError('Discovery started, but no job id was returned.');
         return;
       }
+      notifyInfo('Discovery started');
       let attempts = 0;
       const maxAttempts = 180; // ~6 minutes at 2s polling
       const poll = async () => {
@@ -482,26 +489,26 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         }
         if (statusData.status === 'running') {
           if (attempts >= maxAttempts) {
-            alert('Discovery is still running. Check status in a minute.');
+            notifyInfo('Discovery is still running. Check status in a minute.');
             return;
           }
           window.setTimeout(() => {
-            poll().catch((e) => alert(operationFailedMessage('Discovery status check', e instanceof Error ? e.message : e)));
+            poll().catch((e) => notifyError(operationFailedMessage('Discovery status check', e instanceof Error ? e.message : e)));
           }, 2000);
           return;
         }
         if (statusData.status === 'error') {
-          alert(operationFailedMessage('Discovery scan', statusData));
+          notifyError(operationFailedMessage('Discovery scan', statusData));
           return;
         }
         const summary = statusData.summary || {};
-        alert(
+        notifySuccess(
           `${t('discoveryScanned')}: ${summary.scanned ?? 0}\nSkipped existing: ${summary.skippedExisting ?? 0}\nSNMP found: ${summary.snmpFound ?? 0}\n${t('discoveryAdded')}: ${summary.added ?? 0}`
         );
       };
-      poll().catch((e) => alert(operationFailedMessage('Discovery scan', e instanceof Error ? e.message : e)));
+      poll().catch((e) => notifyError(operationFailedMessage('Discovery scan', e instanceof Error ? e.message : e)));
     } catch (e) {
-      alert(operationFailedMessage('Discovery scan request', e instanceof Error ? e.message : e));
+      notifyError(operationFailedMessage('Discovery scan request', e instanceof Error ? e.message : e));
     }
   };
 
@@ -518,13 +525,13 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       });
       const data = await response.json();
       if (!response.ok) {
-        alert(data.error || 'Failed to save watch profiles');
+        notifyError(data.error || 'Failed to save watch profiles');
         return;
       }
       setWatchProfiles(data.profiles || []);
-      alert('Discovery watch profiles saved');
+      notifySuccess('Discovery watch profiles saved');
     } catch {
-      alert('Failed to save watch profiles');
+      notifyError('Failed to save watch profiles');
     }
   };
 
@@ -541,14 +548,15 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       });
       const data = await readApiPayload(response, 'Discovery watch run start failed');
       if (!response.ok) {
-        alert(operationFailedMessage('Discovery watch run start', data, response.status));
+        notifyError(operationFailedMessage('Discovery watch run start', data, response.status));
         return;
       }
       const jobId = String(data.jobId || '').trim();
       if (!jobId) {
-        alert('Discovery watch run was accepted but no job id was returned');
+        notifyError('Discovery watch run was accepted but no job id was returned');
         return;
       }
+      notifyInfo('Discovery watch run started');
 
       let attempts = 0;
       const maxAttempts = 180; // ~6 minutes at 2s polling
@@ -580,26 +588,26 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
 
         if (statusData.status === 'running') {
           if (attempts >= maxAttempts) {
-            alert('Discovery watch run is still running. Check status again in a minute.');
+            notifyInfo('Discovery watch run is still running. Check status again in a minute.');
             return;
           }
           window.setTimeout(() => {
-            poll().catch((e) => alert(operationFailedMessage('Discovery watch status check', e instanceof Error ? e.message : e)));
+            poll().catch((e) => notifyError(operationFailedMessage('Discovery watch status check', e instanceof Error ? e.message : e)));
           }, 2000);
           return;
         }
 
         if (statusData.status === 'error') {
-          alert(operationFailedMessage('Discovery watch run', statusData, 500));
+          notifyError(operationFailedMessage('Discovery watch run', statusData, 500));
           return;
         }
 
-        alert(`Profiles run: ${(statusData.runs || []).length}`);
+        notifySuccess(`Profiles run: ${(statusData.runs || []).length}`);
       };
 
-      poll().catch((e) => alert(operationFailedMessage('Discovery watch run', e instanceof Error ? e.message : e)));
+      poll().catch((e) => notifyError(operationFailedMessage('Discovery watch run', e instanceof Error ? e.message : e)));
     } catch (e) {
-      alert(operationFailedMessage('Discovery watch run start request', e instanceof Error ? e.message : e));
+      notifyError(operationFailedMessage('Discovery watch run start request', e instanceof Error ? e.message : e));
     }
   };
 
@@ -626,9 +634,13 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         }),
       });
       const data = await response.json();
-      alert(data.message);
+      if (response.ok) {
+        notifySuccess(data.message || 'SNMP config saved');
+      } else {
+        notifyError(data.message || 'Failed to save SNMP config.');
+      }
     } catch (error) {
-      alert('Failed to save SNMP config.');
+      notifyError('Failed to save SNMP config.');
     }
   };
 
@@ -651,7 +663,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       });
       const data = await response.json();
       if (!response.ok) {
-        alert(data.error || 'Failed to save SSH readonly profile');
+        notifyError(data.error || 'Failed to save SSH readonly profile');
         return;
       }
       setSshReadonlyConfig((prev) => ({
@@ -661,9 +673,9 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         expiresAt: data.expiresAt || '',
         password: '',
       }));
-      alert('SSH readonly profile saved in memory');
+      notifySuccess('SSH readonly profile saved in memory');
     } catch {
-      alert('Failed to save SSH readonly profile');
+      notifyError('Failed to save SSH readonly profile');
     }
   };
 
@@ -679,12 +691,12 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       });
       const data = await response.json();
       if (!response.ok) {
-        alert(data.error || 'Template delete failed');
+        notifyError(data.error || 'Template delete failed');
         return;
       }
       setSnmpTemplates(data.templates || []);
     } catch {
-      alert('Template delete failed');
+      notifyError('Template delete failed');
     }
   };
 
@@ -716,12 +728,12 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       });
       const data = await response.json();
       if (!response.ok) {
-        alert(data.error || 'Inventory dictionaries save failed');
+        notifyError(data.error || 'Inventory dictionaries save failed');
         return;
       }
-      alert('Inventory dictionaries saved');
+      notifySuccess('Inventory dictionaries saved');
     } catch {
-      alert('Inventory dictionaries save failed: check models JSON');
+      notifyError('Inventory dictionaries save failed: check models JSON');
     }
   };
 
@@ -751,7 +763,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       .filter((m) => m.key && m.oid);
 
     if (!templateEditor.id.trim() || !templateEditor.name.trim() || metrics.length === 0) {
-      alert('Template id/name and at least one metric are required');
+      notifyError('Template id/name and at least one metric are required');
       return;
     }
 
@@ -773,13 +785,13 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       });
       const data = await response.json();
       if (!response.ok) {
-        alert(data.error || 'Template save failed');
+        notifyError(data.error || 'Template save failed');
         return;
       }
       setSnmpTemplates(data.templates || []);
-      alert('SNMP template saved');
+      notifySuccess('SNMP template saved');
     } catch {
-      alert('Template save failed');
+      notifyError('Template save failed');
     }
   };
 

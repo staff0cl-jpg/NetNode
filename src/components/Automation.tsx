@@ -1,6 +1,7 @@
 import React from 'react';
 import { Bot, PlayCircle, CheckCircle2, ListChecks, RefreshCw, Square, Shield, HardDrive } from 'lucide-react';
 import { useTranslation } from '../lib/i18n';
+import { useNotifications } from '../lib/notifications';
 import { cn } from '../lib/utils';
 
 const safeErrorText = (value: unknown, fallback = 'Unknown error') =>
@@ -195,6 +196,7 @@ type ExecutionFlowTabKey = 'scenario' | 'targeting';
 
 const Automation: React.FC<AutomationProps> = ({ role, username }) => {
   const { t } = useTranslation();
+  const { notifySuccess, notifyError, notifyInfo } = useNotifications();
   const canApply = role === 'admin' || role === 'operator';
   const isAdmin = role === 'admin';
   const [activeTab, setActiveTab] = React.useState<AutomationTabKey>('execution');
@@ -661,12 +663,12 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
       });
       const data = await response.json();
       if (!response.ok) {
-        alert(data?.error || 'Failed to save SNMP config.');
+        notifyError(data?.error || 'Failed to save SNMP config.');
         return;
       }
-      alert(data?.message || 'SNMP config saved.');
+      notifySuccess(data?.message || 'SNMP config saved.');
     } catch {
-      alert('Failed to save SNMP config.');
+      notifyError('Failed to save SNMP config.');
     }
   };
 
@@ -739,13 +741,13 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
       });
       const data = await response.json();
       if (!response.ok) {
-        alert(data.error || 'Backup config save failed');
+        notifyError(data.error || 'Backup config save failed');
         return;
       }
-      alert('Backup config saved');
+      notifySuccess('Backup config saved');
       setBackupConfig((prev) => ({ ...prev, password: '' }));
     } catch {
-      alert('Backup config save failed');
+      notifyError('Backup config save failed');
     }
   };
 
@@ -757,17 +759,18 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
       });
       const data = await readApiPayload(response, 'Backup run now failed');
       if (!response.ok || data?.success === false) {
-        alert(operationFailedMessage('Backup run now', data, response.status));
+        notifyError(operationFailedMessage('Backup run now', data, response.status));
         return;
       }
+      notifyInfo('Backup job started');
       const historyResp = await fetch('/api/backup/history', { headers });
       if (historyResp.ok) {
         const historyData = await historyResp.json();
         setBackupRuns(Array.isArray(historyData.runs) ? historyData.runs : []);
       }
-      alert('Backup run completed');
+      notifySuccess('Backup run completed');
     } catch (e) {
-      alert(operationFailedMessage('Backup run now request', e instanceof Error ? e.message : e));
+      notifyError(operationFailedMessage('Backup run now request', e instanceof Error ? e.message : e));
     }
   };
 

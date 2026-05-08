@@ -28,6 +28,10 @@ export const translations: Translations = {
   syncStatusRealtime: { ru: 'Статус синхронизации: в реальном времени', en: 'Sync status: real-time' },
   sessionSecure: { ru: 'Сессия: защищенная (AES-256)', en: 'Session: Secure (AES-256)' },
   uptimeLabel: { ru: 'АПТАЙМ', en: 'UPTIME' },
+  notifySuccessTitle: { ru: 'Успешно', en: 'Success' },
+  notifyErrorTitle: { ru: 'Ошибка', en: 'Error' },
+  notifyInfoTitle: { ru: 'Информация', en: 'Info' },
+  notifyClose: { ru: 'Закрыть уведомление', en: 'Close notification' },
 
   // Dashboard
   infraOverview: { ru: 'Обзор инфраструктуры', en: 'Infrastructure Overview' },

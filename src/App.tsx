@@ -11,6 +11,8 @@ import AuditLogs from './components/AuditLogs';
 import Login from './components/Login';
 import { Switch } from './types';
 import { LanguageProvider, useTranslation } from './lib/i18n';
+import { NotificationsProvider } from './lib/notifications';
+import NotificationCenter from './components/NotificationCenter';
 import { APP_VERSION } from './lib/version';
 import { Menu } from 'lucide-react';
 
@@ -194,6 +196,7 @@ function AppContent() {
 
   return (
     <div className="flex h-screen w-screen bg-[#1a1b1e] text-[#c1c2c5] overflow-hidden font-sans">
+      <NotificationCenter />
       <div className="hidden md:block">
         <Sidebar
           activeTab={activeTab}
@@ -257,7 +260,9 @@ function AppContent() {
 export default function App() {
   return (
     <LanguageProvider>
-      <AppContent />
+      <NotificationsProvider>
+        <AppContent />
+      </NotificationsProvider>
     </LanguageProvider>
   );
 }

@@ -3,6 +3,7 @@ import { Stage, Layer, Rect, Text, Line, Circle } from 'react-konva';
 import { Share2, Box, ZoomIn, ZoomOut, RotateCcw, Globe, TerminalSquare } from 'lucide-react';
 import { Switch } from '../types';
 import { useTranslation } from '../lib/i18n';
+import { useNotifications } from '../lib/notifications';
 import { deriveZoneKey } from '../lib/zoneKey';
 
 const safeErrorText = (value: unknown, fallback = 'Unknown error') =>
@@ -835,8 +836,95 @@ function topologyScopeQuery(topologyMode: TopologyMode, branch?: string) {
   return query ? `?${query}` : '';
 }
 
+function applyAnchoredLayout(
+  computed: NodeWithPos[],
+  anchors: Record<string, { x: number; y: number }>,
+  links: TopoLink[]
+): NodeWithPos[] {
+  const resolved = new Map<string, { x: number; y: number }>();
+  const occupied: Array<{ x: number; y: number }> = [];
+  const hasFinitePos = (value?: { x: number; y: number }) =>
+    !!value && Number.isFinite(value.x) && Number.isFinite(value.y);
+  const centerX = (x: number) => x + TOPO_NODE_WIDTH / 2;
+  const centerY = (y: number) => y + TOPO_NODE_HEIGHT / 2;
+  const minGapX = TOPO_NODE_WIDTH + 26;
+  const minGapY = TOPO_NODE_HEIGHT + 22;
+  const collides = (x: number, y: number) =>
+    occupied.some((p) => Math.abs(p.x - x) < minGapX && Math.abs(p.y - y) < minGapY);
+  const reserve = (x: number, y: number) => occupied.push({ x, y });
+  const clamp = (x: number, y: number) => ({ x: Math.max(35, x), y: Math.max(35, y) });
+
+  computed.forEach((node) => {
+    const anchor = anchors[node.id];
+    if (!hasFinitePos(anchor)) return;
+    const next = clamp(anchor!.x, anchor!.y);
+    resolved.set(node.id, next);
+    reserve(next.x, next.y);
+  });
+
+  const fallbackX = computed.length
+    ? computed.reduce((sum, node) => sum + node.x, 0) / computed.length
+    : 220;
+  const fallbackY = computed.length
+    ? computed.reduce((sum, node) => sum + node.y, 0) / computed.length
+    : 180;
+
+  computed.forEach((node, index) => {
+    if (resolved.has(node.id)) return;
+    const neighbors = links
+      .filter((link) => link.source === node.id || link.target === node.id)
+      .map((link) => (link.source === node.id ? link.target : link.source))
+      .map((neighborId) => resolved.get(neighborId))
+      .filter((pos): pos is { x: number; y: number } => !!pos);
+    let baseX = node.x;
+    let baseY = node.y;
+    if (neighbors.length) {
+      const avgCenterX = neighbors.reduce((sum, pos) => sum + centerX(pos.x), 0) / neighbors.length;
+      const avgCenterY = neighbors.reduce((sum, pos) => sum + centerY(pos.y), 0) / neighbors.length;
+      baseX = avgCenterX - TOPO_NODE_WIDTH / 2;
+      baseY = avgCenterY - TOPO_NODE_HEIGHT / 2;
+    } else if (!Number.isFinite(baseX) || !Number.isFinite(baseY)) {
+      baseX = fallbackX + (index % 4) * 26;
+      baseY = fallbackY + Math.floor(index / 4) * 26;
+    }
+    let candidate = clamp(baseX, baseY);
+    if (collides(candidate.x, candidate.y)) {
+      const step = 28;
+      let found = false;
+      for (let ring = 1; ring <= 8 && !found; ring++) {
+        const offsets = [
+          { x: ring * step, y: 0 },
+          { x: -ring * step, y: 0 },
+          { x: 0, y: ring * step },
+          { x: 0, y: -ring * step },
+          { x: ring * step, y: ring * step },
+          { x: ring * step, y: -ring * step },
+          { x: -ring * step, y: ring * step },
+          { x: -ring * step, y: -ring * step },
+        ];
+        for (const offset of offsets) {
+          const next = clamp(baseX + offset.x, baseY + offset.y);
+          if (!collides(next.x, next.y)) {
+            candidate = next;
+            found = true;
+            break;
+          }
+        }
+      }
+    }
+    resolved.set(node.id, candidate);
+    reserve(candidate.x, candidate.y);
+  });
+
+  return computed.map((node) => {
+    const placed = resolved.get(node.id);
+    return placed ? { ...node, x: placed.x, y: placed.y } : node;
+  });
+}
+
 const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH }) => {
   const { t } = useTranslation();
+  const { notifySuccess, notifyError } = useNotifications();
   const canEditTopology = role === 'admin' || role === 'operator';
   const containerRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<any>(null);
@@ -1000,16 +1088,16 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       if (!response.ok) throw new Error(data?.error || t('topologyPreviewFailed'));
       setVersionPreview(data?.summary || null);
     } catch (error) {
-      alert(error instanceof Error ? error.message : t('topologyPreviewFailed'));
+      notifyError(error instanceof Error ? error.message : t('topologyPreviewFailed'));
     } finally {
       setPreviewLoading(false);
     }
-  }, [role, username, selectedRegion, topologyMode, t]);
+  }, [role, username, selectedRegion, topologyMode, t, notifyError]);
 
   const handleRestoreSelectedVersion = React.useCallback(async () => {
     if (!canEditTopology) return;
     if (!selectedVersionId) {
-      alert(t('topologySelectVersionFirst'));
+      notifyError(t('topologySelectVersionFirst'));
       return;
     }
     try {
@@ -1032,12 +1120,13 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       setSelectedVersionId('');
       refreshTopologyVersions();
       setVersionsOpen(false);
+      notifySuccess(t('topologyRestoreToVersion'));
     } catch (error) {
-      alert(error instanceof Error ? error.message : t('topologyRestoreFailed'));
+      notifyError(error instanceof Error ? error.message : t('topologyRestoreFailed'));
     } finally {
       setRestoreLoading(false);
     }
-  }, [canEditTopology, role, username, selectedVersionId, selectedRegion, topologyMode, refreshTopologyVersions, t]);
+  }, [canEditTopology, role, username, selectedVersionId, selectedRegion, topologyMode, refreshTopologyVersions, t, notifyError, notifySuccess]);
 
   useEffect(() => {
     const w = containerRef.current?.offsetWidth || canvasSize.width;
@@ -1058,7 +1147,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   const handleAutoLayout = async () => {
     if (!canEditTopology) return;
     if (!selectedRegion) {
-      alert(t('topologySelectTabFirst'));
+      notifyError(t('topologySelectTabFirst'));
       return;
     }
     try {
@@ -1115,9 +1204,18 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       const h = containerRef.current?.offsetHeight || canvasSize.height;
       const visibleLinks = (data.links || []).filter((l) => topologySwitchIds.has(l.source) && topologySwitchIds.has(l.target));
       const computed = computeLayout(zoneSwitches, visibleLinks, w, h);
-      // Auto-layout must take precedence over previously saved coordinates for this active tab.
-      setNodes(computed);
-      const nextPositions = computed.reduce<Record<string, { x: number; y: number }>>((acc, n) => {
+      const existingAnchors: Record<string, { x: number; y: number }> = {
+        ...(data.layout || {}),
+        ...savedLayout,
+      };
+      nodes.forEach((node) => {
+        if (!existingAnchors[node.id]) {
+          existingAnchors[node.id] = { x: node.x, y: node.y };
+        }
+      });
+      const anchoredLayout = applyAnchoredLayout(computed, existingAnchors, visibleLinks);
+      setNodes(anchoredLayout);
+      const nextPositions = anchoredLayout.reduce<Record<string, { x: number; y: number }>>((acc, n) => {
         acc[n.id] = { x: n.x, y: n.y };
         return acc;
       }, {});
@@ -1141,7 +1239,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       }
     } catch (error) {
       console.error('Failed to refresh topology:', error);
-      alert(operationFailedMessage('Topology auto-layout', error instanceof Error ? error.message : error));
+      notifyError(operationFailedMessage('Topology auto-layout', error instanceof Error ? error.message : error));
     }
   };
 
@@ -1192,14 +1290,14 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       }
       setZoneLabelOverrides((data?.zoneLabelOverrides || {}) as Record<string, string>);
     } catch (error) {
-      alert(error instanceof Error ? error.message : t('topologyZoneRenameFailed'));
+      notifyError(error instanceof Error ? error.message : t('topologyZoneRenameFailed'));
     }
-  }, [editingZoneKey, editingZoneValue, role, selectedRegion, t, topologyMode, username, zoneLabelOverrides]);
+  }, [editingZoneKey, editingZoneValue, role, selectedRegion, t, topologyMode, username, zoneLabelOverrides, notifyError]);
 
   const handleUndoLastTopologyChange = async () => {
     if (!canEditTopology) return;
     if (!selectedRegion) {
-      alert(t('topologySelectTabFirst'));
+      notifyError(t('topologySelectTabFirst'));
       return;
     }
     try {
@@ -1220,8 +1318,9 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       setSavedLayout(data?.layout || {});
       setZoneLabelOverrides((data?.zoneLabelOverrides || {}) as Record<string, string>);
       refreshTopologyVersions();
+      notifySuccess(t('topologyUndo'));
     } catch (error) {
-      alert(error instanceof Error ? error.message : t('topologyUndoFailed'));
+      notifyError(error instanceof Error ? error.message : t('topologyUndoFailed'));
     }
   };
 
@@ -1471,7 +1570,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       setEditingRegion(null);
       setEditingRegionValue('');
     } catch (e) {
-      alert(e instanceof Error ? e.message : 'Failed to rename region');
+      notifyError(e instanceof Error ? e.message : 'Failed to rename region');
     }
   };
 
