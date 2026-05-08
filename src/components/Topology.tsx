@@ -24,6 +24,7 @@ type TopologyVersionPreview = {
 type LinkDraft = { sourceId: string; x1: number; y1: number; x2: number; y2: number } | null;
 
 type NodeWithPos = Switch & { x: number; y: number };
+type TopologyMode = 'ip' | 'fc';
 
 const TOPO_NODE_WIDTH = 160;
 const TOPO_NODE_HEIGHT = 80;
@@ -619,6 +620,13 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
   });
 }
 
+function topologyScopeQuery(topologyMode: TopologyMode, branch?: string) {
+  const params = new URLSearchParams({ topologyMode });
+  if (branch) params.set('branch', branch);
+  const query = params.toString();
+  return query ? `?${query}` : '';
+}
+
 const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH }) => {
   const { t } = useTranslation();
   const canEditTopology = role === 'admin' || role === 'operator';
@@ -636,7 +644,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   const panLastPointRef = useRef<{ x: number; y: number } | null>(null);
   const suppressNodeContextMenuRef = useRef(false);
   const draftLinkStartedAtRef = useRef(0);
-  const [topologyMode, setTopologyMode] = useState<'ip' | 'fc'>('ip');
+  const [topologyMode, setTopologyMode] = useState<TopologyMode>('ip');
   const [selectedRegion, setSelectedRegion] = useState<string>('');
   const [newRegion, setNewRegion] = useState('');
   const [regionEditor, setRegionEditor] = useState({ from: '', to: '' });
@@ -688,7 +696,12 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     let cancelled = false;
     (async () => {
       try {
-        const response = await fetch('/api/topology/links');
+        const response = await fetch(`/api/topology/links${topologyScopeQuery(topologyMode, selectedRegion || undefined)}`, {
+          headers: {
+            'x-user-role': role || 'viewer',
+            'x-user-name': username || 'unknown'
+          }
+        });
         const data: { links: TopoLink[]; layout?: Record<string, { x: number; y: number }> } = await response.json();
         if (!cancelled) {
           setLinks(data.links || []);
@@ -701,7 +714,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     return () => {
       cancelled = true;
     };
-  }, [topologySwitches]);
+  }, [topologyMode, selectedRegion, role, username]);
 
   const refreshTopologyVersions = React.useCallback(async () => {
     try {
@@ -730,7 +743,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     if (!versionId) return;
     try {
       setPreviewLoading(true);
-      const query = selectedRegion ? `?branch=${encodeURIComponent(selectedRegion)}` : '';
+      const query = topologyScopeQuery(topologyMode, selectedRegion || undefined);
       const response = await fetch(`/api/topology/versions/${encodeURIComponent(versionId)}/preview${query}`, {
         headers: {
           'x-user-role': role || 'viewer',
@@ -745,7 +758,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     } finally {
       setPreviewLoading(false);
     }
-  }, [role, username, selectedRegion, t]);
+  }, [role, username, selectedRegion, topologyMode, t]);
 
   const handleRestoreSelectedVersion = React.useCallback(async () => {
     if (!canEditTopology) return;
@@ -762,7 +775,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           'x-user-role': role || 'viewer',
           'x-user-name': username || 'unknown'
         },
-        body: JSON.stringify({ versionId: selectedVersionId, branch: selectedRegion || undefined }),
+        body: JSON.stringify({ versionId: selectedVersionId, branch: selectedRegion || undefined, topologyMode }),
       });
       const data = await response.json().catch(() => null);
       if (!response.ok) throw new Error(data?.error || t('topologyRestoreFailed'));
@@ -777,7 +790,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     } finally {
       setRestoreLoading(false);
     }
-  }, [canEditTopology, role, username, selectedVersionId, selectedRegion, refreshTopologyVersions, t]);
+  }, [canEditTopology, role, username, selectedVersionId, selectedRegion, topologyMode, refreshTopologyVersions, t]);
 
   useEffect(() => {
     const w = containerRef.current?.offsetWidth || canvasSize.width;
@@ -802,20 +815,22 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       return;
     }
     try {
-      const rebuild = await fetch('/api/topology/links/rebuild', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
-        },
-        body: JSON.stringify({ branch: selectedRegion }),
-      });
-      if (!rebuild.ok) {
-        const err = await rebuild.json().catch(() => null);
-        console.warn('Topology rebuild failed, using existing links', err?.error || '');
+      if (topologyMode !== 'fc') {
+        const rebuild = await fetch('/api/topology/links/rebuild', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-user-role': role || 'viewer',
+            'x-user-name': username || 'unknown'
+          },
+          body: JSON.stringify({ branch: selectedRegion, topologyMode }),
+        });
+        if (!rebuild.ok) {
+          const err = await rebuild.json().catch(() => null);
+          console.warn('Topology rebuild failed, using existing links', err?.error || '');
+        }
       }
-      const response = await fetch('/api/topology/links', {
+      const response = await fetch(`/api/topology/links${topologyScopeQuery(topologyMode, selectedRegion || undefined)}`, {
         headers: {
           'x-user-role': role || 'viewer',
           'x-user-name': username || 'unknown'
@@ -853,13 +868,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
         acc[n.id] = { x: n.x, y: n.y };
         return acc;
       }, {});
-      setSavedLayout((prev) => {
-        const merged = { ...prev };
-        Object.keys(merged).forEach((id) => {
-          if (topologySwitchIds.has(id)) delete merged[id];
-        });
-        return { ...merged, ...nextPositions };
-      });
+      setSavedLayout(nextPositions);
       try {
         await fetch('/api/topology/layout', {
           method: 'POST',
@@ -868,7 +877,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
             'x-user-role': role || 'viewer',
             'x-user-name': username || 'unknown'
           },
-          body: JSON.stringify({ positions: nextPositions, branch: selectedRegion || undefined }),
+          body: JSON.stringify({ positions: nextPositions, branch: selectedRegion || undefined, topologyMode, replace: true }),
         });
       } catch {
         // ignore layout persistence errors on auto-layout
@@ -893,7 +902,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           'x-user-role': role || 'viewer',
           'x-user-name': username || 'unknown'
         },
-        body: JSON.stringify({ branch: selectedRegion }),
+        body: JSON.stringify({ branch: selectedRegion, topologyMode }),
       });
       const data = await response.json().catch(() => null);
       if (!response.ok) {
@@ -948,8 +957,12 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     try {
       await fetch('/api/topology/layout', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ positions: { [id]: { x, y } }, branch: selectedRegion || undefined }),
+        headers: {
+          'Content-Type': 'application/json',
+          'x-user-role': role || 'viewer',
+          'x-user-name': username || 'unknown'
+        },
+        body: JSON.stringify({ positions: { [id]: { x, y } }, branch: selectedRegion || undefined, topologyMode }),
       });
     } catch (error) {
       console.error('Failed to save layout:', error);

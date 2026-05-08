@@ -129,7 +129,7 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
     const devices = (dashboardMetrics?.devices || []) as Array<any>;
     return devices.flatMap((d: any) =>
       (d.trunks || [])
-        .filter((t: any) => Number(t.operStatus) !== 1)
+        .filter((t: any) => t.isDown === true)
         .map((t: any) => ({
           deviceName: d.name,
           deviceIp: d.ip,
@@ -347,8 +347,8 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
                 <div key={`${p.deviceId}-${p.ifIndex}`} className="border border-[#373a40] rounded p-3 min-w-0">
                   <div className="flex justify-between">
                     <span className="text-white font-semibold">{p.deviceName}</span>
-                    <span className={p.operStatus === 1 ? 'text-[#40c057]' : 'text-[#fa5252]'}>
-                      {p.operStatus === 1 ? t('trunkStateUp') : t('trunkStateDown')}
+                    <span className={p.isDown === true ? 'text-[#fa5252]' : 'text-[#40c057]'}>
+                      {p.isDown === true ? t('trunkStateDown') : t('trunkStateUp')}
                     </span>
                   </div>
                   <div className="text-[#909296] mt-1 break-words">{p.ifName} :: {p.description}</div>

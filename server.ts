@@ -114,7 +114,7 @@ type SshReadonlyProfile = {
 let sshReadonlyProfile: SshReadonlyProfile | null = null;
 
 const LEGACY_SSH_ALGORITHMS = {
-  // Prefer modern algorithms but keep legacy fallbacks for old HP/HPE 1910/1810 stacks.
+  // Prefer modern algorithms but keep legacy fallbacks for older Cisco/HP/HPE stacks.
   kex: [
     "curve25519-sha256",
     "curve25519-sha256@libssh.org",
@@ -124,16 +124,17 @@ const LEGACY_SSH_ALGORITHMS = {
     "diffie-hellman-group-exchange-sha256",
     "diffie-hellman-group14-sha256",
     "diffie-hellman-group14-sha1",
+    "diffie-hellman-group-exchange-sha1",
     "diffie-hellman-group1-sha1",
   ],
-  serverHostKey: ["rsa-sha2-512", "rsa-sha2-256", "ssh-ed25519", "ecdsa-sha2-nistp256", "ssh-rsa", "ssh-dss"],
+  serverHostKey: ["rsa-sha2-512", "rsa-sha2-256", "ssh-ed25519", "ecdsa-sha2-nistp521", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp256", "ssh-rsa", "ssh-dss"],
   cipher: [
-    "aes128-gcm",
-    "aes256-gcm",
+    "chacha20-poly1305@openssh.com",
+    "aes128-gcm@openssh.com",
+    "aes256-gcm@openssh.com",
     "aes128-ctr",
     "aes192-ctr",
     "aes256-ctr",
-    "chacha20-poly1305@openssh.com",
     "aes128-cbc",
     "aes192-cbc",
     "aes256-cbc",
@@ -148,6 +149,57 @@ function legacySshConnectOptions() {
   };
 }
 
+type SshErrorLike = {
+  message?: string;
+  code?: string;
+  level?: string;
+  description?: string;
+  reason?: string;
+};
+
+function sshErrorText(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  const e = err as SshErrorLike | null | undefined;
+  return e?.message || e?.description || e?.reason || "Unknown SSH error";
+}
+
+function normalizeSshErrorForClient(err: unknown): string {
+  const e = err as SshErrorLike | null | undefined;
+  const message = sshErrorText(err);
+  const raw = [message, e?.code, e?.level, e?.description, e?.reason].filter(Boolean).join(" ");
+
+  if (/All configured authentication methods failed|Authentication failed|Permission denied/i.test(raw)) {
+    return "SSH authentication failed. Check the username/password and whether the device allows password or keyboard-interactive login.";
+  }
+
+  if (/Timed out while waiting for handshake|readyTimeout|client-timeout|ETIMEDOUT|EHOSTUNREACH/i.test(raw)) {
+    return "SSH connection timed out. Check reachability, the SSH port, device CPU load, and whether an ACL/firewall is blocking the session.";
+  }
+
+  if (/ECONNREFUSED/i.test(raw)) {
+    return "SSH connection refused. Confirm SSH is enabled on the device and the selected port is correct.";
+  }
+
+  if (/ENOTFOUND|EAI_AGAIN/i.test(raw)) {
+    return "SSH host could not be resolved. Check the hostname or use the device IP address.";
+  }
+
+  if (/Cannot parse privateKey|Bad passphrase|Encrypted private key detected/i.test(raw)) {
+    return "SSH key authentication failed. Check the private key format and passphrase.";
+  }
+
+  if (/no matching (?:key exchange|cipher|MAC|host key)|Handshake failed/i.test(raw)) {
+    return `SSH handshake failed because no compatible algorithms were negotiated. On older Cisco firmware, enable a supported KEX/cipher/host-key pair such as diffie-hellman-group14-sha256 or group14-sha1 with aes*-ctr and rsa-sha2/ssh-rsa. Original error: ${message}`;
+  }
+
+  if (/error:0{8}:lib\(0\)::reason\(0\)|lib\(0\).*reason\(0\)/i.test(raw)) {
+    return `SSH handshake failed during encryption negotiation. This usually means the device and proxy could not agree on a usable cipher/KEX/host-key algorithm; update device SSH settings or firmware if it only offers very old algorithms. Original OpenSSL error: ${message}`;
+  }
+
+  return message;
+}
+
 type TopologyLink = {
   id?: string;
   source: string;
@@ -157,8 +209,11 @@ type TopologyLink = {
   manual?: boolean; // created by user
   renamed?: boolean; // ports were edited by user
 };
+type TopologyMode = "ip" | "fc";
+type TopologyLayout = Record<string, { x: number; y: number }>;
 let topologyLinks: TopologyLink[] = [];
-let topologyLayout: Record<string, { x: number; y: number }> = {};
+let topologyLayout: TopologyLayout = {};
+let topologyLayoutScopes: Record<TopologyMode, Record<string, TopologyLayout>> = { ip: {}, fc: {} };
 type TopologySnapshot = {
   id: string;
   createdAt: string;
@@ -166,7 +221,8 @@ type TopologySnapshot = {
   reason: string;
   branch?: string;
   links: TopologyLink[];
-  layout: Record<string, { x: number; y: number }>;
+  layout: TopologyLayout;
+  layoutScopes?: Record<TopologyMode, Record<string, TopologyLayout>>;
 };
 let topologySnapshots: TopologySnapshot[] = [];
 
@@ -174,12 +230,96 @@ function cloneTopologyLinks(links: TopologyLink[]): TopologyLink[] {
   return links.map((l) => ({ ...l }));
 }
 
-function cloneTopologyLayout(layout: Record<string, { x: number; y: number }>): Record<string, { x: number; y: number }> {
-  const out: Record<string, { x: number; y: number }> = {};
+function cloneTopologyLayout(layout: TopologyLayout): TopologyLayout {
+  const out: TopologyLayout = {};
   Object.entries(layout || {}).forEach(([id, p]) => {
     out[id] = { x: Number(p.x), y: Number(p.y) };
   });
   return out;
+}
+
+function cloneTopologyLayoutScopes(
+  scopes: Record<TopologyMode, Record<string, TopologyLayout>>
+): Record<TopologyMode, Record<string, TopologyLayout>> {
+  return {
+    ip: Object.fromEntries(Object.entries(scopes.ip || {}).map(([branch, layout]) => [branch, cloneTopologyLayout(layout)])),
+    fc: Object.fromEntries(Object.entries(scopes.fc || {}).map(([branch, layout]) => [branch, cloneTopologyLayout(layout)])),
+  };
+}
+
+function normalizeTopologyMode(value: unknown): TopologyMode {
+  return String(value || "").trim().toLowerCase() === "fc" ? "fc" : "ip";
+}
+
+function topologyLayoutBranchKey(branch?: string): string {
+  return String(branch || "").trim();
+}
+
+function scopedTopologyLayout(
+  layout: TopologyLayout,
+  branch?: string
+): TopologyLayout {
+  const branchName = String(branch || "").trim();
+  if (!branchName) return cloneTopologyLayout(layout);
+  const ids = branchDeviceIdSet(branchName);
+  const scoped: TopologyLayout = {};
+  Object.entries(layout || {}).forEach(([id, p]) => {
+    if (ids.has(id)) scoped[id] = { x: Number(p.x), y: Number(p.y) };
+  });
+  return scoped;
+}
+
+function getTopologyLayoutForScope(mode: TopologyMode, branch?: string): TopologyLayout {
+  const key = topologyLayoutBranchKey(branch);
+  const scoped = topologyLayoutScopes[mode]?.[key];
+  if (scoped) return cloneTopologyLayout(scoped);
+  return scopedTopologyLayout(topologyLayout, branch);
+}
+
+function getSnapshotLayoutForScope(snapshot: TopologySnapshot, mode: TopologyMode, branch?: string): TopologyLayout {
+  const key = topologyLayoutBranchKey(branch);
+  const scoped = snapshot.layoutScopes?.[mode]?.[key];
+  if (scoped) return cloneTopologyLayout(scoped);
+  return scopedTopologyLayout(snapshot.layout, branch);
+}
+
+function setTopologyLayoutForScope(mode: TopologyMode, branch: string | undefined, layout: TopologyLayout) {
+  const key = topologyLayoutBranchKey(branch);
+  topologyLayoutScopes[mode][key] = cloneTopologyLayout(layout);
+}
+
+function mergeTopologyLayoutForScope(mode: TopologyMode, branch: string | undefined, positions: TopologyLayout, replace = false) {
+  const key = topologyLayoutBranchKey(branch);
+  const next = replace ? {} : getTopologyLayoutForScope(mode, branch);
+  Object.entries(positions || {}).forEach(([id, pos]) => {
+    if (Number.isFinite(pos?.x) && Number.isFinite(pos?.y)) {
+      next[id] = { x: Number(pos.x), y: Number(pos.y) };
+    }
+  });
+  topologyLayoutScopes[mode][key] = next;
+  return cloneTopologyLayout(next);
+}
+
+function deleteTopologyLayoutIds(ids: string[]) {
+  Object.keys(topologyLayout).forEach((id) => {
+    if (ids.includes(id)) delete topologyLayout[id];
+  });
+  (Object.keys(topologyLayoutScopes) as TopologyMode[]).forEach((mode) => {
+    Object.values(topologyLayoutScopes[mode]).forEach((layout) => {
+      Object.keys(layout).forEach((id) => {
+        if (ids.includes(id)) delete layout[id];
+      });
+    });
+  });
+}
+
+function renameTopologyLayoutBranchScopes(from: string, to: string) {
+  (Object.keys(topologyLayoutScopes) as TopologyMode[]).forEach((mode) => {
+    const scoped = topologyLayoutScopes[mode];
+    if (!scoped[from]) return;
+    scoped[to] = { ...cloneTopologyLayout(scoped[to] || {}), ...cloneTopologyLayout(scoped[from]) };
+    delete scoped[from];
+  });
 }
 
 function saveTopologySnapshot(actor: string, reason: string, branch?: string) {
@@ -191,6 +331,7 @@ function saveTopologySnapshot(actor: string, reason: string, branch?: string) {
     branch: branch || undefined,
     links: cloneTopologyLinks(topologyLinks),
     layout: cloneTopologyLayout(topologyLayout),
+    layoutScopes: cloneTopologyLayoutScopes(topologyLayoutScopes),
   };
   topologySnapshots.push(snapshot);
   if (topologySnapshots.length > 60) {
@@ -216,7 +357,7 @@ function branchDeviceIdSet(branch: string): Set<string> {
 
 function filterTopologyByBranch(
   links: TopologyLink[],
-  layout: Record<string, { x: number; y: number }>,
+  layout: TopologyLayout,
   branch?: string
 ) {
   if (!branch) {
@@ -421,7 +562,14 @@ function isLikelyTrunkPort(name: string, alias: string, descr: string, ifType?: 
   const t = Number(ifType || 0);
   if (t === 161) return true; // ieee8023adLag
   if (!v) return false;
-  return /(^|\s)(trunk|trk|lag|port-channel|po\d+|etherchannel|bond|bridge-aggregation|ae\d+|lacp)\b/.test(v);
+  return /\b(trunk|trk\d*|lag\d*|port-?channel\d*|po\d+|etherchannel|bond\d*|bridge-aggregation\d*|ae\d+|lacp)\b/.test(v);
+}
+
+function isLikelyLagInterface(name: string, alias: string, descr: string, ifType?: string): boolean {
+  const v = `${name} ${alias} ${descr}`.trim().toLowerCase();
+  const t = Number(ifType || 0);
+  if (t === 161) return true; // ieee8023adLag
+  return /\b(trk\d*|lag\d*|port-?channel\d*|po\d+|etherchannel|bond\d*|bridge-aggregation\d*|ae\d+|lacp)\b/.test(v);
 }
 
 function parseCiscoIfIndexFromSuffix(suffix: string): string {
@@ -448,6 +596,74 @@ function buildInterfaceIndexSet(
     if (idx) out.add(idx);
   }
   return out;
+}
+
+type LagMembership = {
+  memberToAgg: Map<string, string>;
+  aggToMembers: Map<string, Set<string>>;
+  aggIndexes: Set<string>;
+};
+
+function emptyLagMembership(): LagMembership {
+  return { memberToAgg: new Map(), aggToMembers: new Map(), aggIndexes: new Set() };
+}
+
+async function getLagMembership(host: string): Promise<LagMembership> {
+  try {
+    // IEEE8023-LAG-MIB maps member ifIndex values to the active logical aggregator ifIndex.
+    const attachedAgg = await snmpWalk(host, "1.2.840.10006.300.43.1.2.1.1.13");
+    const out = emptyLagMembership();
+    for (const [memberRaw, aggRaw] of Object.entries(attachedAgg)) {
+      const member = String(memberRaw || "").trim();
+      const agg = String(aggRaw || "").trim();
+      if (!member || !agg || agg === "0" || agg === member) continue;
+      out.memberToAgg.set(member, agg);
+      out.aggIndexes.add(agg);
+      const members = out.aggToMembers.get(agg) || new Set<string>();
+      members.add(member);
+      out.aggToMembers.set(agg, members);
+    }
+    return out;
+  } catch {
+    return emptyLagMembership();
+  }
+}
+
+function getCiscoAggregateHints(ciscoHints: Set<string>, lag: LagMembership): Set<string> {
+  const out = new Set<string>();
+  ciscoHints.forEach((idx) => {
+    const agg = lag.memberToAgg.get(idx);
+    if (agg) out.add(agg);
+  });
+  return out;
+}
+
+function resolveTrunkState(
+  ifIndex: string,
+  ifOper: Record<string, string>,
+  ifAdmin: Record<string, string>,
+  lag: LagMembership = emptyLagMembership(),
+  hasCounters = false
+): { operStatus: number; adminStatus?: number; isDown: boolean; stateSource: string } {
+  const operRaw = ifOper[ifIndex];
+  const adminRaw = ifAdmin[ifIndex];
+  const oper = operRaw === undefined ? undefined : Number(operRaw);
+  const admin = adminRaw === undefined ? undefined : Number(adminRaw);
+  if (admin === 2) return { operStatus: oper || 2, adminStatus: admin, isDown: false, stateSource: "admin-down" };
+  if (oper === 1) return { operStatus: 1, adminStatus: admin, isDown: false, stateSource: "ifOperStatus" };
+
+  const members = Array.from(lag.aggToMembers.get(ifIndex) || []);
+  const activeMember = members.some((member) => Number(ifOper[member] || 0) === 1 && Number(ifAdmin[member] || 1) !== 2);
+  if (activeMember) {
+    // Cisco bundles can have reliable member state while the Port-Channel ifOperStatus is absent/stale.
+    return { operStatus: 1, adminStatus: admin, isDown: false, stateSource: "active-lag-member" };
+  }
+  if ((oper === undefined || !Number.isFinite(oper)) && admin === 1 && hasCounters) {
+    return { operStatus: 1, adminStatus: admin, isDown: false, stateSource: "admin-up-counters" };
+  }
+  const resolvedOper = Number.isFinite(oper) && oper ? Number(oper) : 0;
+  const down = admin !== 2 && (resolvedOper === 2 || resolvedOper === 7);
+  return { operStatus: resolvedOper, adminStatus: admin, isDown: down, stateSource: resolvedOper ? "ifOperStatus" : "unknown" };
 }
 
 async function getCiscoTrunkPortHints(host: string): Promise<Set<string>> {
@@ -479,20 +695,25 @@ async function getCiscoTrunkPortHints(host: string): Promise<Set<string>> {
 
 async function getTrunkPortCountFromSnmp(host: string): Promise<number> {
   try {
-    const [ifNames, ifAlias, ifDescr, ifType, ciscoHints] = await Promise.all([
+    const [ifNames, ifAlias, ifDescr, ifType, ciscoHints, lag] = await Promise.all([
       snmpWalk(host, "1.3.6.1.2.1.31.1.1.1.1"),
       snmpWalk(host, "1.3.6.1.2.1.31.1.1.1.18"),
       snmpWalk(host, "1.3.6.1.2.1.2.2.1.2"),
       snmpWalk(host, "1.3.6.1.2.1.2.2.1.3"),
       getCiscoTrunkPortHints(host),
+      getLagMembership(host),
     ]);
-    const indexes = buildInterfaceIndexSet([ifNames, ifAlias, ifDescr], ciscoHints);
+    const ciscoAggHints = getCiscoAggregateHints(ciscoHints, lag);
+    const indexes = buildInterfaceIndexSet([ifNames, ifAlias, ifDescr], new Set([...ciscoHints, ...ciscoAggHints, ...lag.aggIndexes]));
     let count = 0;
     for (const ifIndex of indexes) {
+      const aggIndex = lag.memberToAgg.get(ifIndex);
+      if (aggIndex && indexes.has(aggIndex)) continue;
       const ifName = String(ifNames[ifIndex] || `if${ifIndex}`).trim();
       const alias = String(ifAlias[ifIndex] || "").trim();
       const descr = String(ifDescr[ifIndex] || "").trim();
-      if (isLikelyTrunkPort(ifName, alias, descr, ifType[ifIndex]) || ciscoHints.has(ifIndex)) count += 1;
+      const isLag = isLikelyLagInterface(ifName, alias, descr, ifType[ifIndex]) || lag.aggIndexes.has(ifIndex);
+      if (isLikelyTrunkPort(ifName, alias, descr, ifType[ifIndex]) || isLag || ciscoHints.has(ifIndex) || ciscoAggHints.has(ifIndex)) count += 1;
     }
     return count;
   } catch {
@@ -574,6 +795,10 @@ type TrunkMetric = {
   ifName: string;
   description: string;
   operStatus: number;
+  adminStatus?: number;
+  isDown?: boolean;
+  memberIfIndexes?: string[];
+  stateSource?: string;
   inBps: number;
   outBps: number;
 };
@@ -1365,7 +1590,7 @@ async function resolveMetricValue(host: string, def: SnmpOidDef, scalarMap: Reco
 }
 
 async function collectTrunkMetrics(host: string): Promise<TrunkMetric[]> {
-  const [ifNames, ifAlias, ifDescr, ifType, ifOper, ifAdmin, ifSpeed, hcInOctets, hcOutOctets, inOctets32, outOctets32, ciscoHints] = await Promise.all([
+  const [ifNames, ifAlias, ifDescr, ifType, ifOper, ifAdmin, ifSpeed, hcInOctets, hcOutOctets, inOctets32, outOctets32, ciscoHints, lag] = await Promise.all([
     snmpWalk(host, "1.3.6.1.2.1.31.1.1.1.1"),
     snmpWalk(host, "1.3.6.1.2.1.31.1.1.1.18"),
     snmpWalk(host, "1.3.6.1.2.1.2.2.1.2"),
@@ -1378,9 +1603,12 @@ async function collectTrunkMetrics(host: string): Promise<TrunkMetric[]> {
     snmpWalk(host, "1.3.6.1.2.1.2.2.1.10"),
     snmpWalk(host, "1.3.6.1.2.1.2.2.1.16"),
     getCiscoTrunkPortHints(host),
+    getLagMembership(host),
   ]);
   const now = Date.now();
-  const indexes = Array.from(buildInterfaceIndexSet([ifAlias, ifDescr, ifNames, hcInOctets, inOctets32, ifOper, ifAdmin], ciscoHints));
+  const ciscoAggHints = getCiscoAggregateHints(ciscoHints, lag);
+  const indexes = Array.from(buildInterfaceIndexSet([ifAlias, ifDescr, ifNames, hcInOctets, inOctets32, ifOper, ifAdmin], new Set([...ciscoHints, ...ciscoAggHints, ...lag.aggIndexes])));
+  const indexSet = new Set(indexes);
   const trunks: TrunkMetric[] = [];
   const parseCounter = (value: unknown): bigint | null => {
     if (value === undefined || value === null) return null;
@@ -1393,10 +1621,13 @@ async function collectTrunkMetrics(host: string): Promise<TrunkMetric[]> {
     }
   };
   for (const idx of indexes) {
+    const aggIndex = lag.memberToAgg.get(idx);
+    if (aggIndex && indexSet.has(aggIndex)) continue;
     const alias = String(ifAlias[idx] || "").trim();
     const descr = String(ifDescr[idx] || "").trim();
     const ifName = String(ifNames[idx] || `if${idx}`).trim();
-    if (!isLikelyTrunkPort(ifName, alias, descr, ifType[idx]) && !ciscoHints.has(idx)) continue;
+    const isLag = isLikelyLagInterface(ifName, alias, descr, ifType[idx]) || lag.aggIndexes.has(idx);
+    if (!isLikelyTrunkPort(ifName, alias, descr, ifType[idx]) && !isLag && !ciscoHints.has(idx) && !ciscoAggHints.has(idx)) continue;
     const desc = alias || descr || ifName;
     const in64 = parseCounter(hcInOctets[idx]);
     const out64 = parseCounter(hcOutOctets[idx]);
@@ -1405,43 +1636,43 @@ async function collectTrunkMetrics(host: string): Promise<TrunkMetric[]> {
     const use64 = in64 !== null && out64 !== null;
     const inNow = use64 ? in64 : in32;
     const outNow = use64 ? out64 : out32;
-    if (inNow === null || outNow === null) continue;
-    const bits: 32 | 64 = use64 ? 64 : 32;
-    const key = `${host}:${idx}`;
-    const prev = trunkCounterCache.get(key);
     let inBps = 0;
     let outBps = 0;
-    if (prev && now > prev.ts && prev.bits === bits) {
-      const dt = (now - prev.ts) / 1000;
-      // Ignore too short/long sample windows to avoid bursty "random" rates.
-      if (dt >= 5 && dt <= 120) {
-        const wrapAt = bits === 64 ? (1n << 64n) : (1n << 32n);
-        const inDelta = inNow >= prev.inOctets ? (inNow - prev.inOctets) : ((wrapAt - prev.inOctets) + inNow);
-        const outDelta = outNow >= prev.outOctets ? (outNow - prev.outOctets) : ((wrapAt - prev.outOctets) + outNow);
-        inBps = Math.max(0, Math.round((Number(inDelta) * 8) / Math.max(dt, 1)));
-        outBps = Math.max(0, Math.round((Number(outDelta) * 8) / Math.max(dt, 1)));
-        const speed = Number(ifSpeed[idx] || 0);
-        // Drop physically impossible rates (counter glitches/resets).
-        if (Number.isFinite(speed) && speed > 0) {
-          const hardCap = speed * 1.2;
-          if (inBps > hardCap) inBps = 0;
-          if (outBps > hardCap) outBps = 0;
+    const hasCounters = inNow !== null && outNow !== null;
+    if (hasCounters) {
+      const bits: 32 | 64 = use64 ? 64 : 32;
+      const key = `${host}:${idx}`;
+      const prev = trunkCounterCache.get(key);
+      if (prev && now > prev.ts && prev.bits === bits) {
+        const dt = (now - prev.ts) / 1000;
+        // Ignore too short/long sample windows to avoid bursty "random" rates.
+        if (dt >= 5 && dt <= 120) {
+          const wrapAt = bits === 64 ? (1n << 64n) : (1n << 32n);
+          const inDelta = inNow >= prev.inOctets ? (inNow - prev.inOctets) : ((wrapAt - prev.inOctets) + inNow);
+          const outDelta = outNow >= prev.outOctets ? (outNow - prev.outOctets) : ((wrapAt - prev.outOctets) + outNow);
+          inBps = Math.max(0, Math.round((Number(inDelta) * 8) / Math.max(dt, 1)));
+          outBps = Math.max(0, Math.round((Number(outDelta) * 8) / Math.max(dt, 1)));
+          const speed = Number(ifSpeed[idx] || 0);
+          // Drop physically impossible rates (counter glitches/resets).
+          if (Number.isFinite(speed) && speed > 0) {
+            const hardCap = speed * 1.2;
+            if (inBps > hardCap) inBps = 0;
+            if (outBps > hardCap) outBps = 0;
+          }
         }
       }
+      trunkCounterCache.set(key, { inOctets: inNow, outOctets: outNow, ts: now, bits });
     }
-    trunkCounterCache.set(key, { inOctets: inNow, outOctets: outNow, ts: now, bits });
-    let operStatus = Number(ifOper[idx] || 0);
-    if (!Number.isFinite(operStatus) || operStatus <= 0) {
-      const adminStatus = Number(ifAdmin[idx] || 0);
-      // Some Cisco Port-Channel indexes are visible in VTP/counters but occasionally miss ifOperStatus.
-      // Treat admin-up trunks with valid counters as up to avoid false down alerts.
-      operStatus = adminStatus === 1 ? 1 : 2;
-    }
+    const state = resolveTrunkState(idx, ifOper, ifAdmin, lag, hasCounters);
     trunks.push({
       ifIndex: idx,
       ifName,
       description: desc,
-      operStatus,
+      operStatus: state.operStatus,
+      adminStatus: state.adminStatus,
+      isDown: state.isDown,
+      memberIfIndexes: Array.from(lag.aggToMembers.get(idx) || []),
+      stateSource: state.stateSource,
       inBps,
       outBps,
     });
@@ -1495,7 +1726,7 @@ function runSshReadonlyCommands(host: string, username: string, password: string
         };
         runNext(0);
       })
-      .on("error", (e) => reject(e))
+      .on("error", (e) => reject(new Error(normalizeSshErrorForClient(e))))
       .connect({
         host,
         port,
@@ -1523,6 +1754,9 @@ function parseTrunksFromSshText(text: string): TrunkMetric[] {
       ifName,
       description: "ssh-readonly",
       operStatus: isUp ? 1 : 2,
+      adminStatus: 1,
+      isDown: !isUp,
+      stateSource: "ssh-readonly",
       inBps: 0,
       outBps: 0,
     });
@@ -1766,6 +2000,11 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
     return /\b(fc\d+\/\d+|fc\d+|\d+\/\d+|fibre|fiber|san|port\s*\d+|port\d+|sfp)\b/.test(v);
   };
   const norm = (v: string) => v.toLowerCase().replace(/\s+/g, " ").trim();
+  const shouldUseTopologyPort = (ifIndex: string, ifOperMap: Record<string, string>, ifAdminMap: Record<string, string>, lag: LagMembership) => {
+    if (!ifIndex || (ifOperMap[ifIndex] === undefined && ifAdminMap[ifIndex] === undefined)) return true;
+    const state = resolveTrunkState(ifIndex, ifOperMap, ifAdminMap, lag);
+    return !state.isDown;
+  };
   const genericDevices = devices.filter((d) => !isFcSwitch(d));
   const findDeviceByNameHint = (hint: string, selfId: string): InventoryItem | undefined => {
     const h = norm(hint);
@@ -1789,20 +2028,28 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
 
   await forEachWithLimit(genericDevices, 12, async (dev) => {
     try {
-      const [ifNameMap, ifAliasMap, ifDescrMap, ifTypeMap, ciscoHints] = await Promise.all([
+      const [ifNameMap, ifAliasMap, ifDescrMap, ifTypeMap, ifOperMap, ifAdminMap, ciscoHints, lag] = await Promise.all([
         snmpWalk(dev.ip, "1.3.6.1.2.1.31.1.1.1.1"), // ifName
         snmpWalk(dev.ip, "1.3.6.1.2.1.31.1.1.1.18"), // ifAlias/Description
         snmpWalk(dev.ip, "1.3.6.1.2.1.2.2.1.2"), // ifDescr (fallback for old gear)
         snmpWalk(dev.ip, "1.3.6.1.2.1.2.2.1.3"), // ifType
+        snmpWalk(dev.ip, "1.3.6.1.2.1.2.2.1.8"), // ifOperStatus
+        snmpWalk(dev.ip, "1.3.6.1.2.1.2.2.1.7"), // ifAdminStatus
         getCiscoTrunkPortHints(dev.ip),
+        getLagMembership(dev.ip),
       ]);
-      const indexes = buildInterfaceIndexSet([ifAliasMap, ifDescrMap, ifNameMap], ciscoHints);
+      const ciscoAggHints = getCiscoAggregateHints(ciscoHints, lag);
+      const indexes = buildInterfaceIndexSet([ifAliasMap, ifDescrMap, ifNameMap], new Set([...ciscoHints, ...ciscoAggHints, ...lag.aggIndexes]));
       for (const ifIndex of indexes) {
+        const aggIndex = lag.memberToAgg.get(ifIndex);
+        if (aggIndex && indexes.has(aggIndex)) continue;
         const alias = String(ifAliasMap[ifIndex] || "").trim();
         const descr = String(ifDescrMap[ifIndex] || "").trim();
         const ifName = String(ifNameMap[ifIndex] || `if${ifIndex}`).trim();
         const trunkHint = alias || descr;
-        if (!isLikelyTrunkPort(ifName, alias, descr, ifTypeMap[ifIndex]) && !ciscoHints.has(ifIndex)) continue;
+        const isLag = isLikelyLagInterface(ifName, alias, descr, ifTypeMap[ifIndex]) || lag.aggIndexes.has(ifIndex);
+        if (!isLikelyTrunkPort(ifName, alias, descr, ifTypeMap[ifIndex]) && !isLag && !ciscoHints.has(ifIndex) && !ciscoAggHints.has(ifIndex)) continue;
+        if (!shouldUseTopologyPort(ifIndex, ifOperMap, ifAdminMap, lag)) continue;
         const aliasNorm = norm(trunkHint);
         const peer = findDeviceByNameHint(aliasNorm, dev.id);
         if (!peer) continue;
@@ -1816,24 +2063,33 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
   // Fallback path: LLDP neighbor correlation for trunk-like local ports.
   await forEachWithLimit(genericDevices, 10, async (dev) => {
     try {
-      const [ifNameMap, ifAliasMap, ifDescrMap, ifTypeMap, basePortIfIndex, lldpLocPortId, lldpRemSysName, ciscoHints] = await Promise.all([
+      const [ifNameMap, ifAliasMap, ifDescrMap, ifTypeMap, ifOperMap, ifAdminMap, basePortIfIndex, lldpLocPortId, lldpRemSysName, ciscoHints, lag] = await Promise.all([
         snmpWalk(dev.ip, "1.3.6.1.2.1.31.1.1.1.1"), // ifName
         snmpWalk(dev.ip, "1.3.6.1.2.1.31.1.1.1.18"), // ifAlias
         snmpWalk(dev.ip, "1.3.6.1.2.1.2.2.1.2"), // ifDescr
         snmpWalk(dev.ip, "1.3.6.1.2.1.2.2.1.3"), // ifType
+        snmpWalk(dev.ip, "1.3.6.1.2.1.2.2.1.8"), // ifOperStatus
+        snmpWalk(dev.ip, "1.3.6.1.2.1.2.2.1.7"), // ifAdminStatus
         snmpWalk(dev.ip, "1.3.6.1.2.1.17.1.4.1.2"), // dot1dBasePortIfIndex
         snmpWalk(dev.ip, "1.0.8802.1.1.2.1.3.7.1.3"), // lldpLocPortId
         snmpWalk(dev.ip, "1.0.8802.1.1.2.1.4.1.1.9"), // lldpRemSysName
         getCiscoTrunkPortHints(dev.ip),
+        getLagMembership(dev.ip),
       ]);
 
       const trunkIfIndexes = new Set<string>();
-      const allIf = buildInterfaceIndexSet([ifNameMap, ifAliasMap, ifDescrMap], ciscoHints);
+      const ciscoAggHints = getCiscoAggregateHints(ciscoHints, lag);
+      const allIf = buildInterfaceIndexSet([ifNameMap, ifAliasMap, ifDescrMap], new Set([...ciscoHints, ...ciscoAggHints, ...lag.aggIndexes]));
       for (const ifIndex of allIf) {
+        const aggIndex = lag.memberToAgg.get(ifIndex);
+        if (aggIndex && allIf.has(aggIndex)) continue;
         const ifName = String(ifNameMap[ifIndex] || `if${ifIndex}`).trim();
         const alias = String(ifAliasMap[ifIndex] || "").trim();
         const descr = String(ifDescrMap[ifIndex] || "").trim();
-        if (isLikelyTrunkPort(ifName, alias, descr, ifTypeMap[ifIndex]) || ciscoHints.has(ifIndex)) trunkIfIndexes.add(ifIndex);
+        const isLag = isLikelyLagInterface(ifName, alias, descr, ifTypeMap[ifIndex]) || lag.aggIndexes.has(ifIndex);
+        if ((isLikelyTrunkPort(ifName, alias, descr, ifTypeMap[ifIndex]) || isLag || ciscoHints.has(ifIndex) || ciscoAggHints.has(ifIndex)) && shouldUseTopologyPort(ifIndex, ifOperMap, ifAdminMap, lag)) {
+          trunkIfIndexes.add(ifIndex);
+        }
       }
 
       for (const [suffix, sysNameRaw] of Object.entries(lldpRemSysName)) {
@@ -1843,7 +2099,9 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
         if (parts.length < 3) continue;
         const localPortNum = parts[1];
         const ifIndexFromBridge = String(basePortIfIndex[localPortNum] || "").trim();
-        const ifIndex = ifIndexFromBridge || "";
+        let ifIndex = ifIndexFromBridge || "";
+        const aggregateIfIndex = ifIndex ? lag.memberToAgg.get(ifIndex) : undefined;
+        if (aggregateIfIndex && allIf.has(aggregateIfIndex)) ifIndex = aggregateIfIndex;
 
         let localIfName = "";
         if (ifIndex) {
@@ -1861,6 +2119,7 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
         // If trunk-like interfaces were identified on device, prefer LLDP edges on those ports.
         // If not, allow all LLDP neighbors as fallback (some vendors don't mark trunk in ifAlias/ifDescr).
         if (ifIndex && trunkIfIndexes.size > 0 && !trunkIfIndexes.has(ifIndex)) continue;
+        if (ifIndex && !shouldUseTopologyPort(ifIndex, ifOperMap, ifAdminMap, lag)) continue;
         const peer = findDeviceByNameHint(sysName, dev.id);
         if (!peer) continue;
         directed.push({ source: dev.id, target: peer.id, portA: localIfName, raw: `LLDP:${sysName}` });
@@ -1874,13 +2133,19 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
   // Useful for MikroTik and other platforms where trunk keywords are absent but comments are present.
   await forEachWithLimit(genericDevices, 12, async (dev) => {
     try {
-      const [ifNameMap, ifAliasMap, ifDescrMap] = await Promise.all([
+      const [ifNameMap, ifAliasMap, ifDescrMap, ifOperMap, ifAdminMap, lag] = await Promise.all([
         snmpWalk(dev.ip, "1.3.6.1.2.1.31.1.1.1.1"), // ifName
         snmpWalk(dev.ip, "1.3.6.1.2.1.31.1.1.1.18"), // ifAlias / comment
         snmpWalk(dev.ip, "1.3.6.1.2.1.2.2.1.2"), // ifDescr
+        snmpWalk(dev.ip, "1.3.6.1.2.1.2.2.1.8"), // ifOperStatus
+        snmpWalk(dev.ip, "1.3.6.1.2.1.2.2.1.7"), // ifAdminStatus
+        getLagMembership(dev.ip),
       ]);
-      const indexes = new Set([...Object.keys(ifNameMap), ...Object.keys(ifAliasMap), ...Object.keys(ifDescrMap)]);
+      const indexes = new Set([...Object.keys(ifNameMap), ...Object.keys(ifAliasMap), ...Object.keys(ifDescrMap), ...lag.aggIndexes]);
       for (const ifIndex of indexes) {
+        const aggIndex = lag.memberToAgg.get(ifIndex);
+        if (aggIndex && indexes.has(aggIndex)) continue;
+        if (!shouldUseTopologyPort(ifIndex, ifOperMap, ifAdminMap, lag)) continue;
         const ifName = String(ifNameMap[ifIndex] || `if${ifIndex}`).trim();
         const alias = String(ifAliasMap[ifIndex] || "").trim();
         const descr = String(ifDescrMap[ifIndex] || "").trim();
@@ -2612,9 +2877,7 @@ async function startServer() {
         return res.status(403).json({ error: "Access Denied: Insufficient permissions." });
       }
       inventory = inventory.filter((item) => !ids.includes(item.id));
-      Object.keys(topologyLayout).forEach((id) => {
-        if (ids.includes(id)) delete topologyLayout[id];
-      });
+      deleteTopologyLayoutIds(ids);
     } else {
       inventory = inventory.map(item => {
         if (ids.includes(item.id)) {
@@ -3044,9 +3307,11 @@ async function startServer() {
     return res.json({ success: true, runs: out.runs, profiles: discoveryWatchProfiles });
   });
 
-  app.get("/api/topology/links", checkRole(["admin", "operator", "viewer"]), (_req, res) => {
+  app.get("/api/topology/links", checkRole(["admin", "operator", "viewer"]), (req, res) => {
+    const branch = String(req.query.branch || "").trim();
+    const topologyMode = normalizeTopologyMode(req.query.topologyMode);
     topologyLinks = topologyLinks.map((l) => ensureTopologyLinkId(l));
-    res.json({ links: topologyLinks, layout: topologyLayout });
+    res.json({ links: topologyLinks, layout: getTopologyLayoutForScope(topologyMode, branch || undefined) });
   });
 
   app.get("/api/topology/versions", checkRole(["admin", "operator", "viewer"]), (_req, res) => {
@@ -3066,10 +3331,11 @@ async function startServer() {
   app.get("/api/topology/versions/:id/preview", checkRole(["admin", "operator", "viewer"]), (req, res) => {
     const id = String(req.params.id || "").trim();
     const branch = String(req.query.branch || "").trim();
+    const topologyMode = normalizeTopologyMode(req.query.topologyMode);
     const snapshot = topologySnapshots.find((v) => v.id === id);
     if (!snapshot) return res.status(404).json({ success: false, error: "Topology version not found" });
-    const currentScoped = filterTopologyByBranch(topologyLinks, topologyLayout, branch || undefined);
-    const targetScoped = filterTopologyByBranch(snapshot.links, snapshot.layout, branch || undefined);
+    const currentScoped = filterTopologyByBranch(topologyLinks, getTopologyLayoutForScope(topologyMode, branch || undefined), branch || undefined);
+    const targetScoped = filterTopologyByBranch(snapshot.links, getSnapshotLayoutForScope(snapshot, topologyMode, branch || undefined), branch || undefined);
     const summary = diffTopologyState(currentScoped, targetScoped);
     return res.json({
       success: true,
@@ -3080,7 +3346,7 @@ async function startServer() {
         reason: snapshot.reason,
         branch: snapshot.branch,
       },
-      scope: branch || null,
+      scope: { branch: branch || null, topologyMode },
       summary,
     });
   });
@@ -3088,6 +3354,7 @@ async function startServer() {
   app.post("/api/topology/restore", checkRole(["admin", "operator"]), (req, res) => {
     const id = String(req.body?.versionId || "").trim();
     const branch = String(req.body?.branch || "").trim();
+    const topologyMode = normalizeTopologyMode(req.body?.topologyMode);
     const actor = actorName(req);
     if (!id) return res.status(400).json({ success: false, error: "versionId is required" });
     const snapshot = topologySnapshots.find((v) => v.id === id);
@@ -3096,28 +3363,26 @@ async function startServer() {
     saveTopologySnapshot(actor, "topology.restore.pre", branch || undefined);
     if (!branch) {
       topologyLinks = cloneTopologyLinks(snapshot.links).map((l) => ensureTopologyLinkId(l));
-      topologyLayout = cloneTopologyLayout(snapshot.layout);
+      setTopologyLayoutForScope(topologyMode, undefined, getSnapshotLayoutForScope(snapshot, topologyMode));
     } else {
       const ids = branchDeviceIdSet(branch);
       const currentExternalLinks = topologyLinks.filter((l) => !(ids.has(l.source) && ids.has(l.target)));
       const targetBranchLinks = snapshot.links.filter((l) => ids.has(l.source) && ids.has(l.target));
       topologyLinks = [...currentExternalLinks, ...cloneTopologyLinks(targetBranchLinks).map((l) => ensureTopologyLinkId(l))];
-
-      const nextLayout = cloneTopologyLayout(topologyLayout);
-      Object.keys(nextLayout).forEach((nodeId) => {
-        if (ids.has(nodeId)) delete nextLayout[nodeId];
-      });
-      Object.entries(snapshot.layout || {}).forEach(([nodeId, p]) => {
-        if (ids.has(nodeId)) nextLayout[nodeId] = { x: Number(p.x), y: Number(p.y) };
-      });
-      topologyLayout = nextLayout;
+      setTopologyLayoutForScope(topologyMode, branch, getSnapshotLayoutForScope(snapshot, topologyMode, branch));
     }
     logAction(actor, "Topology Restore", `Restored version ${snapshot.id}${branch ? ` (branch: ${branch})` : ""}`, "inventory");
-    return res.json({ success: true, restored: { id: snapshot.id, createdAt: snapshot.createdAt, reason: snapshot.reason }, links: topologyLinks, layout: topologyLayout });
+    return res.json({
+      success: true,
+      restored: { id: snapshot.id, createdAt: snapshot.createdAt, reason: snapshot.reason },
+      links: topologyLinks,
+      layout: getTopologyLayoutForScope(topologyMode, branch || undefined),
+    });
   });
 
   app.post("/api/topology/undo", checkRole(["admin", "operator"]), (req, res) => {
     const branch = String(req.body?.branch || "").trim();
+    const topologyMode = normalizeTopologyMode(req.body?.topologyMode);
     const actor = actorName(req);
     if (!topologySnapshots.length) {
       return res.status(404).json({ success: false, error: "No topology versions available" });
@@ -3135,15 +3400,24 @@ async function startServer() {
     const snapshot = topologySnapshots[idx];
     topologySnapshots.splice(idx, 1);
     topologyLinks = cloneTopologyLinks(snapshot.links).map((l) => ensureTopologyLinkId(l));
-    topologyLayout = cloneTopologyLayout(snapshot.layout);
+    setTopologyLayoutForScope(topologyMode, branch || undefined, getSnapshotLayoutForScope(snapshot, topologyMode, branch || undefined));
     logAction(actor, "Topology Undo", `Restored version ${snapshot.id}${branch ? ` (branch: ${branch})` : ""}`, "inventory");
-    return res.json({ success: true, restored: { id: snapshot.id, createdAt: snapshot.createdAt, reason: snapshot.reason }, links: topologyLinks, layout: topologyLayout });
+    return res.json({
+      success: true,
+      restored: { id: snapshot.id, createdAt: snapshot.createdAt, reason: snapshot.reason },
+      links: topologyLinks,
+      layout: getTopologyLayoutForScope(topologyMode, branch || undefined),
+    });
   });
 
   app.post("/api/topology/links/rebuild", checkRole(["admin", "operator"]), async (req, res) => {
     try {
       const branch = String(req.body?.branch || "").trim();
+      const topologyMode = normalizeTopologyMode(req.body?.topologyMode);
       const actor = actorName(req);
+      if (topologyMode === "fc") {
+        return res.json({ success: true, links: topologyLinks, layout: getTopologyLayoutForScope(topologyMode, branch || undefined) });
+      }
       saveTopologySnapshot(actor, "topology.rebuild", branch || undefined);
       const links = await inferTopologyLinksFromTrunkDescriptions(branch || undefined);
       if (branch) {
@@ -3229,7 +3503,7 @@ async function startServer() {
         `Auto-built ${links.length} links from Trunk descriptions${branch ? ` (branch: ${branch})` : ""}`,
         "inventory"
       );
-      return res.json({ success: true, links: topologyLinks, layout: topologyLayout });
+      return res.json({ success: true, links: topologyLinks, layout: getTopologyLayoutForScope(topologyMode, branch || undefined) });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       return res.status(500).json({ success: false, error: msg });
@@ -3278,6 +3552,7 @@ async function startServer() {
     discoveryWatchProfiles = discoveryWatchProfiles.map((profile) =>
       String(profile.branch || "").trim() === from ? { ...profile, branch: to } : profile
     );
+    renameTopologyLayoutBranchScopes(from, to);
 
     const actor = actorName(req);
     logAction(actor, "Rename Branch", `${from} -> ${to}, affected: ${renamed}`, "inventory");
@@ -3402,20 +3677,28 @@ async function startServer() {
   });
 
   app.post("/api/topology/layout", checkRole(["admin", "operator"]), (req, res) => {
-    const body = req.body as { positions?: Record<string, { x: number; y: number }>; branch?: string };
+    const body = req.body as {
+      positions?: TopologyLayout;
+      branch?: string;
+      topologyMode?: string;
+      replace?: boolean;
+    };
     const positions = body?.positions || {};
     const branch = String(body?.branch || "").trim();
+    const topologyMode = normalizeTopologyMode(body?.topologyMode);
     const branchIds = branch ? branchDeviceIdSet(branch) : null;
     const actor = actorName(req);
-    const hasIncoming = Object.keys(positions).length > 0;
-    if (hasIncoming) saveTopologySnapshot(actor, "topology.layout.update", branch || undefined);
+    const scopedPositions: TopologyLayout = {};
     for (const [id, pos] of Object.entries(positions)) {
       if (branchIds && !branchIds.has(id)) continue;
       if (Number.isFinite(pos?.x) && Number.isFinite(pos?.y)) {
-        topologyLayout[id] = { x: Number(pos.x), y: Number(pos.y) };
+        scopedPositions[id] = { x: Number(pos.x), y: Number(pos.y) };
       }
     }
-    res.json({ success: true, layout: topologyLayout });
+    const hasIncoming = Object.keys(scopedPositions).length > 0;
+    if (hasIncoming) saveTopologySnapshot(actor, "topology.layout.update", branch || undefined);
+    const layout = mergeTopologyLayoutForScope(topologyMode, branch || undefined, scopedPositions, Boolean(body?.replace));
+    res.json({ success: true, layout });
   });
 
   app.get("/api/config/snmp", checkRole(['admin', 'operator']), (_req, res) => {
@@ -3498,7 +3781,7 @@ async function startServer() {
       },
       trunkSummary: {
         total: trunkFlat.length,
-        down: trunkFlat.filter((t) => t.operStatus !== 1).length,
+        down: trunkFlat.filter((t) => t.isDown === true).length,
         topByTraffic: trunkFlat
           .map((t) => ({ ...t, totalBps: t.inBps + t.outBps }))
           .sort((a, b) => b.totalBps - a.totalBps)
@@ -3623,7 +3906,10 @@ async function startServer() {
               rows: 40,
             },
             (err, stream) => {
-            if (err) return socket.emit("ssh:data", { sessionId, data: `\r\n*** SSH Shell Error: ${err.message} ***\r\n` });
+            if (err) {
+              const message = normalizeSshErrorForClient(err);
+              return socket.emit("ssh:data", { sessionId, data: `\r\n*** SSH Shell Error: ${message} ***\r\n` });
+            }
             
             const session = sessions.get(sessionId);
             if (session) session.stream = stream;
@@ -3641,7 +3927,9 @@ async function startServer() {
           );
         })
         .on("error", (err) => {
-          socket.emit("ssh:data", { sessionId, data: `\r\n*** SSH Error: ${err.message} ***\r\n` });
+          const message = normalizeSshErrorForClient(err);
+          socket.emit("ssh:data", { sessionId, data: `\r\n*** SSH Error: ${message} ***\r\n` });
+          socket.emit("ssh:status", { sessionId, status: "disconnected" });
           sessions.delete(sessionId);
         })
         .connect({
