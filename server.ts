@@ -2457,6 +2457,14 @@ async function startServer() {
     res.json({ config: systemConfig });
   });
 
+  // Public lightweight config for pre-auth UI (login/language bootstrap).
+  app.get("/api/config/public", (_req, res) => {
+    res.json({
+      defaultLanguage: systemConfig.defaultLanguage || "ru",
+      siteLabel: systemConfig.siteLabel || "UNSET",
+    });
+  });
+
   app.post("/api/config/system", checkRole(['admin']), (req, res) => {
     const actor = actorName(req);
     systemConfig = { ...systemConfig, ...req.body };

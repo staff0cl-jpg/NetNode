@@ -507,11 +507,11 @@ export const LanguageProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     // Only fetch server default if user hasn't set an explicit preference
     const userPref = localStorage.getItem('netnode_lang');
     if (!userPref) {
-      fetch('/api/config/system')
+      fetch('/api/config/public')
         .then(res => res.json())
         .then(data => {
-          if (data.config && data.config.defaultLanguage) {
-            setLanguage(data.config.defaultLanguage as Language);
+          if (data && data.defaultLanguage) {
+            setLanguage(data.defaultLanguage as Language);
           }
         })
         .catch(() => {});
