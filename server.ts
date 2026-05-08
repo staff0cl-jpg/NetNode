@@ -631,19 +631,36 @@ async function forEachWithLimit<T>(items: T[], limit: number, worker: (item: T, 
   await Promise.all(jobs);
 }
 
+function safeErrorDetail(error: unknown, fallback = "Unknown error"): string {
+  const raw = error instanceof Error ? error.message : String(error || fallback);
+  return raw
+    .replace(/(password|community|secret|token|passphrase)\s*[:=]\s*[^,\s;]+/gi, "$1=<redacted>")
+    .replace(/(ssh:\/\/[^:\s]+:)[^@\s]+@/gi, "$1<redacted>@")
+    .slice(0, 500);
+}
+
+function clientErrorPayload(source: string, error: unknown, extra: Record<string, unknown> = {}) {
+  return {
+    success: false,
+    source,
+    error: safeErrorDetail(error),
+    ...extra,
+  };
+}
+
 function isLikelyTrunkPort(name: string, alias: string, descr: string, ifType?: string): boolean {
   const v = `${name} ${alias} ${descr}`.trim().toLowerCase();
   const t = Number(ifType || 0);
   if (t === 161) return true; // ieee8023adLag
   if (!v) return false;
-  return /\b(trunk|trk\d*|lag\d*|port-?\s*channel\s*\d*|po\s*\d+|etherchannel|bond\d*|bridge-aggregation\d*|ae\d+|lacp)\b/.test(v);
+  return /\b(trunk|trk[\s_-]*\d*|lag[\s_-]*\d*|port[\s_-]*channel[\s_-]*\d*|po[\s_-]*\d+|bundle[\s_-]*ether[\s_-]*\d+|be[\s_-]*\d+|etherchannel|bond[\s_-]*\d*|bridge[\s_-]*aggregation[\s_-]*\d*|ae[\s_-]*\d+|lacp)\b/.test(v);
 }
 
 function isLikelyLagInterface(name: string, alias: string, descr: string, ifType?: string): boolean {
   const v = `${name} ${alias} ${descr}`.trim().toLowerCase();
   const t = Number(ifType || 0);
   if (t === 161) return true; // ieee8023adLag
-  return /\b(trk\d*|lag\d*|port-?\s*channel\s*\d*|po\s*\d+|etherchannel|bond\d*|bridge-aggregation\d*|ae\d+|lacp)\b/.test(v);
+  return /\b(trk[\s_-]*\d*|lag[\s_-]*\d*|port[\s_-]*channel[\s_-]*\d*|po[\s_-]*\d+|bundle[\s_-]*ether[\s_-]*\d+|be[\s_-]*\d+|etherchannel|bond[\s_-]*\d*|bridge[\s_-]*aggregation[\s_-]*\d*|ae[\s_-]*\d+|lacp)\b/.test(v);
 }
 
 function parseCiscoIfIndexFromSuffix(suffix: string): string {
@@ -688,6 +705,7 @@ async function getLagMembership(host: string): Promise<LagMembership> {
       // IEEE8023-LAG-MIB maps member ifIndex values to the active logical aggregator ifIndex.
       snmpWalk(host, "1.2.840.10006.300.43.1.2.1.1.13"),
       // IF-MIB ifStackStatus often exposes Cisco EtherChannel as Port-Channel -> physical member.
+      // Some platforms report the inverse orientation, so resolve the aggregate side by interface identity.
       snmpWalk(host, "1.3.6.1.2.1.31.1.2.1.3"),
       snmpWalk(host, "1.3.6.1.2.1.31.1.1.1.1"),
       snmpWalk(host, "1.3.6.1.2.1.31.1.1.1.18"),
@@ -720,7 +738,16 @@ async function getLagMembership(host: string): Promise<LagMembership> {
           String(ifDescr[higher] || "").trim(),
           ifType[higher]
         );
-      if (higherLooksLag) addMembership(lower, higher);
+      const lowerLooksLag =
+        out.aggIndexes.has(lower) ||
+        isLikelyLagInterface(
+          String(ifNames[lower] || "").trim(),
+          String(ifAlias[lower] || "").trim(),
+          String(ifDescr[lower] || "").trim(),
+          ifType[lower]
+        );
+      if (higherLooksLag && !lowerLooksLag) addMembership(lower, higher);
+      if (lowerLooksLag && !higherLooksLag) addMembership(higher, lower);
     }
     return out;
   } catch {
@@ -743,26 +770,26 @@ function resolveTrunkState(
   ifAdmin: Record<string, string>,
   lag: LagMembership = emptyLagMembership(),
   hasCounters = false
-): { operStatus: number; adminStatus?: number; isDown: boolean; stateSource: string } {
+): { operStatus: number; adminStatus?: number; isActive: boolean; isDown: boolean; stateSource: string } {
   const operRaw = ifOper[ifIndex];
   const adminRaw = ifAdmin[ifIndex];
   const oper = operRaw === undefined ? undefined : Number(operRaw);
   const admin = adminRaw === undefined ? undefined : Number(adminRaw);
-  if (admin === 2) return { operStatus: oper || 2, adminStatus: admin, isDown: false, stateSource: "admin-down" };
-  if (oper === 1) return { operStatus: 1, adminStatus: admin, isDown: false, stateSource: "ifOperStatus" };
+  if (oper === 1) return { operStatus: 1, adminStatus: admin, isActive: true, isDown: false, stateSource: "ifOperStatus" };
 
   const members = Array.from(lag.aggToMembers.get(ifIndex) || []);
   const activeMember = members.some((member) => Number(ifOper[member] || 0) === 1 && Number(ifAdmin[member] || 1) !== 2);
   if (activeMember) {
-    // Cisco bundles can have reliable member state while the Port-Channel ifOperStatus is absent/stale.
-    return { operStatus: 1, adminStatus: admin, isDown: false, stateSource: "active-lag-member" };
+    // Cisco bundles can have reliable member state while the Port-Channel ifOper/admin status is absent or stale.
+    return { operStatus: 1, adminStatus: admin, isActive: true, isDown: false, stateSource: "active-lag-member" };
   }
+  if (admin === 2) return { operStatus: oper || 2, adminStatus: admin, isActive: false, isDown: false, stateSource: "admin-down" };
   if ((oper === undefined || !Number.isFinite(oper)) && admin === 1 && hasCounters) {
-    return { operStatus: 1, adminStatus: admin, isDown: false, stateSource: "admin-up-counters" };
+    return { operStatus: 1, adminStatus: admin, isActive: true, isDown: false, stateSource: "admin-up-counters" };
   }
   const resolvedOper = Number.isFinite(oper) && oper ? Number(oper) : 0;
   const down = admin !== 2 && (resolvedOper === 2 || resolvedOper === 7);
-  return { operStatus: resolvedOper, adminStatus: admin, isDown: down, stateSource: resolvedOper ? "ifOperStatus" : "unknown" };
+  return { operStatus: resolvedOper, adminStatus: admin, isActive: false, isDown: down, stateSource: resolvedOper ? "ifOperStatus" : "unknown" };
 }
 
 async function getCiscoTrunkPortHints(host: string): Promise<Set<string>> {
@@ -895,6 +922,7 @@ type TrunkMetric = {
   description: string;
   operStatus: number;
   adminStatus?: number;
+  isActive?: boolean;
   isDown?: boolean;
   memberIfIndexes?: string[];
   stateSource?: string;
@@ -1833,6 +1861,7 @@ async function collectTrunkMetrics(host: string): Promise<TrunkMetric[]> {
       description: desc,
       operStatus: state.operStatus,
       adminStatus: state.adminStatus,
+      isActive: state.isActive,
       isDown: state.isDown,
       memberIfIndexes: Array.from(lag.aggToMembers.get(idx) || []),
       stateSource: state.stateSource,
@@ -1920,6 +1949,40 @@ function resolveBackupTargets(config: BackupConfig): InventoryItem[] {
     if (branches.size && !branches.has(String(d.branch || "").toLowerCase())) return false;
     return true;
   });
+}
+
+function validateBackupRunReadiness():
+  | { ok: true; targetCount: number }
+  | { ok: false; status: number; error: string; remediation: string; targetCount?: number } {
+  const profile = getActiveSshReadonlyProfile();
+  if (!profile) {
+    return {
+      ok: false,
+      status: 400,
+      error: "SSH readonly profile is not configured for backups.",
+      remediation: "Configure a temporary SSH readonly profile before running backups.",
+    };
+  }
+  const root = String(backupConfig.networkSharePath || "").trim();
+  if (!root) {
+    return {
+      ok: false,
+      status: 400,
+      error: "Backup network share path is not configured.",
+      remediation: "Set a writable backup path in Automation > Backup before starting a run.",
+    };
+  }
+  const targets = resolveBackupTargets(backupConfig);
+  if (targets.length === 0) {
+    return {
+      ok: false,
+      status: 400,
+      error: "Backup scope matched 0 devices.",
+      remediation: "Adjust the backup scope or add inventory devices before starting a run.",
+      targetCount: 0,
+    };
+  }
+  return { ok: true, targetCount: targets.length };
 }
 
 async function runBackupJob(actor: string): Promise<BackupHistoryItem> {
@@ -2013,6 +2076,7 @@ function parseTrunksFromSshText(text: string): TrunkMetric[] {
       description: "ssh-readonly",
       operStatus: isUp ? 1 : 2,
       adminStatus: 1,
+      isActive: isUp,
       isDown: !isUp,
       stateSource: "ssh-readonly",
       inBps: 0,
@@ -2259,10 +2323,32 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
     return /\b(fc\d+\/\d+|fc\d+|\d+\/\d+|fibre|fiber|san|port\s*\d+|port\d+|sfp)\b/.test(v);
   };
   const norm = (v: string) => v.toLowerCase().replace(/\s+/g, " ").trim();
+  const normalizeIfNameHint = (v: string) =>
+    String(v || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[\s_]+/g, "")
+      .replace(/port-?channel/g, "po")
+      .replace(/bundle-?ether/g, "be")
+      .replace(/hundredgigabitethernet/g, "hu")
+      .replace(/fortygigabitethernet/g, "fo")
+      .replace(/tengigabitethernet/g, "te")
+      .replace(/gigabitethernet/g, "gi")
+      .replace(/fastethernet/g, "fa")
+      .replace(/ethernet/g, "eth");
   const shouldUseTopologyPort = (ifIndex: string, ifOperMap: Record<string, string>, ifAdminMap: Record<string, string>, lag: LagMembership) => {
     if (!ifIndex || (ifOperMap[ifIndex] === undefined && ifAdminMap[ifIndex] === undefined)) return true;
     const state = resolveTrunkState(ifIndex, ifOperMap, ifAdminMap, lag);
     return !state.isDown;
+  };
+  const findIfIndexByNameHint = (hint: string, maps: Array<Record<string, string>>) => {
+    const wanted = normalizeIfNameHint(hint);
+    if (!wanted) return "";
+    for (const map of maps) {
+      const matched = Object.entries(map).find(([, value]) => normalizeIfNameHint(value) === wanted);
+      if (matched) return matched[0];
+    }
+    return "";
   };
   const resolveLogicalPort = (
     ifIndex: string,
@@ -2377,20 +2463,17 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
         const localPortNum = parts[1];
         const ifIndexFromBridge = String(basePortIfIndex[localPortNum] || "").trim();
         let ifIndex = ifIndexFromBridge || "";
-        const aggregateIfIndex = ifIndex ? lag.memberToAgg.get(ifIndex) : undefined;
-        if (aggregateIfIndex && allIf.has(aggregateIfIndex)) ifIndex = aggregateIfIndex;
-
         let localIfName = "";
-        if (ifIndex) {
-          localIfName = String(ifNameMap[ifIndex] || `if${ifIndex}`).trim();
-        } else {
+        if (!ifIndex) {
           const localPortId = String(lldpLocPortId[localPortNum] || "").trim().toLowerCase();
           if (localPortId) {
-            const matched = Object.entries(ifNameMap).find(([, name]) => String(name || "").trim().toLowerCase() === localPortId);
-            if (matched) {
-              localIfName = String(matched[1] || "").trim();
-            }
+            ifIndex = findIfIndexByNameHint(localPortId, [ifNameMap, ifDescrMap, ifAliasMap]);
           }
+        }
+        const aggregateIfIndex = ifIndex ? lag.memberToAgg.get(ifIndex) : undefined;
+        if (aggregateIfIndex && allIf.has(aggregateIfIndex)) ifIndex = aggregateIfIndex;
+        if (ifIndex) {
+          localIfName = String(ifNameMap[ifIndex] || `if${ifIndex}`).trim();
         }
         if (!localIfName) continue;
         // If trunk-like interfaces were identified on device, prefer LLDP edges on those ports.
@@ -2399,7 +2482,7 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
         if (ifIndex && !shouldUseTopologyPort(ifIndex, ifOperMap, ifAdminMap, lag)) continue;
         const peer = findDeviceByNameHint(sysName, dev.id);
         if (!peer) continue;
-        directed.push({ source: dev.id, target: peer.id, portA: localIfName, raw: `LLDP:${sysName}`, isLag: !!aggregateIfIndex, sourceRank: 70 });
+        directed.push({ source: dev.id, target: peer.id, portA: localIfName, raw: `LLDP:${sysName}`, isLag: !!aggregateIfIndex || lag.aggIndexes.has(ifIndex), sourceRank: 70 });
       }
     } catch {
       // Skip device-level LLDP errors and continue.
@@ -3061,51 +3144,113 @@ async function startServer() {
     return res.json({ success: true });
   });
 
-  app.post("/api/automation/mac-search", checkRole(["admin", "operator", "viewer"]), async (req, res) => {
-    const rawMac = String(req.body?.mac || "");
-    const searchHex = normalizeMacLoose(rawMac);
-    if (searchHex.length !== 12) {
-      return res.status(400).json({ error: "Invalid MAC format" });
+  type MacHit = {
+    deviceId: string;
+    deviceName: string;
+    ip: string;
+    vendor: string;
+    mac: string;
+    matchType: "exact" | "suffix";
+    interface?: string;
+    ifIndex?: string;
+    vlan?: number;
+    voiceVlan?: number;
+    source: string;
+    timestamp: string;
+  };
+
+  type MacTraceStatus = "found_access" | "transit_last_seen" | "not_found" | "ambiguous" | "loop_detected" | "depth_limit";
+  type MacTraceHop = {
+    device: string;
+    ip: string;
+    inPort: string;
+    outPort?: string;
+    portType: "access" | "trunk" | "lag" | "unknown";
+    vlan?: number;
+    reason: string;
+  };
+
+  function normalizeIfToken(value: string): string {
+    return String(value || "")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, "")
+      .replace(/^ethernet/i, "eth")
+      .replace(/^gigabitethernet/i, "gi")
+      .replace(/^tengigabitethernet/i, "te");
+  }
+
+  function sortMacHitsDeterministically(hits: MacHit[]): MacHit[] {
+    return [...hits].sort((a, b) => {
+      const keyA = `${a.deviceName}|${a.ip}|${a.interface || ""}|${a.ifIndex || ""}|${a.vlan || 0}`;
+      const keyB = `${b.deviceName}|${b.ip}|${b.interface || ""}|${b.ifIndex || ""}|${b.vlan || 0}`;
+      return keyA.localeCompare(keyB);
+    });
+  }
+
+  function buildMacSearchMatcher(rawMac: string): { ok: true; matchType: "exact" | "suffix"; normalizedInput: string; displayMac: string; matcher: (mac: string) => boolean } | { ok: false; error: string } {
+    const normalizedInput = normalizeMacLoose(rawMac);
+    if (!normalizedInput) {
+      return { ok: false, error: "Invalid MAC format" };
     }
-    const requestedIds = Array.isArray(req.body?.deviceIds)
-      ? new Set(req.body.deviceIds.map((x: unknown) => String(x)))
-      : null;
-    const targets = requestedIds ? inventory.filter((d) => requestedIds.has(d.id)) : [...inventory];
-    const results: Array<{
-      deviceId: string;
-      deviceName: string;
-      ip: string;
-      vendor: string;
-      mac: string;
-      interface?: string;
-      ifIndex?: string;
-      vlan?: number;
-      voiceVlan?: number;
-      source: string;
-      timestamp: string;
-    }> = [];
+    if (normalizedInput.length === 12) {
+      const displayMac = normalizeMac(normalizedInput);
+      return {
+        ok: true,
+        matchType: "exact",
+        normalizedInput,
+        displayMac,
+        matcher: (mac: string) => normalizeMacLoose(mac) === normalizedInput,
+      };
+    }
+    if (normalizedInput.length < 4 || normalizedInput.length % 2 !== 0) {
+      return { ok: false, error: "MAC suffix must be at least 2 octets (4 hex chars)" };
+    }
+    const suffix = normalizedInput;
+    const displayMac = suffix.match(/.{1,2}/g)?.join(":") || suffix;
+    return {
+      ok: true,
+      matchType: "suffix",
+      normalizedInput: suffix,
+      displayMac,
+      matcher: (mac: string) => normalizeMacLoose(mac).endsWith(suffix),
+    };
+  }
+
+  async function collectMacHitsForDevices(matcher: (mac: string) => boolean, matchType: "exact" | "suffix", targets: InventoryItem[]): Promise<MacHit[]> {
+    const results: MacHit[] = [];
     await forEachWithLimit(targets, 8, async (device) => {
       try {
         const dot1dPortOid = String(snmpConfig.macSearch?.dot1dTpFdbPortOid || "1.3.6.1.2.1.17.4.3.1.2").trim();
         const basePortIfIndexOid = String(snmpConfig.macSearch?.dot1dBasePortIfIndexOid || "1.3.6.1.2.1.17.1.4.1.2").trim();
         const dot1qPortOid = String(snmpConfig.macSearch?.dot1qTpFdbPortOid || "1.3.6.1.2.1.17.7.1.2.2.1.2").trim();
-        const [dot1dPorts, basePortIfIndex, ifNames, ifDescr, qBridgePorts, voiceMap] = await Promise.all([
+        const [dot1dPorts, basePortIfIndex, ifNames, ifAlias, ifDescr, ifType, qBridgePorts, voiceMap, ciscoHints, lag] = await Promise.all([
           snmpWalk(device.ip, dot1dPortOid),
           snmpWalk(device.ip, basePortIfIndexOid),
           snmpWalk(device.ip, "1.3.6.1.2.1.31.1.1.1.1"),
+          snmpWalk(device.ip, "1.3.6.1.2.1.31.1.1.1.18"),
           snmpWalk(device.ip, "1.3.6.1.2.1.2.2.1.2"),
+          snmpWalk(device.ip, "1.3.6.1.2.1.2.2.1.3"),
           snmpWalk(device.ip, dot1qPortOid),
           collectVoiceVlanMap(device.ip),
+          getCiscoTrunkPortHints(device.ip),
+          getLagMembership(device.ip),
         ]);
+        const ciscoAggHints = getCiscoAggregateHints(ciscoHints, lag);
         Object.entries(dot1dPorts).forEach(([suffix, bridgePortRaw]) => {
           const mac = macFromOidSuffix(suffix);
-          if (!mac || normalizeMacLoose(mac) !== searchHex) return;
+          if (!mac || !matcher(mac)) return;
           const bridgePort = String(bridgePortRaw || "").trim();
           const ifIndex = String(basePortIfIndex[bridgePort] || "").trim();
           const ifName = String(ifNames[ifIndex] || ifDescr[ifIndex] || `if${ifIndex || "?"}`).trim();
+          const alias = String(ifAlias[ifIndex] || "").trim();
+          const descr = String(ifDescr[ifIndex] || "").trim();
+          const isLag = lag.aggIndexes.has(ifIndex) || isLikelyLagInterface(ifName, alias, descr, ifType[ifIndex]);
+          const isTrunk = isLikelyTrunkPort(ifName, alias, descr, ifType[ifIndex]) || ciscoHints.has(ifIndex) || ciscoAggHints.has(ifIndex);
+          const source = isLag ? "dot1dTpFdbPort:lag" : isTrunk ? "dot1dTpFdbPort:trunk" : "dot1dTpFdbPort:access";
           const qbridgeHit = Object.entries(qBridgePorts).find(([qSuffix]) => {
             const parsed = parseQBridgeSuffix(qSuffix);
-            return normalizeMacLoose(parsed.mac) === searchHex;
+            return matcher(parsed.mac);
           });
           const vlan = qbridgeHit ? parseQBridgeSuffix(qbridgeHit[0]).vlan : undefined;
           results.push({
@@ -3114,11 +3259,12 @@ async function startServer() {
             ip: device.ip,
             vendor: device.vendor,
             mac,
+            matchType,
             interface: ifName,
             ifIndex,
             vlan,
             voiceVlan: voiceMap[ifIndex],
-            source: "dot1dTpFdbPort",
+            source,
             timestamp: new Date().toISOString(),
           });
         });
@@ -3126,8 +3272,173 @@ async function startServer() {
         /* keep partial results from other devices */
       }
     });
-    logAction(actorName(req), "MAC Search", `MAC ${normalizeMac(searchHex)} -> ${results.length} hit(s)`, "automation");
-    return res.json({ success: true, mac: normalizeMac(searchHex), results });
+    return sortMacHitsDeterministically(results);
+  }
+
+  function detectPortType(hit: MacHit): "access" | "trunk" | "lag" | "unknown" {
+    const src = String(hit.source || "").toLowerCase();
+    if (src.includes(":lag")) return "lag";
+    if (src.includes(":trunk")) return "trunk";
+    if (src.includes(":access")) return "access";
+    if (hit.interface && isLikelyLagInterface(hit.interface, "", "")) return "lag";
+    if (hit.interface && isLikelyTrunkPort(hit.interface, "", "")) return "trunk";
+    return "unknown";
+  }
+
+  function findTopologyNeighbors(deviceId: string, ifName: string): Array<{ neighborId: string; localPort: string; remotePort: string }> {
+    const localNorm = normalizeIfToken(ifName);
+    if (!localNorm) return [];
+    const neighbors: Array<{ neighborId: string; localPort: string; remotePort: string }> = [];
+    for (const link of topologyLinks) {
+      const src = String(link.source || "").trim();
+      const dst = String(link.target || "").trim();
+      const portA = String(link.portA || "").trim();
+      const portB = String(link.portB || "").trim();
+      if (src === deviceId && normalizeIfToken(portA) === localNorm) {
+        neighbors.push({ neighborId: dst, localPort: portA || ifName, remotePort: portB });
+      }
+      if (dst === deviceId && normalizeIfToken(portB) === localNorm) {
+        neighbors.push({ neighborId: src, localPort: portB || ifName, remotePort: portA });
+      }
+    }
+    return neighbors.sort((a, b) => `${a.neighborId}|${a.localPort}|${a.remotePort}`.localeCompare(`${b.neighborId}|${b.localPort}|${b.remotePort}`));
+  }
+
+  app.post("/api/automation/mac-search", checkRole(["admin", "operator", "viewer"]), async (req, res) => {
+    const rawMac = String(req.body?.mac || "");
+    const macMatcher = buildMacSearchMatcher(rawMac);
+    if (macMatcher.ok === false) {
+      return res.status(400).json({ error: macMatcher.error });
+    }
+    const requestedIds = Array.isArray(req.body?.deviceIds)
+      ? new Set(req.body.deviceIds.map((x: unknown) => String(x)))
+      : null;
+    const targets = requestedIds ? inventory.filter((d) => requestedIds.has(d.id)) : [...inventory];
+    const mode = String(req.body?.mode || "single").trim().toLowerCase() === "trace" ? "trace" : "single";
+    const maxHopsRaw = Number(req.body?.maxHops);
+    const maxHops = Number.isFinite(maxHopsRaw) ? Math.max(1, Math.min(50, Math.floor(maxHopsRaw))) : 10;
+    const results = await collectMacHitsForDevices(macMatcher.matcher, macMatcher.matchType, targets);
+
+    if (mode !== "trace") {
+      logAction(actorName(req), "MAC Search", `MAC ${macMatcher.displayMac} (${macMatcher.matchType}) -> ${results.length} hit(s)`, "automation");
+      return res.json({ success: true, mac: macMatcher.displayMac, matchType: macMatcher.matchType, results });
+    }
+
+    const hops: MacTraceHop[] = [];
+    const ambiguityNotes: string[] = [];
+    if (!results.length) {
+      return res.json({
+        success: true,
+        mode: "trace",
+        mac: macMatcher.displayMac,
+        matchType: macMatcher.matchType,
+        finalStatus: "not_found" as MacTraceStatus,
+        hops,
+        ambiguityNotes,
+      });
+    }
+
+    let finalStatus: MacTraceStatus = "transit_last_seen";
+    let current = results[0];
+    if (results.length > 1) {
+      finalStatus = "ambiguous";
+      ambiguityNotes.push(`Initial search returned ${results.length} candidates; deterministic first candidate selected.`);
+    }
+
+    // Loop guards: stop revisiting the same switch/port path or bouncing between switches.
+    const visitedDevicePort = new Set<string>();
+    const visitedDevices = new Set<string>();
+
+    for (let depth = 0; depth < maxHops; depth += 1) {
+      const inPort = String(current.interface || "").trim() || "unknown";
+      const devicePortKey = `${current.deviceId}::${normalizeIfToken(inPort)}`;
+      if (visitedDevicePort.has(devicePortKey) || visitedDevices.has(current.deviceId)) {
+        finalStatus = "loop_detected";
+        hops.push({
+          device: current.deviceName,
+          ip: current.ip,
+          inPort,
+          portType: detectPortType(current),
+          vlan: current.vlan,
+          reason: "Traversal stopped due to loop guard (visited device/port).",
+        });
+        break;
+      }
+      visitedDevicePort.add(devicePortKey);
+      visitedDevices.add(current.deviceId);
+
+      const portType = detectPortType(current);
+      const baseHop: MacTraceHop = {
+        device: current.deviceName,
+        ip: current.ip,
+        inPort,
+        portType,
+        vlan: current.vlan,
+        reason: "",
+      };
+
+      if (portType === "access" || portType === "unknown") {
+        finalStatus = "found_access";
+        baseHop.reason = portType === "access"
+          ? "MAC terminates on access/edge port."
+          : "MAC found but port type is unknown; treating as edge termination.";
+        hops.push(baseHop);
+        break;
+      }
+
+      // Traverse only when current hit is transit-like and topology has a deterministic next hop.
+      const neighbors = findTopologyNeighbors(current.deviceId, inPort);
+      if (!neighbors.length) {
+        finalStatus = "transit_last_seen";
+        baseHop.reason = "Transit/trunk port but no neighbor link found in topology.";
+        hops.push(baseHop);
+        break;
+      }
+      const nextLink = neighbors[0];
+      if (neighbors.length > 1) {
+        finalStatus = "ambiguous";
+        ambiguityNotes.push(`Multiple neighbor links from ${current.deviceName} ${inPort}; deterministic first link selected.`);
+      }
+      baseHop.outPort = nextLink.localPort;
+      baseHop.reason = `Transit via ${portType} toward neighbor interface ${nextLink.remotePort || "unknown"}.`;
+      hops.push(baseHop);
+
+      const neighbor = inventory.find((d) => d.id === nextLink.neighborId);
+      if (!neighbor) {
+        finalStatus = "transit_last_seen";
+        ambiguityNotes.push(`Neighbor device ${nextLink.neighborId} is missing from inventory.`);
+        break;
+      }
+
+      const nextHits = await collectMacHitsForDevices(macMatcher.matcher, macMatcher.matchType, [neighbor]);
+      if (!nextHits.length) {
+        finalStatus = "transit_last_seen";
+        ambiguityNotes.push(`No MAC entry on neighbor ${neighbor.name} (${neighbor.ip}); trace ends at last transit point.`);
+        break;
+      }
+      if (nextHits.length > 1) {
+        finalStatus = "ambiguous";
+        ambiguityNotes.push(`Neighbor ${neighbor.name} returned ${nextHits.length} candidate ports; deterministic first candidate selected.`);
+      }
+      current = nextHits[0];
+
+      if (depth === maxHops - 1) {
+        finalStatus = "depth_limit";
+      }
+    }
+
+    logAction(actorName(req), "MAC Trace", `MAC ${macMatcher.displayMac} (${macMatcher.matchType}) -> ${finalStatus} (${hops.length} hop(s))`, "automation");
+    return res.json({
+      success: true,
+      mode: "trace",
+      mac: macMatcher.displayMac,
+      matchType: macMatcher.matchType,
+      maxHops,
+      finalStatus,
+      hops,
+      ambiguityNotes,
+      results,
+    });
   });
 
   app.get("/api/automation/voice-vlan/:deviceId", checkRole(["admin", "operator", "viewer"]), async (req, res) => {
@@ -3541,10 +3852,11 @@ async function startServer() {
           p.lastResult = summary;
           runs.push({ profileId: p.id, profileName: p.name, result: summary });
         } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
+          const msg = safeErrorDetail(e);
           p.lastRunAt = new Date().toISOString();
           p.lastResult = { success: false, error: msg };
           runs.push({ profileId: p.id, profileName: p.name, result: p.lastResult });
+          console.warn(`[discovery-watch] profile failed name="${p.name}" branch="${p.branch}": ${msg}`);
         }
       }
       logAction(actor, trigger === "manual" ? "Discovery Watch Manual Run" : "Discovery Watch Scheduled Run", `Profiles processed: ${runs.length}`, "inventory");
@@ -3560,11 +3872,11 @@ async function startServer() {
     };
     const actor = actorName(req);
     if (!subnets || typeof subnets !== "string") {
-      return res.status(400).json({ error: "Укажите подсети, например 192.168.1.0/24" });
+      return res.status(400).json(clientErrorPayload("discovery.start.validation", "Укажите подсети, например 192.168.1.0/24"));
     }
     if (discoveryRunLock) {
       return res.status(409).json({
-        success: false,
+        ...clientErrorPayload("discovery.start.lock", "Discovery run is already in progress"),
         error: "Discovery run is already in progress",
         runningJobId: activeManualDiscoveryJobId,
       });
@@ -3597,7 +3909,7 @@ async function startServer() {
           manualDiscoveryJobs.set(jobId, current);
         }
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = safeErrorDetail(e);
         const current = manualDiscoveryJobs.get(jobId);
         if (current) {
           current.status = "error";
@@ -3605,6 +3917,7 @@ async function startServer() {
           current.finishedAt = new Date().toISOString();
           manualDiscoveryJobs.set(jobId, current);
         }
+        console.warn(`[discovery] manual scan failed job=${jobId}: ${msg}`);
         logAction(actor, "Discovery Failed", msg, "inventory");
       } finally {
         discoveryRunLock = false;
@@ -3624,7 +3937,7 @@ async function startServer() {
   app.get("/api/discovery/start/status/:jobId", checkRole(["admin", "operator"]), (req, res) => {
     const jobId = String(req.params.jobId || "").trim();
     const job = manualDiscoveryJobs.get(jobId);
-    if (!job) return res.status(404).json({ success: false, error: "Discovery job not found" });
+    if (!job) return res.status(404).json(clientErrorPayload("discovery.start.status", "Discovery job not found"));
     return res.json({
       success: true,
       jobId: job.id,
@@ -3699,7 +4012,24 @@ async function startServer() {
     const actor = actorName(req);
     const profileIds = Array.isArray(req.body?.profileIds) ? req.body.profileIds.map((x: unknown) => String(x)) : undefined;
     const out = await runWatchProfiles(actor, "manual", profileIds);
-    if (!out.started) return res.status(409).json({ success: false, error: out.reason });
+    if (!out.started) {
+      const detail = out.reason === "already-running" ? "Discovery run is already in progress" : String(out.reason || "Unable to start run");
+      console.warn(`[discovery-watch] manual run rejected: ${detail}`);
+      return res.status(409).json(clientErrorPayload("discovery.watch.run", detail));
+    }
+    const failedRuns = out.runs.filter((run) => run.result?.success === false);
+    if (failedRuns.length > 0) {
+      const detail = failedRuns
+        .map((run) => `${run.profileName}: ${safeErrorDetail(run.result?.error)}`)
+        .join("; ");
+      console.warn(`[discovery-watch] manual run completed with failures: ${detail}`);
+      return res.status(500).json({
+        ...clientErrorPayload("discovery.watch.run", `${failedRuns.length} profile(s) failed: ${detail}`),
+        error: `${failedRuns.length} profile(s) failed: ${detail}`,
+        runs: out.runs,
+        profiles: discoveryWatchProfiles,
+      });
+    }
     return res.json({ success: true, runs: out.runs, profiles: discoveryWatchProfiles });
   });
 
@@ -3901,8 +4231,9 @@ async function startServer() {
       );
       return res.json({ success: true, links: topologyLinks, layout: getTopologyLayoutForScope(topologyMode, branch || undefined) });
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return res.status(500).json({ success: false, error: msg });
+      const msg = safeErrorDetail(e);
+      console.warn(`[topology] rebuild failed branch="${String(req.body?.branch || "").trim()}" mode="${normalizeTopologyMode(req.body?.topologyMode)}": ${msg}`);
+      return res.status(500).json(clientErrorPayload("topology.links.rebuild", msg));
     }
   });
 
@@ -4140,9 +4471,44 @@ async function startServer() {
   });
 
   app.post("/api/backup/run", checkRole(["admin", "operator"]), async (req, res) => {
-    if (backupRunLock) return res.status(409).json({ error: "Backup run already in progress" });
+    if (backupRunLock) {
+      return res.status(409).json(clientErrorPayload("backup.run.lock", "Backup run already in progress"));
+    }
+    const readiness = validateBackupRunReadiness();
+    if (readiness.ok === false) {
+      return res.status(readiness.status).json(
+        clientErrorPayload("backup.run.preflight", readiness.error, {
+          remediation: readiness.remediation,
+          targetCount: readiness.targetCount,
+        })
+      );
+    }
     const result = await runBackupJob(actorName(req));
-    return res.json({ success: result.status !== "failed", run: result });
+    if (result.status === "failed") {
+      const detail = safeErrorDetail(
+        result.error ||
+          result.details
+            .filter((d) => d.status === "failed")
+            .map((d) => `${d.deviceName}: ${d.error || "failed"}`)
+            .join("; "),
+        "Backup run failed"
+      );
+      console.warn(`[backup] run failed id=${result.id}: ${detail}`);
+      const failedDetails = result.details
+        .filter((d) => d.status === "failed")
+        .slice(0, 5)
+        .map((d) => `${d.deviceName || d.ip}: ${safeErrorDetail(d.error, "failed")}`);
+      return res.status(500).json(
+        clientErrorPayload("backup.run.execute", detail, {
+          runId: result.id,
+          summary: result.summary,
+          detail: failedDetails.join("; "),
+          remediation: "Check device reachability, SSH credentials, and backup path permissions.",
+          run: result,
+        })
+      );
+    }
+    return res.json({ success: true, run: result });
   });
 
   app.get("/api/backup/history", checkRole(["admin", "operator", "viewer"]), (_req, res) => {

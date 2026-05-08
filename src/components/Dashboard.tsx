@@ -44,10 +44,18 @@ const presetPanels = (preset: 'noc' | 'traffic' | 'capacity', t: (key: string) =
   return defaultPanels(t);
 };
 
+const isTrunkActive = (trunk: any) => trunk?.isActive === true || (Number(trunk?.operStatus) === 1 && trunk?.isDown !== true);
+
 const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
   const { t } = useTranslation();
   const [isMounted, setIsMounted] = React.useState(false);
   const [dashboardMetrics, setDashboardMetrics] = React.useState<any>(null);
+  const previousSnapshotRef = React.useRef<{
+    totalSwitches: number;
+    onlineNodes: number;
+    activeAlerts: number;
+    avgLoad: number;
+  } | null>(null);
   const [panels, setPanels] = React.useState<DashboardPanel[]>(defaultPanels(t));
   const [editingPanel, setEditingPanel] = React.useState<DashboardPanel | null>(null);
   const [isSavingPanels, setIsSavingPanels] = React.useState(false);
@@ -145,6 +153,53 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
     { label: t('activeAlerts'), value: switches.filter(s => s.status !== 'online').length + trunkDown, icon: AlertTriangle, color: '#fa5252' },
     { label: t('avgLoad'), value: `${avgLoadValue}%`, icon: Activity, color: '#fab005' },
   ];
+
+  const trendSnapshot = React.useMemo(
+    () => ({
+      totalSwitches: switches.length,
+      onlineNodes: onlineCount,
+      activeAlerts: switches.filter(s => s.status !== 'online').length + trunkDown,
+      avgLoad: avgLoadValue,
+    }),
+    [switches, onlineCount, trunkDown, avgLoadValue]
+  );
+
+  React.useEffect(() => {
+    previousSnapshotRef.current = trendSnapshot;
+  }, [trendSnapshot]);
+
+  const trendTextByLabel = React.useMemo(() => {
+    const previous = previousSnapshotRef.current;
+    if (!previous) {
+      return {
+        [t('totalSwitches')]: t('noTrendData'),
+        [t('onlineNodes')]: t('noTrendData'),
+        [t('activeAlerts')]: t('noTrendData'),
+        [t('avgLoad')]: t('noTrendData'),
+      } as Record<string, string>;
+    }
+
+    const formatTrend = (current: number, prev: number) => {
+      if (!Number.isFinite(current) || !Number.isFinite(prev)) return t('noTrendData');
+      if (prev === 0) {
+        if (current === 0) return t('trendNoChange');
+        return t('noTrendData');
+      }
+      const deltaPercent = ((current - prev) / Math.abs(prev)) * 100;
+      if (!Number.isFinite(deltaPercent)) return t('noTrendData');
+      const rounded = Math.round(deltaPercent * 10) / 10;
+      const sign = rounded > 0 ? '+' : '';
+      if (rounded === 0) return t('trendNoChange');
+      return `${sign}${rounded}% ${t('trendSinceLastSample')}`;
+    };
+
+    return {
+      [t('totalSwitches')]: formatTrend(trendSnapshot.totalSwitches, previous.totalSwitches),
+      [t('onlineNodes')]: formatTrend(trendSnapshot.onlineNodes, previous.onlineNodes),
+      [t('activeAlerts')]: formatTrend(trendSnapshot.activeAlerts, previous.activeAlerts),
+      [t('avgLoad')]: formatTrend(trendSnapshot.avgLoad, previous.avgLoad),
+    } as Record<string, string>;
+  }, [trendSnapshot, t]);
 
   const savePanels = async (nextPanels: DashboardPanel[]) => {
     setIsSavingPanels(true);
@@ -278,8 +333,8 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
                         <stat.icon size={20} />
                       </div>
                     </div>
-                    <div className="mt-4 flex items-center gap-2 text-[10px] font-mono text-[#40c057]">
-                      <span>{onlineCount > 0 ? t('trendPlaceholder') : t('noActiveTraffic')}</span>
+                    <div className="mt-4 flex items-center gap-2 text-[10px] font-mono text-[#909296]">
+                      <span>{trendTextByLabel[stat.label] || t('noTrendData')}</span>
                     </div>
                     {stat.label === t('activeAlerts') && (
                       <button
@@ -347,8 +402,8 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
                 <div key={`${p.deviceId}-${p.ifIndex}`} className="border border-[#373a40] rounded p-3 min-w-0">
                   <div className="flex justify-between">
                     <span className="text-white font-semibold">{p.deviceName}</span>
-                    <span className={p.isDown === true ? 'text-[#fa5252]' : 'text-[#40c057]'}>
-                      {p.isDown === true ? t('trunkStateDown') : t('trunkStateUp')}
+                    <span className={isTrunkActive(p) ? 'text-[#40c057]' : 'text-[#fa5252]'}>
+                      {isTrunkActive(p) ? t('trunkStateUp') : t('trunkStateDown')}
                     </span>
                   </div>
                   <div className="text-[#909296] mt-1 break-words">{p.ifName} :: {p.description}</div>

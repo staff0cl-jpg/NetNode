@@ -1,7 +1,47 @@
 import React from 'react';
-import { Bot, PlayCircle, CheckCircle2, ListChecks, RefreshCw, Square } from 'lucide-react';
+import { Bot, PlayCircle, CheckCircle2, ListChecks, RefreshCw, Square, Shield, HardDrive } from 'lucide-react';
 import { useTranslation } from '../lib/i18n';
 import { cn } from '../lib/utils';
+
+const safeErrorText = (value: unknown, fallback = 'Unknown error') =>
+  String(value || fallback)
+    .replace(/(password|community|secret|token|passphrase)\s*[:=]\s*[^,\s;]+/gi, '$1=<redacted>')
+    .replace(/(ssh:\/\/[^:\s]+:)[^@\s]+@/gi, '$1<redacted>@')
+    .slice(0, 500);
+
+const apiErrorDetailText = (value: unknown, httpStatus?: number) => {
+  if (value && typeof value === 'object') {
+    const payload = value as Record<string, unknown>;
+    const parts = [
+      payload.error || payload.message,
+      payload.detail ? `Detail: ${payload.detail}` : '',
+      payload.remediation ? `Next step: ${payload.remediation}` : '',
+    ]
+      .filter(Boolean)
+      .map((part) => safeErrorText(part));
+    const meta = [
+      payload.source ? `server: ${safeErrorText(payload.source)}` : '',
+      payload.code ? `code: ${safeErrorText(payload.code)}` : '',
+      payload.runId ? `run: ${safeErrorText(payload.runId)}` : '',
+      httpStatus ? `http ${httpStatus}` : '',
+    ].filter(Boolean);
+    if (meta.length) parts.push(`(${meta.join(', ')})`);
+    return parts.join(' ') || safeErrorText(undefined);
+  }
+  return safeErrorText(value);
+};
+
+const readApiPayload = async (response: Response, fallback: string) => {
+  const raw = await response.text();
+  try {
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return { error: safeErrorText(raw, fallback) };
+  }
+};
+
+const operationFailedMessage = (operation: string, detail?: unknown, httpStatus?: number) =>
+  `${operation} failed${detail ? `: ${apiErrorDetailText(detail, httpStatus)}` : ''}`;
 
 type Scope = 'all' | 'selected' | 'filter';
 type Scenario = 'create-vlan' | 'allow-vlan-on-trunk';
@@ -54,6 +94,7 @@ type InventoryDevice = {
   name: string;
   ip: string;
   vendor?: string;
+  branch?: string;
 };
 
 type MacSearchResult = {
@@ -62,6 +103,7 @@ type MacSearchResult = {
   ip: string;
   vendor: string;
   mac: string;
+  matchType?: 'exact' | 'suffix';
   interface?: string;
   ifIndex?: string;
   vlan?: number;
@@ -70,14 +112,47 @@ type MacSearchResult = {
   timestamp: string;
 };
 
+type MacTraceStatus = 'found_access' | 'transit_last_seen' | 'not_found' | 'ambiguous' | 'loop_detected' | 'depth_limit';
+type MacTraceHop = {
+  device: string;
+  ip: string;
+  inPort: string;
+  outPort?: string;
+  portType: 'access' | 'trunk' | 'lag' | 'unknown';
+  vlan?: number;
+  reason: string;
+};
+type MacTraceResult = {
+  mode: 'trace';
+  mac: string;
+  maxHops?: number;
+  finalStatus: MacTraceStatus;
+  hops: MacTraceHop[];
+  ambiguityNotes?: string[];
+  results?: MacSearchResult[];
+};
+
+type BackupRun = {
+  id: string;
+  startedAt: string;
+  finishedAt?: string;
+  status: 'running' | 'completed' | 'failed';
+  actor: string;
+  summary: { total: number; success: number; failed: number };
+};
+
 interface AutomationProps {
   role?: string;
   username?: string;
 }
 
+type AutomationTabKey = 'execution' | 'macOid' | 'backup';
+
 const Automation: React.FC<AutomationProps> = ({ role, username }) => {
   const { t } = useTranslation();
   const canApply = role === 'admin' || role === 'operator';
+  const isAdmin = role === 'admin';
+  const [activeTab, setActiveTab] = React.useState<AutomationTabKey>('execution');
 
   const [scenario, setScenario] = React.useState<Scenario>('create-vlan');
   const [scope, setScope] = React.useState<Scope>('all');
@@ -113,6 +188,32 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
   const [macInput, setMacInput] = React.useState('');
   const [macSearching, setMacSearching] = React.useState(false);
   const [macResults, setMacResults] = React.useState<MacSearchResult[]>([]);
+  const [macTraceResult, setMacTraceResult] = React.useState<MacTraceResult | null>(null);
+  const [macMode, setMacMode] = React.useState<'trace' | 'single'>('trace');
+  const [macMaxHops, setMacMaxHops] = React.useState<number>(10);
+  const [macScope, setMacScope] = React.useState<'all' | 'branch' | 'selected'>('all');
+  const [macBranchFilter, setMacBranchFilter] = React.useState('');
+  const [macSelectedDeviceIds, setMacSelectedDeviceIds] = React.useState<string[]>([]);
+  const [snmpConfig, setSnmpConfig] = React.useState({
+    macSearch: {
+      dot1dTpFdbPortOid: '1.3.6.1.2.1.17.4.3.1.2',
+      dot1dBasePortIfIndexOid: '1.3.6.1.2.1.17.1.4.1.2',
+      dot1qTpFdbPortOid: '1.3.6.1.2.1.17.7.1.2.2.1.2',
+      voiceVlanMacOid: '1.3.6.1.4.1.9.9.315.1.2.3.1.1',
+    },
+  });
+  const [backupConfig, setBackupConfig] = React.useState({
+    enabled: false,
+    intervalHours: 6,
+    networkSharePath: '',
+    scopeMode: 'all' as 'all' | 'filtered',
+    scopeVendors: '',
+    scopeBranches: '',
+    username: '',
+    domain: '',
+    password: '',
+  });
+  const [backupRuns, setBackupRuns] = React.useState<BackupRun[]>([]);
 
   const headers = React.useMemo(
     () => ({
@@ -246,7 +347,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
       });
       const data = await response.json();
       if (!response.ok) {
-        setErrorText(data?.error || t('automationDryRunFailed'));
+        setErrorText(operationFailedMessage('Automation dry-run', data || t('automationDryRunFailed'), response.status));
         return;
       }
       setDryRunPlanId(data.planId || '');
@@ -270,7 +371,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
       });
       const data = await response.json();
       if (!response.ok) {
-        setErrorText(data?.error || t('automationApplyFailed'));
+        setErrorText(operationFailedMessage('Automation apply', data || t('automationApplyFailed'), response.status));
         return;
       }
       const jobId = String(data.jobId || '');
@@ -304,23 +405,205 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
     setErrorText('');
     setMacSearching(true);
     try {
+      const normalizedBranch = macBranchFilter.trim().toLowerCase();
+      const deviceIds =
+        macScope === 'selected'
+          ? macSelectedDeviceIds
+          : macScope === 'branch' && normalizedBranch
+            ? inventory
+                .filter((d) => String(d.branch || '').trim().toLowerCase() === normalizedBranch)
+                .map((d) => d.id)
+            : undefined;
       const response = await fetch('/api/automation/mac-search', {
         method: 'POST',
         headers,
-        body: JSON.stringify({ mac: macInput.trim() }),
+        body: JSON.stringify({
+          mac: macInput.trim(),
+          deviceIds,
+          mode: macMode,
+          maxHops: Math.max(1, Math.min(50, Number(macMaxHops) || 10)),
+        }),
       });
       const data = await response.json();
       if (!response.ok) {
         setErrorText(data?.error || t('automationMacSearchFailed'));
         return;
       }
-      setMacResults(Array.isArray(data.results) ? data.results : []);
+      if (macMode === 'trace') {
+        setMacTraceResult({
+          mode: 'trace',
+          mac: String(data?.mac || ''),
+          maxHops: Number(data?.maxHops || 0) || undefined,
+          finalStatus: data?.finalStatus || 'not_found',
+          hops: Array.isArray(data?.hops) ? data.hops : [],
+          ambiguityNotes: Array.isArray(data?.ambiguityNotes) ? data.ambiguityNotes : [],
+          results: Array.isArray(data?.results) ? data.results : [],
+        });
+        setMacResults(Array.isArray(data?.results) ? data.results : []);
+      } else {
+        setMacTraceResult(null);
+        setMacResults(Array.isArray(data.results) ? data.results : []);
+      }
     } catch {
       setErrorText(t('automationMacSearchFailed'));
     } finally {
       setMacSearching(false);
     }
   };
+
+  const traceStatusLabel: Record<MacTraceStatus, string> = {
+    found_access: 'Found on access/edge port',
+    transit_last_seen: 'Last seen on transit/trunk',
+    not_found: 'Not found',
+    ambiguous: 'Ambiguous path (deterministic pick)',
+    loop_detected: 'Loop detected and stopped',
+    depth_limit: 'Hop limit reached',
+  };
+
+  React.useEffect(() => {
+    const loadEnterpriseConfig = async () => {
+      try {
+        const snmpResp = await fetch('/api/config/snmp', { headers });
+        if (snmpResp.ok) {
+          const snmpData = await snmpResp.json();
+          if (snmpData.snmp) {
+            setSnmpConfig({
+              macSearch: {
+                dot1dTpFdbPortOid: snmpData.snmp.macSearch?.dot1dTpFdbPortOid || '1.3.6.1.2.1.17.4.3.1.2',
+                dot1dBasePortIfIndexOid: snmpData.snmp.macSearch?.dot1dBasePortIfIndexOid || '1.3.6.1.2.1.17.1.4.1.2',
+                dot1qTpFdbPortOid: snmpData.snmp.macSearch?.dot1qTpFdbPortOid || '1.3.6.1.2.1.17.7.1.2.2.1.2',
+                voiceVlanMacOid: snmpData.snmp.macSearch?.voiceVlanMacOid || '1.3.6.1.4.1.9.9.315.1.2.3.1.1',
+              },
+            });
+          }
+        }
+        const [backupConfigResp, backupHistoryResp] = await Promise.all([
+          fetch('/api/backup/config', { headers }),
+          fetch('/api/backup/history', { headers }),
+        ]);
+        if (backupConfigResp.ok) {
+          const backupData = await backupConfigResp.json();
+          const cfg = backupData.config || {};
+          setBackupConfig({
+            enabled: cfg.enabled === true,
+            intervalHours: Number(cfg.intervalHours || 6),
+            networkSharePath: cfg.networkSharePath || '',
+            scopeMode: cfg.scope?.mode === 'filtered' ? 'filtered' : 'all',
+            scopeVendors: Array.isArray(cfg.scope?.vendors) ? cfg.scope.vendors.join(', ') : '',
+            scopeBranches: Array.isArray(cfg.scope?.branches) ? cfg.scope.branches.join(', ') : '',
+            username: cfg.credentials?.username || '',
+            domain: cfg.credentials?.domain || '',
+            password: '',
+          });
+        }
+        if (backupHistoryResp.ok) {
+          const runsData = await backupHistoryResp.json();
+          setBackupRuns(Array.isArray(runsData.runs) ? runsData.runs : []);
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+    loadEnterpriseConfig();
+  }, [headers]);
+
+  const handleSaveMacOidConfig = async () => {
+    try {
+      const currentSnmpResp = await fetch('/api/config/snmp', { headers });
+      const currentData = currentSnmpResp.ok ? await currentSnmpResp.json() : {};
+      const currentSnmp = currentData.snmp || {};
+      const response = await fetch('/api/config/snmp', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          ...currentSnmp,
+          macSearch: snmpConfig.macSearch,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        alert(data?.error || 'Failed to save SNMP config.');
+        return;
+      }
+      alert(data?.message || 'SNMP config saved.');
+    } catch {
+      alert('Failed to save SNMP config.');
+    }
+  };
+
+  const saveBackupConfig = async () => {
+    try {
+      const response = await fetch('/api/backup/config', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          enabled: backupConfig.enabled,
+          intervalHours: backupConfig.intervalHours,
+          networkSharePath: backupConfig.networkSharePath,
+          scope: {
+            mode: backupConfig.scopeMode,
+            vendors: backupConfig.scopeVendors.split(',').map((v) => v.trim()).filter(Boolean),
+            branches: backupConfig.scopeBranches.split(',').map((v) => v.trim()).filter(Boolean),
+          },
+          credentials: {
+            username: backupConfig.username,
+            domain: backupConfig.domain,
+            password: backupConfig.password || undefined,
+          },
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        alert(data.error || 'Backup config save failed');
+        return;
+      }
+      alert('Backup config saved');
+      setBackupConfig((prev) => ({ ...prev, password: '' }));
+    } catch {
+      alert('Backup config save failed');
+    }
+  };
+
+  const runBackupNow = async () => {
+    try {
+      const response = await fetch('/api/backup/run', {
+        method: 'POST',
+        headers,
+      });
+      const data = await readApiPayload(response, 'Backup run now failed');
+      if (!response.ok || data?.success === false) {
+        alert(operationFailedMessage('Backup run now', data, response.status));
+        return;
+      }
+      const historyResp = await fetch('/api/backup/history', { headers });
+      if (historyResp.ok) {
+        const historyData = await historyResp.json();
+        setBackupRuns(Array.isArray(historyData.runs) ? historyData.runs : []);
+      }
+      alert('Backup run completed');
+    } catch (e) {
+      alert(operationFailedMessage('Backup run now request', e instanceof Error ? e.message : e));
+    }
+  };
+
+  const automationTabs: Array<{ key: AutomationTabKey; label: string }> = [
+    { key: 'execution', label: t('automationTabExecution') },
+    { key: 'macOid', label: t('automationTabMacOidConfig') },
+    { key: 'backup', label: t('automationTabBackup') },
+  ];
+  const tabDescriptions: Record<AutomationTabKey, string> = {
+    execution: t('automationTabExecutionHint'),
+    macOid: t('automationTabMacOidHint'),
+    backup: t('automationTabBackupHint'),
+  };
+  const macScopeHintKey =
+    macScope === 'all'
+      ? 'automationScopeHintAll'
+      : macScope === 'branch'
+        ? 'automationScopeHintBranch'
+        : 'automationScopeHintSelected';
+  const actionButtonBase =
+    'px-4 py-2 rounded text-[10px] font-bold uppercase tracking-widest transition-colors disabled:opacity-50';
 
   return (
     <div className="p-4 md:p-8 animate-in slide-in-from-bottom-5 duration-700 space-y-6">
@@ -335,13 +618,118 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
         </div>
       )}
 
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+      <nav className="border border-[#373a40] rounded bg-[#1c1d21] p-2">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          {automationTabs.map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => setActiveTab(tab.key)}
+              className={cn(
+                'w-full px-3 py-2 rounded text-[10px] font-bold uppercase tracking-widest border transition-colors',
+                activeTab === tab.key
+                  ? 'bg-[#228be6] border-[#228be6] text-white'
+                  : 'bg-[#25262b] border-[#373a40] text-[#c1c2c5] hover:text-white'
+              )}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+        <p className="mt-2 px-1 text-[11px] text-[#909296]">{tabDescriptions[activeTab]}</p>
+      </nav>
+
+      {activeTab === 'execution' && <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
         <section className="xl:col-span-2 space-y-6">
           <div className="bg-[#25262b] border border-[#373a40] rounded overflow-hidden">
             <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
               <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('automationMacSearchTitle')}</h3>
             </div>
             <div className="p-4 md:p-6 space-y-4">
+              <div className="space-y-2">
+                <p className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('automationMacModeLabel')}</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {(['trace', 'single'] as const).map((value) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => {
+                        setMacMode(value);
+                        if (value === 'single') setMacTraceResult(null);
+                      }}
+                      className={cn(
+                        'px-3 py-2 rounded text-xs font-bold border text-left',
+                        macMode === value
+                          ? 'bg-[#228be6] border-[#228be6] text-white'
+                          : 'bg-[#141517] border-[#373a40] text-[#909296] hover:text-white'
+                      )}
+                    >
+                      <div>{value === 'trace' ? t('automationMacModeTraceTitle') : t('automationMacModeSingleTitle')}</div>
+                      <div className="text-[10px] font-medium normal-case tracking-normal opacity-80 mt-0.5">
+                        {value === 'trace' ? t('automationMacModeTraceHint') : t('automationMacModeSingleHint')}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {macMode === 'trace' && (
+                <div className="space-y-2">
+                  <p className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('automationMacMaxHops')}</p>
+                  <input
+                    type="number"
+                    min={1}
+                    max={50}
+                    value={macMaxHops}
+                    onChange={(e) => setMacMaxHops(Math.max(1, Math.min(50, Number(e.target.value) || 10)))}
+                    className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                  />
+                </div>
+              )}
+              <div className="space-y-2">
+                <p className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('automationTargetScope')}</p>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  {(['all', 'branch', 'selected'] as const).map((value) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => setMacScope(value)}
+                      className={cn(
+                        'px-3 py-2 rounded text-xs font-bold uppercase tracking-wider border',
+                        macScope === value
+                          ? 'bg-[#228be6] border-[#228be6] text-white'
+                          : 'bg-[#141517] border-[#373a40] text-[#909296] hover:text-white'
+                      )}
+                    >
+                      {value === 'all' ? t('automationScopeAll') : value === 'branch' ? t('automationBranchFilter') : t('automationSelectDevices')}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[10px] text-[#5c5f66]">{t(macScopeHintKey)}</p>
+              </div>
+              {macScope === 'branch' && (
+                <input
+                  value={macBranchFilter}
+                  onChange={(e) => setMacBranchFilter(e.target.value)}
+                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                  placeholder={t('automationBranchFilter')}
+                />
+              )}
+              {macScope === 'selected' && (
+                <select
+                  multiple
+                  value={macSelectedDeviceIds}
+                  onChange={(e) =>
+                    setMacSelectedDeviceIds(Array.from(e.target.selectedOptions).map((opt) => opt.value))
+                  }
+                  className="w-full min-h-[120px] bg-[#141517] border border-[#373a40] p-2 rounded text-xs text-white"
+                >
+                  {inventory.map((device) => (
+                    <option key={device.id} value={device.id}>
+                      {device.name} ({device.ip}) {device.branch ? `- ${device.branch}` : ''} {device.vendor ? `- ${device.vendor}` : ''}
+                    </option>
+                  ))}
+                </select>
+              )}
               <div className="flex flex-col md:flex-row gap-3">
                 <input
                   value={macInput}
@@ -353,24 +741,60 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
                   type="button"
                   disabled={macSearching || !macInput.trim()}
                   onClick={runMacSearch}
-                  className="px-4 py-2 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-[10px] font-bold uppercase tracking-widest disabled:opacity-50"
+                  className={cn(actionButtonBase, 'bg-[#228be6] hover:bg-[#1c7ed6] text-white')}
                 >
                   {macSearching ? t('loading') : t('automationMacSearchButton')}
                 </button>
               </div>
-              <div className="max-h-[260px] overflow-auto space-y-2">
-                {!macResults.length && <div className="text-xs text-[#909296]">{t('automationMacSearchNoResults')}</div>}
-                {macResults.map((result, idx) => (
-                  <div key={`${result.deviceId}-${idx}`} className="border border-[#373a40] rounded p-3 bg-[#141517]">
-                    <div className="text-xs text-white font-semibold">
-                      {result.deviceName} ({result.ip}) - {result.interface || '-'}
-                    </div>
-                    <div className="text-[11px] text-[#909296] mt-1">
-                      MAC {result.mac} | VLAN {result.vlan ?? '-'} | Voice VLAN {result.voiceVlan ?? '-'} | {result.vendor}
-                    </div>
-                    <div className="text-[10px] text-[#5c5f66] mt-1">{result.timestamp}</div>
+              <div className="rounded border border-[#373a40] bg-[#141517] p-3 text-[10px] text-[#909296] space-y-1">
+                <p>{t('automationMacSearchHelp')}</p>
+                <p>{t('automationMacSuffixHint')}</p>
+              </div>
+              {macMode === 'trace' && macTraceResult && (
+                <div className="border border-[#373a40] rounded p-3 bg-[#141517] space-y-2">
+                  <div className="text-xs text-white font-semibold">
+                    Trace status: {traceStatusLabel[macTraceResult.finalStatus] || macTraceResult.finalStatus}
                   </div>
-                ))}
+                  <div className="text-[11px] text-[#909296]">
+                    MAC {macTraceResult.mac} | Hops {macTraceResult.hops.length}/{macTraceResult.maxHops ?? '-'}
+                  </div>
+                  {!!macTraceResult.ambiguityNotes?.length && (
+                    <div className="text-[11px] text-[#fab005] space-y-1">
+                      {macTraceResult.ambiguityNotes.map((note, idx) => (
+                        <div key={`note-${idx}`}>- {note}</div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="space-y-2">
+                    {!macTraceResult.hops.length && <div className="text-xs text-[#909296]">{t('automationMacSearchNoResults')}</div>}
+                    {macTraceResult.hops.map((hop, idx) => (
+                      <div key={`${hop.device}-${idx}`} className="border border-[#373a40] rounded p-2 bg-black/20">
+                        <div className="text-xs text-white">
+                          {idx + 1}. {hop.device} ({hop.ip}) | {hop.inPort} [{hop.portType}]
+                        </div>
+                        <div className="text-[11px] text-[#909296] mt-1">
+                          Out: {hop.outPort || '-'} | VLAN {hop.vlan ?? '-'}
+                        </div>
+                        <div className="text-[11px] text-[#c1c2c5] mt-1">{hop.reason}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div className="max-h-[260px] overflow-auto space-y-2">
+                {macMode === 'single' && !macResults.length && <div className="text-xs text-[#909296]">{t('automationMacSearchNoResults')}</div>}
+                {macMode === 'single' &&
+                  macResults.map((result, idx) => (
+                    <div key={`${result.deviceId}-${idx}`} className="border border-[#373a40] rounded p-3 bg-[#141517]">
+                      <div className="text-xs text-white font-semibold">
+                        {result.deviceName} ({result.ip}) - {result.interface || '-'}
+                      </div>
+                      <div className="text-[11px] text-[#909296] mt-1">
+                        MAC {result.mac} | VLAN {result.vlan ?? '-'} | Voice VLAN {result.voiceVlan ?? '-'} | {result.vendor}
+                      </div>
+                      <div className="text-[10px] text-[#5c5f66] mt-1">{result.timestamp}</div>
+                    </div>
+                  ))}
               </div>
             </div>
           </div>
@@ -489,7 +913,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
                   type="button"
                   onClick={runDryRun}
                   disabled={dryRunLoading || !canApply}
-                  className="px-4 py-2 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-[10px] font-bold uppercase tracking-widest disabled:opacity-50 inline-flex items-center gap-2"
+                  className={cn(actionButtonBase, 'bg-[#228be6] hover:bg-[#1c7ed6] text-white inline-flex items-center gap-2')}
                 >
                   <PlayCircle size={14} />
                   {dryRunLoading ? t('automationDryRunRunning') : `4. ${t('automationRunDryRun')}`}
@@ -498,7 +922,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
                   type="button"
                   onClick={applyPlan}
                   disabled={applyLoading || !canApply || previewSteps.length === 0}
-                  className="px-4 py-2 bg-[#40c057] hover:bg-[#37b24d] text-white rounded text-[10px] font-bold uppercase tracking-widest disabled:opacity-50 inline-flex items-center gap-2"
+                  className={cn(actionButtonBase, 'bg-[#40c057] hover:bg-[#37b24d] text-white inline-flex items-center gap-2')}
                 >
                   <CheckCircle2 size={14} />
                   {applyLoading ? t('automationApplying') : `5. ${t('automationApproveApply')}`}
@@ -619,7 +1043,165 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
             </div>
           </div>
         </section>
-      </div>
+      </div>}
+
+      {activeTab === 'macOid' && (
+        <div className={cn('bg-[#25262b] border border-[#373a40] rounded overflow-hidden', !isAdmin && 'opacity-50 pointer-events-none')}>
+          <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
+            <Shield className="text-[#fab005]" size={18} />
+            <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('automationTabMacOidConfig')}</h3>
+            {!isAdmin && <span className="text-[10px] bg-red-500/20 text-red-500 px-2 py-0.5 rounded font-bold uppercase tracking-widest ml-auto">{t('adminOnly')}</span>}
+          </div>
+          <div className="p-4 md:p-6 space-y-4">
+            <p className="text-[11px] text-[#909296]">{t('automationOidConfigHelp')}</p>
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('settingsMacFdbPortOid')}</label>
+              <input
+                className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                value={snmpConfig.macSearch.dot1dTpFdbPortOid}
+                onChange={(e) => setSnmpConfig({ ...snmpConfig, macSearch: { ...snmpConfig.macSearch, dot1dTpFdbPortOid: e.target.value } })}
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('settingsBasePortIfIndexOid')}</label>
+              <input
+                className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                value={snmpConfig.macSearch.dot1dBasePortIfIndexOid}
+                onChange={(e) => setSnmpConfig({ ...snmpConfig, macSearch: { ...snmpConfig.macSearch, dot1dBasePortIfIndexOid: e.target.value } })}
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('settingsQBridgePortOid')}</label>
+              <input
+                className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                value={snmpConfig.macSearch.dot1qTpFdbPortOid}
+                onChange={(e) => setSnmpConfig({ ...snmpConfig, macSearch: { ...snmpConfig.macSearch, dot1qTpFdbPortOid: e.target.value } })}
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('settingsVoiceVlanMacOid')}</label>
+              <input
+                className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                value={snmpConfig.macSearch.voiceVlanMacOid}
+                onChange={(e) => setSnmpConfig({ ...snmpConfig, macSearch: { ...snmpConfig.macSearch, voiceVlanMacOid: e.target.value } })}
+              />
+            </div>
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={handleSaveMacOidConfig}
+                className={cn(actionButtonBase, 'px-6 bg-[#fab005] hover:bg-[#f08c00] text-black shadow-lg')}
+              >
+                {t('saveChanges')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'backup' && (
+        <div className={cn('bg-[#25262b] border border-[#373a40] rounded overflow-hidden', !isAdmin && 'opacity-50 pointer-events-none')}>
+          <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
+            <HardDrive className="text-[#228be6]" size={18} />
+            <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('settingsBackupScheduleTitle')}</h3>
+            {!isAdmin && <span className="text-[10px] bg-red-500/20 text-red-500 px-2 py-0.5 rounded font-bold uppercase tracking-widest ml-auto">{t('adminOnly')}</span>}
+          </div>
+          <div className="p-4 md:p-6 space-y-4">
+            <p className="text-[11px] text-[#909296]">{t('automationBackupHelp')}</p>
+            <label className="flex items-center gap-2 text-xs text-[#c1c2c5]">
+              <input
+                type="checkbox"
+                checked={backupConfig.enabled}
+                onChange={(e) => setBackupConfig({ ...backupConfig, enabled: e.target.checked })}
+              />
+              {t('settingsBackupEnabled')}
+            </label>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <input
+                type="number"
+                min={1}
+                max={168}
+                className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                value={backupConfig.intervalHours}
+                onChange={(e) => setBackupConfig({ ...backupConfig, intervalHours: Math.max(1, Number(e.target.value) || 1) })}
+                placeholder={t('settingsBackupIntervalHours')}
+              />
+              <select
+                className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                value={backupConfig.scopeMode}
+                onChange={(e) => setBackupConfig({ ...backupConfig, scopeMode: e.target.value as 'all' | 'filtered' })}
+              >
+                <option value="all">{t('settingsBackupScopeAll')}</option>
+                <option value="filtered">{t('settingsBackupScopeFiltered')}</option>
+              </select>
+              <input
+                className="md:col-span-2 bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                value={backupConfig.networkSharePath}
+                onChange={(e) => setBackupConfig({ ...backupConfig, networkSharePath: e.target.value })}
+                placeholder={t('settingsBackupSharePath')}
+              />
+              <input
+                className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                value={backupConfig.scopeVendors}
+                onChange={(e) => setBackupConfig({ ...backupConfig, scopeVendors: e.target.value })}
+                placeholder={t('settingsBackupScopeVendors')}
+              />
+              <input
+                className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                value={backupConfig.scopeBranches}
+                onChange={(e) => setBackupConfig({ ...backupConfig, scopeBranches: e.target.value })}
+                placeholder={t('settingsBackupScopeBranches')}
+              />
+              <input
+                className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                value={backupConfig.username}
+                onChange={(e) => setBackupConfig({ ...backupConfig, username: e.target.value })}
+                placeholder={t('username')}
+              />
+              <input
+                className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                value={backupConfig.domain}
+                onChange={(e) => setBackupConfig({ ...backupConfig, domain: e.target.value })}
+                placeholder={t('settingsBackupDomain')}
+              />
+              <input
+                type="password"
+                className="md:col-span-2 bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                value={backupConfig.password}
+                onChange={(e) => setBackupConfig({ ...backupConfig, password: e.target.value })}
+                placeholder={t('settingsBackupPassword')}
+              />
+            </div>
+            <p className="text-[10px] text-[#5c5f66]">{t('settingsBackupShareHint')}</p>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={saveBackupConfig}
+                className={cn(actionButtonBase, 'bg-[#228be6] hover:bg-[#1c7ed6] text-white')}
+              >
+                {t('saveChanges')}
+              </button>
+              <button
+                type="button"
+                onClick={runBackupNow}
+                className={cn(actionButtonBase, 'bg-[#40c057] hover:bg-[#37b24d] text-white')}
+              >
+                {t('settingsBackupRunNow')}
+              </button>
+            </div>
+            <div className="space-y-2 max-h-[280px] overflow-auto border-t border-[#373a40] pt-3">
+              {!backupRuns.length && <div className="text-xs text-[#909296]">{t('settingsBackupNoHistory')}</div>}
+              {backupRuns.map((run) => (
+                <div key={run.id} className="border border-[#373a40] rounded p-2 bg-[#141517] text-xs text-[#c1c2c5]">
+                  <div className="text-white">{run.id}</div>
+                  <div>{run.status} | {run.summary.success}/{run.summary.total}</div>
+                  <div className="text-[#909296]">{run.startedAt}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

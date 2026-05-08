@@ -4,6 +4,45 @@ import { Share2, Box, ZoomIn, ZoomOut, RotateCcw, Globe, TerminalSquare } from '
 import { Switch } from '../types';
 import { useTranslation } from '../lib/i18n';
 
+const safeErrorText = (value: unknown, fallback = 'Unknown error') =>
+  String(value || fallback)
+    .replace(/(password|community|secret|token|passphrase)\s*[:=]\s*[^,\s;]+/gi, '$1=<redacted>')
+    .replace(/(ssh:\/\/[^:\s]+:)[^@\s]+@/gi, '$1<redacted>@')
+    .slice(0, 500);
+
+const apiErrorDetailText = (value: unknown, httpStatus?: number) => {
+  if (value && typeof value === 'object') {
+    const payload = value as Record<string, unknown>;
+    const parts = [
+      payload.error || payload.message,
+      payload.detail ? `Detail: ${payload.detail}` : '',
+      payload.remediation ? `Next step: ${payload.remediation}` : '',
+    ]
+      .filter(Boolean)
+      .map((part) => safeErrorText(part));
+    const meta = [
+      payload.source ? `server: ${safeErrorText(payload.source)}` : '',
+      payload.code ? `code: ${safeErrorText(payload.code)}` : '',
+      httpStatus ? `http ${httpStatus}` : '',
+    ].filter(Boolean);
+    if (meta.length) parts.push(`(${meta.join(', ')})`);
+    return parts.join(' ') || safeErrorText(undefined);
+  }
+  return safeErrorText(value);
+};
+
+const readApiPayload = async (response: Response, fallback: string) => {
+  const raw = await response.text();
+  try {
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return { error: safeErrorText(raw, fallback) };
+  }
+};
+
+const operationFailedMessage = (operation: string, detail?: unknown, httpStatus?: number) =>
+  `${operation} failed${detail ? `: ${apiErrorDetailText(detail, httpStatus)}` : ''}`;
+
 interface TopologyProps {
   switches: Switch[];
   role?: string;
@@ -904,8 +943,8 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           body: JSON.stringify({ branch: selectedRegion, topologyMode }),
         });
         if (!rebuild.ok) {
-          const err = await rebuild.json().catch(() => null);
-          console.warn('Topology rebuild failed, using existing links', err?.error || '');
+          const err = await readApiPayload(rebuild, 'Topology rebuild failed').catch(() => null);
+          console.warn('Topology rebuild failed, using existing links', apiErrorDetailText(err, rebuild.status));
         }
       }
       const response = await fetch(`/api/topology/links${topologyScopeQuery(topologyMode, selectedRegion || undefined)}`, {
@@ -914,8 +953,8 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           'x-user-name': username || 'unknown'
         }
       });
-      if (!response.ok) throw new Error('Topology load failed');
-      const data: { links: TopoLink[]; layout?: Record<string, { x: number; y: number }> } = await response.json();
+      const data: { links?: TopoLink[]; layout?: Record<string, { x: number; y: number }>; error?: string } = await readApiPayload(response, 'Topology load failed');
+      if (!response.ok) throw new Error(operationFailedMessage('Topology load', data, response.status));
       setLinks(data.links || []);
       setSavedLayout(data.layout || {});
       refreshTopologyVersions();
@@ -948,7 +987,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       }, {});
       setSavedLayout(nextPositions);
       try {
-        await fetch('/api/topology/layout', {
+        const layoutResp = await fetch('/api/topology/layout', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -957,12 +996,16 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           },
           body: JSON.stringify({ positions: nextPositions, branch: selectedRegion || undefined, topologyMode, replace: true }),
         });
+        if (!layoutResp.ok) {
+          const err = await readApiPayload(layoutResp, 'Topology layout save failed').catch(() => null);
+          throw new Error(operationFailedMessage('Topology layout save', err, layoutResp.status));
+        }
       } catch {
-        // ignore layout persistence errors on auto-layout
+        // Keep the calculated layout visible even if persistence fails.
       }
     } catch (error) {
       console.error('Failed to refresh topology:', error);
-      alert(error instanceof Error ? error.message : 'Failed to refresh topology');
+      alert(operationFailedMessage('Topology auto-layout', error instanceof Error ? error.message : error));
     }
   };
 

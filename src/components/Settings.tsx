@@ -40,15 +40,6 @@ type DiscoveryWatchProfile = {
   lastResult: any;
 };
 
-type BackupRun = {
-  id: string;
-  startedAt: string;
-  finishedAt?: string;
-  status: 'running' | 'completed' | 'failed';
-  actor: string;
-  summary: { total: number; success: number; failed: number };
-};
-
 const emptyLdapProfile = (): LdapProfileForm => ({
   enabled: false,
   url: 'ldap://127.0.0.1:389',
@@ -58,6 +49,45 @@ const emptyLdapProfile = (): LdapProfileForm => ({
   searchFilter: '(sAMAccountName={{username}})',
   tlsRejectUnauthorized: true,
 });
+
+const safeErrorText = (value: unknown, fallback = 'Unknown error') =>
+  String(value || fallback)
+    .replace(/(password|community|secret|token|passphrase)\s*[:=]\s*[^,\s;]+/gi, '$1=<redacted>')
+    .replace(/(ssh:\/\/[^:\s]+:)[^@\s]+@/gi, '$1<redacted>@')
+    .slice(0, 500);
+
+const apiErrorDetailText = (value: unknown, httpStatus?: number) => {
+  if (value && typeof value === 'object') {
+    const payload = value as Record<string, unknown>;
+    const parts = [
+      payload.error || payload.message,
+      payload.detail ? `Detail: ${payload.detail}` : '',
+      payload.remediation ? `Next step: ${payload.remediation}` : '',
+    ]
+      .filter(Boolean)
+      .map((part) => safeErrorText(part));
+    const meta = [
+      payload.source ? `server: ${safeErrorText(payload.source)}` : '',
+      payload.code ? `code: ${safeErrorText(payload.code)}` : '',
+      httpStatus ? `http ${httpStatus}` : '',
+    ].filter(Boolean);
+    if (meta.length) parts.push(`(${meta.join(', ')})`);
+    return parts.join(' ') || safeErrorText(undefined);
+  }
+  return safeErrorText(value);
+};
+
+const readApiPayload = async (response: Response, fallback: string) => {
+  const raw = await response.text();
+  try {
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return { error: safeErrorText(raw, fallback) };
+  }
+};
+
+const operationFailedMessage = (operation: string, detail?: unknown, httpStatus?: number) =>
+  `${operation} failed${detail ? `: ${apiErrorDetailText(detail, httpStatus)}` : ''}`;
 
 interface SettingsProps {
   role?: string;
@@ -112,25 +142,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
     timeoutMs: 1200,
     retries: 0,
     port: 161,
-    macSearch: {
-      dot1dTpFdbPortOid: '1.3.6.1.2.1.17.4.3.1.2',
-      dot1dBasePortIfIndexOid: '1.3.6.1.2.1.17.1.4.1.2',
-      dot1qTpFdbPortOid: '1.3.6.1.2.1.17.7.1.2.2.1.2',
-      voiceVlanMacOid: '1.3.6.1.4.1.9.9.315.1.2.3.1.1',
-    }
   });
-  const [backupConfig, setBackupConfig] = React.useState({
-    enabled: false,
-    intervalHours: 6,
-    networkSharePath: '',
-    scopeMode: 'all' as 'all' | 'filtered',
-    scopeVendors: '',
-    scopeBranches: '',
-    username: '',
-    domain: '',
-    password: '',
-  });
-  const [backupRuns, setBackupRuns] = React.useState<BackupRun[]>([]);
   const [sshReadonlyConfig, setSshReadonlyConfig] = React.useState({
     username: '',
     password: '',
@@ -204,47 +216,8 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
               timeoutMs: Number(snmpData.snmp.timeoutMs || 1200),
               retries: Number(snmpData.snmp.retries || 0),
               port: Number(snmpData.snmp.port || 161),
-              macSearch: {
-                dot1dTpFdbPortOid: snmpData.snmp.macSearch?.dot1dTpFdbPortOid || '1.3.6.1.2.1.17.4.3.1.2',
-                dot1dBasePortIfIndexOid: snmpData.snmp.macSearch?.dot1dBasePortIfIndexOid || '1.3.6.1.2.1.17.1.4.1.2',
-                dot1qTpFdbPortOid: snmpData.snmp.macSearch?.dot1qTpFdbPortOid || '1.3.6.1.2.1.17.7.1.2.2.1.2',
-                voiceVlanMacOid: snmpData.snmp.macSearch?.voiceVlanMacOid || '1.3.6.1.4.1.9.9.315.1.2.3.1.1',
-              }
             });
           }
-        }
-        const [backupConfigResp, backupHistoryResp] = await Promise.all([
-          fetch('/api/backup/config', {
-            headers: {
-              'x-user-role': role || 'viewer',
-              'x-user-name': username || 'unknown'
-            }
-          }),
-          fetch('/api/backup/history', {
-            headers: {
-              'x-user-role': role || 'viewer',
-              'x-user-name': username || 'unknown'
-            }
-          })
-        ]);
-        if (backupConfigResp.ok) {
-          const backupData = await backupConfigResp.json();
-          const cfg = backupData.config || {};
-          setBackupConfig({
-            enabled: cfg.enabled === true,
-            intervalHours: Number(cfg.intervalHours || 6),
-            networkSharePath: cfg.networkSharePath || '',
-            scopeMode: cfg.scope?.mode === 'filtered' ? 'filtered' : 'all',
-            scopeVendors: Array.isArray(cfg.scope?.vendors) ? cfg.scope.vendors.join(', ') : '',
-            scopeBranches: Array.isArray(cfg.scope?.branches) ? cfg.scope.branches.join(', ') : '',
-            username: cfg.credentials?.username || '',
-            domain: cfg.credentials?.domain || '',
-            password: '',
-          });
-        }
-        if (backupHistoryResp.ok) {
-          const runsData = await backupHistoryResp.json();
-          setBackupRuns(Array.isArray(runsData.runs) ? runsData.runs : []);
         }
         const sshReadonlyResp = await fetch('/api/config/ssh-readonly', {
           headers: {
@@ -455,13 +428,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       city: String(discoveryConfig.city || '').trim() || 'Ульяновск',
       branch: String(discoveryConfig.branch || '').trim() || 'ULN',
     };
-    const parseResponseSafe = (raw: string) => {
-      try {
-        return raw ? JSON.parse(raw) : {};
-      } catch {
-        return { error: raw || 'Discovery failed' };
-      }
-    };
     try {
       const response = await fetch('/api/discovery/start', {
         method: 'POST',
@@ -472,10 +438,9 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         },
         body: JSON.stringify(payload),
       });
-      const raw = await response.text();
-      const data = parseResponseSafe(raw);
+      const data = await readApiPayload(response, 'Discovery scan failed');
       if (!response.ok) {
-        alert(data.error || 'Discovery failed');
+        alert(operationFailedMessage('Discovery scan', data, response.status));
         return;
       }
       const jobId = String(data.jobId || '').trim();
@@ -493,10 +458,9 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             'x-user-name': username || 'unknown'
           }
         });
-        const statusRaw = await statusResp.text();
-        const statusData = parseResponseSafe(statusRaw);
+        const statusData = await readApiPayload(statusResp, 'Discovery status check failed');
         if (!statusResp.ok) {
-          throw new Error(statusData.error || 'Discovery status check failed');
+          throw new Error(operationFailedMessage('Discovery status check', statusData, statusResp.status));
         }
         if (statusData.status === 'running') {
           if (attempts >= maxAttempts) {
@@ -504,12 +468,12 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             return;
           }
           window.setTimeout(() => {
-            poll().catch(() => alert('Failed to initiate discovery.'));
+            poll().catch((e) => alert(operationFailedMessage('Discovery status check', e instanceof Error ? e.message : e)));
           }, 2000);
           return;
         }
         if (statusData.status === 'error') {
-          alert(statusData.error || 'Discovery failed');
+          alert(operationFailedMessage('Discovery scan', statusData));
           return;
         }
         const summary = statusData.summary || {};
@@ -517,9 +481,9 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
           `${t('discoveryScanned')}: ${summary.scanned ?? 0}\nSkipped existing: ${summary.skippedExisting ?? 0}\nSNMP found: ${summary.snmpFound ?? 0}\n${t('discoveryAdded')}: ${summary.added ?? 0}`
         );
       };
-      poll().catch((e) => alert(e instanceof Error ? e.message : 'Failed to initiate discovery.'));
-    } catch {
-      alert('Failed to initiate discovery.');
+      poll().catch((e) => alert(operationFailedMessage('Discovery scan', e instanceof Error ? e.message : e)));
+    } catch (e) {
+      alert(operationFailedMessage('Discovery scan request', e instanceof Error ? e.message : e));
     }
   };
 
@@ -557,9 +521,9 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         },
         body: JSON.stringify(profileId ? { profileIds: [profileId] } : {}),
       });
-      const data = await response.json();
+      const data = await readApiPayload(response, 'Discovery watch run now failed');
       if (!response.ok) {
-        alert(data.error || 'Run now failed');
+        alert(operationFailedMessage('Discovery watch run now', data, response.status));
         return;
       }
       if (Array.isArray(data.profiles)) setWatchProfiles(data.profiles);
@@ -575,8 +539,8 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         /* ignore */
       }
       alert(`Profiles run: ${(data.runs || []).length}`);
-    } catch {
-      alert('Run now failed');
+    } catch (e) {
+      alert(operationFailedMessage('Discovery watch run now request', e instanceof Error ? e.message : e));
     }
   };
 
@@ -600,81 +564,12 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
           timeoutMs: snmpConfig.timeoutMs,
           retries: snmpConfig.retries,
           port: snmpConfig.port,
-          macSearch: snmpConfig.macSearch,
         }),
       });
       const data = await response.json();
       alert(data.message);
     } catch (error) {
       alert('Failed to save SNMP config.');
-    }
-  };
-
-  const runBackupNow = async () => {
-    try {
-      const response = await fetch('/api/backup/run', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
-        },
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        alert(data.error || 'Backup run failed');
-        return;
-      }
-      const historyResp = await fetch('/api/backup/history', {
-        headers: {
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
-        }
-      });
-      if (historyResp.ok) {
-        const historyData = await historyResp.json();
-        setBackupRuns(Array.isArray(historyData.runs) ? historyData.runs : []);
-      }
-      alert('Backup run completed');
-    } catch {
-      alert('Backup run failed');
-    }
-  };
-
-  const saveBackupConfig = async () => {
-    try {
-      const response = await fetch('/api/backup/config', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
-        },
-        body: JSON.stringify({
-          enabled: backupConfig.enabled,
-          intervalHours: backupConfig.intervalHours,
-          networkSharePath: backupConfig.networkSharePath,
-          scope: {
-            mode: backupConfig.scopeMode,
-            vendors: backupConfig.scopeVendors.split(',').map((v) => v.trim()).filter(Boolean),
-            branches: backupConfig.scopeBranches.split(',').map((v) => v.trim()).filter(Boolean),
-          },
-          credentials: {
-            username: backupConfig.username,
-            domain: backupConfig.domain,
-            password: backupConfig.password || undefined,
-          }
-        }),
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        alert(data.error || 'Backup config save failed');
-        return;
-      }
-      alert('Backup config saved');
-      setBackupConfig((prev) => ({ ...prev, password: '' }));
-    } catch {
-      alert('Backup config save failed');
     }
   };
 
@@ -1406,38 +1301,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                   max={3}
                 />
               </div>
-              <div className="space-y-2 col-span-2">
-                <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('settingsMacFdbPortOid')}</label>
-                <input
-                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                  value={snmpConfig.macSearch.dot1dTpFdbPortOid}
-                  onChange={(e) => setSnmpConfig({ ...snmpConfig, macSearch: { ...snmpConfig.macSearch, dot1dTpFdbPortOid: e.target.value } })}
-                />
-              </div>
-              <div className="space-y-2 col-span-2">
-                <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('settingsBasePortIfIndexOid')}</label>
-                <input
-                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                  value={snmpConfig.macSearch.dot1dBasePortIfIndexOid}
-                  onChange={(e) => setSnmpConfig({ ...snmpConfig, macSearch: { ...snmpConfig.macSearch, dot1dBasePortIfIndexOid: e.target.value } })}
-                />
-              </div>
-              <div className="space-y-2 col-span-2">
-                <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('settingsQBridgePortOid')}</label>
-                <input
-                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                  value={snmpConfig.macSearch.dot1qTpFdbPortOid}
-                  onChange={(e) => setSnmpConfig({ ...snmpConfig, macSearch: { ...snmpConfig.macSearch, dot1qTpFdbPortOid: e.target.value } })}
-                />
-              </div>
-              <div className="space-y-2 col-span-2">
-                <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('settingsVoiceVlanMacOid')}</label>
-                <input
-                  className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                  value={snmpConfig.macSearch.voiceVlanMacOid}
-                  onChange={(e) => setSnmpConfig({ ...snmpConfig, macSearch: { ...snmpConfig.macSearch, voiceVlanMacOid: e.target.value } })}
-                />
-              </div>
             </div>
             <div className="flex justify-end">
                <button 
@@ -1530,100 +1393,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                         {t('deleteTemplate')}
                       </button>
                     </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-            <div className="border-t border-[#373a40] pt-6 space-y-4">
-              <h4 className="text-xs font-bold text-white uppercase tracking-widest">{t('settingsBackupScheduleTitle')}</h4>
-              <label className="flex items-center gap-2 text-xs text-[#c1c2c5]">
-                <input
-                  type="checkbox"
-                  checked={backupConfig.enabled}
-                  onChange={(e) => setBackupConfig({ ...backupConfig, enabled: e.target.checked })}
-                />
-                {t('settingsBackupEnabled')}
-              </label>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <input
-                  type="number"
-                  min={1}
-                  max={168}
-                  className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                  value={backupConfig.intervalHours}
-                  onChange={(e) => setBackupConfig({ ...backupConfig, intervalHours: Math.max(1, Number(e.target.value) || 1) })}
-                  placeholder={t('settingsBackupIntervalHours')}
-                />
-                <select
-                  className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                  value={backupConfig.scopeMode}
-                  onChange={(e) => setBackupConfig({ ...backupConfig, scopeMode: e.target.value as 'all' | 'filtered' })}
-                >
-                  <option value="all">{t('settingsBackupScopeAll')}</option>
-                  <option value="filtered">{t('settingsBackupScopeFiltered')}</option>
-                </select>
-                <input
-                  className="md:col-span-2 bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                  value={backupConfig.networkSharePath}
-                  onChange={(e) => setBackupConfig({ ...backupConfig, networkSharePath: e.target.value })}
-                  placeholder={t('settingsBackupSharePath')}
-                />
-                <input
-                  className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                  value={backupConfig.scopeVendors}
-                  onChange={(e) => setBackupConfig({ ...backupConfig, scopeVendors: e.target.value })}
-                  placeholder={t('settingsBackupScopeVendors')}
-                />
-                <input
-                  className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                  value={backupConfig.scopeBranches}
-                  onChange={(e) => setBackupConfig({ ...backupConfig, scopeBranches: e.target.value })}
-                  placeholder={t('settingsBackupScopeBranches')}
-                />
-                <input
-                  className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                  value={backupConfig.username}
-                  onChange={(e) => setBackupConfig({ ...backupConfig, username: e.target.value })}
-                  placeholder={t('username')}
-                />
-                <input
-                  className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                  value={backupConfig.domain}
-                  onChange={(e) => setBackupConfig({ ...backupConfig, domain: e.target.value })}
-                  placeholder={t('settingsBackupDomain')}
-                />
-                <input
-                  type="password"
-                  className="md:col-span-2 bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                  value={backupConfig.password}
-                  onChange={(e) => setBackupConfig({ ...backupConfig, password: e.target.value })}
-                  placeholder={t('settingsBackupPassword')}
-                />
-              </div>
-              <p className="text-[10px] text-[#5c5f66]">{t('settingsBackupShareHint')}</p>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={saveBackupConfig}
-                  className="px-4 py-2 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-[10px] font-bold uppercase tracking-widest"
-                >
-                  {t('saveChanges')}
-                </button>
-                <button
-                  type="button"
-                  onClick={runBackupNow}
-                  className="px-4 py-2 bg-[#40c057] hover:bg-[#37b24d] text-white rounded text-[10px] font-bold uppercase tracking-widest"
-                >
-                  {t('settingsBackupRunNow')}
-                </button>
-              </div>
-              <div className="space-y-2 max-h-[220px] overflow-auto border-t border-[#373a40] pt-3">
-                {!backupRuns.length && <div className="text-xs text-[#909296]">{t('settingsBackupNoHistory')}</div>}
-                {backupRuns.map((run) => (
-                  <div key={run.id} className="border border-[#373a40] rounded p-2 bg-[#141517] text-xs text-[#c1c2c5]">
-                    <div className="text-white">{run.id}</div>
-                    <div>{run.status} | {run.summary.success}/{run.summary.total}</div>
-                    <div className="text-[#909296]">{run.startedAt}</div>
                   </div>
                 ))}
               </div>
