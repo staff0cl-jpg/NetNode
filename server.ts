@@ -17,6 +17,7 @@ dotenv.config();
 type InventoryItem = {
   id: string;
   name: string;
+  zoneKey?: string;
   vendor: string;
   model: string;
   category?: string;
@@ -255,9 +256,11 @@ type TopologyLink = {
 };
 type TopologyMode = "ip" | "fc";
 type TopologyLayout = Record<string, { x: number; y: number }>;
+type TopologyZoneLabelOverrides = Record<string, string>;
 let topologyLinks: TopologyLink[] = [];
 let topologyLayout: TopologyLayout = {};
 let topologyLayoutScopes: Record<TopologyMode, Record<string, TopologyLayout>> = { ip: {}, fc: {} };
+let topologyZoneLabelOverridesScopes: Record<TopologyMode, Record<string, TopologyZoneLabelOverrides>> = { ip: {}, fc: {} };
 type TopologySnapshot = {
   id: string;
   createdAt: string;
@@ -267,6 +270,7 @@ type TopologySnapshot = {
   links: TopologyLink[];
   layout: TopologyLayout;
   layoutScopes?: Record<TopologyMode, Record<string, TopologyLayout>>;
+  zoneLabelOverridesScopes?: Record<TopologyMode, Record<string, TopologyZoneLabelOverrides>>;
 };
 let topologySnapshots: TopologySnapshot[] = [];
 
@@ -288,6 +292,19 @@ function cloneTopologyLayoutScopes(
   return {
     ip: Object.fromEntries(Object.entries(scopes.ip || {}).map(([branch, layout]) => [branch, cloneTopologyLayout(layout)])),
     fc: Object.fromEntries(Object.entries(scopes.fc || {}).map(([branch, layout]) => [branch, cloneTopologyLayout(layout)])),
+  };
+}
+
+function cloneTopologyZoneLabelOverrides(overrides: TopologyZoneLabelOverrides): TopologyZoneLabelOverrides {
+  return { ...(overrides || {}) };
+}
+
+function cloneTopologyZoneLabelOverrideScopes(
+  scopes: Record<TopologyMode, Record<string, TopologyZoneLabelOverrides>>
+): Record<TopologyMode, Record<string, TopologyZoneLabelOverrides>> {
+  return {
+    ip: Object.fromEntries(Object.entries(scopes.ip || {}).map(([branch, overrides]) => [branch, cloneTopologyZoneLabelOverrides(overrides)])),
+    fc: Object.fromEntries(Object.entries(scopes.fc || {}).map(([branch, overrides]) => [branch, cloneTopologyZoneLabelOverrides(overrides)])),
   };
 }
 
@@ -318,6 +335,11 @@ function getTopologyLayoutForScope(mode: TopologyMode, branch?: string): Topolog
   const scoped = topologyLayoutScopes[mode]?.[key];
   if (scoped) return cloneTopologyLayout(scoped);
   return scopedTopologyLayout(topologyLayout, branch);
+}
+
+function getTopologyZoneLabelOverridesForScope(mode: TopologyMode, branch?: string): TopologyZoneLabelOverrides {
+  const key = topologyLayoutBranchKey(branch);
+  return cloneTopologyZoneLabelOverrides(topologyZoneLabelOverridesScopes[mode]?.[key] || {});
 }
 
 function getSnapshotLayoutForScope(snapshot: TopologySnapshot, mode: TopologyMode, branch?: string): TopologyLayout {
@@ -366,6 +388,15 @@ function renameTopologyLayoutBranchScopes(from: string, to: string) {
   });
 }
 
+function renameTopologyZoneLabelBranchScopes(from: string, to: string) {
+  (Object.keys(topologyZoneLabelOverridesScopes) as TopologyMode[]).forEach((mode) => {
+    const scoped = topologyZoneLabelOverridesScopes[mode];
+    if (!scoped[from]) return;
+    scoped[to] = { ...cloneTopologyZoneLabelOverrides(scoped[to] || {}), ...cloneTopologyZoneLabelOverrides(scoped[from]) };
+    delete scoped[from];
+  });
+}
+
 function saveTopologySnapshot(actor: string, reason: string, branch?: string) {
   const snapshot: TopologySnapshot = {
     id: `topo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -376,6 +407,7 @@ function saveTopologySnapshot(actor: string, reason: string, branch?: string) {
     links: cloneTopologyLinks(topologyLinks),
     layout: cloneTopologyLayout(topologyLayout),
     layoutScopes: cloneTopologyLayoutScopes(topologyLayoutScopes),
+    zoneLabelOverridesScopes: cloneTopologyZoneLabelOverrideScopes(topologyZoneLabelOverridesScopes),
   };
   topologySnapshots.push(snapshot);
   if (topologySnapshots.length > 60) {
@@ -1427,6 +1459,19 @@ function normalizeProtocol(_mode?: string): DiscoveryProtocol {
   return "snmp";
 }
 
+function deriveZoneKeyFromDeviceName(deviceName: string): string {
+  const trimmed = String(deviceName || "").trim();
+  if (!trimmed) return "";
+  const normalized = trimmed.replace(/[\s_-]+\d+$/, "").trim();
+  return normalized || trimmed;
+}
+
+function resolveDeviceZone(name: string, fallback?: string): string {
+  const zoneKey = deriveZoneKeyFromDeviceName(name);
+  const fallbackValue = String(fallback || "").trim();
+  return zoneKey || fallbackValue || "Core";
+}
+
 function upsertInventoryMetaFromItem(item: Partial<InventoryItem>) {
   const pushUnique = (arr: string[], value?: string) => {
     const v = String(value || "").trim();
@@ -1505,13 +1550,14 @@ async function runDiscoveryScan(input: DiscoveryScanInput): Promise<DiscoverySca
       discovered.push({
         id: `d-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         name: probe.sysName?.trim() || `${vendor}-SNMP-${ip.replace(/\./g, "-")}`,
+        zoneKey: deriveZoneKeyFromDeviceName(probe.sysName?.trim() || `${vendor}-SNMP-${ip.replace(/\./g, "-")}`),
         vendor,
         model,
         category,
         subcategory,
         branch,
         city,
-        zone,
+        zone: resolveDeviceZone(probe.sysName?.trim() || `${vendor}-SNMP-${ip.replace(/\./g, "-")}`, zone),
         ip,
         status: "online",
         uptimeSeconds,
@@ -3603,6 +3649,15 @@ async function startServer() {
     vlan?: number;
     reason: string;
   };
+type MacSearchEvent = {
+  stage: "request" | "device" | "trace";
+  status: "info" | "success" | "warning" | "error";
+  message: string;
+  timestamp: string;
+  deviceId?: string;
+  deviceName?: string;
+  ip?: string;
+};
 
   function normalizeIfToken(value: string): string {
     return String(value || "")
@@ -3651,9 +3706,23 @@ async function startServer() {
     };
   }
 
-  async function collectMacHitsForDevices(matcher: (mac: string) => boolean, matchType: "exact" | "suffix", targets: InventoryItem[]): Promise<MacHit[]> {
+  async function collectMacHitsForDevices(
+    matcher: (mac: string) => boolean,
+    matchType: "exact" | "suffix",
+    targets: InventoryItem[],
+    onEvent?: (event: Omit<MacSearchEvent, "timestamp">) => void
+  ): Promise<MacHit[]> {
     const results: MacHit[] = [];
     await forEachWithLimit(targets, 8, async (device) => {
+      const beforeCount = results.length;
+      onEvent?.({
+        stage: "device",
+        status: "info",
+        message: `Querying ${device.name} (${device.ip})`,
+        deviceId: device.id,
+        deviceName: device.name,
+        ip: device.ip,
+      });
       try {
         const dot1dPortOid = String(snmpConfig.macSearch?.dot1dTpFdbPortOid || "1.3.6.1.2.1.17.4.3.1.2").trim();
         const basePortIfIndexOid = String(snmpConfig.macSearch?.dot1dBasePortIfIndexOid || "1.3.6.1.2.1.17.1.4.1.2").trim();
@@ -3718,8 +3787,26 @@ async function startServer() {
             timestamp: new Date().toISOString(),
           });
         });
+        const deviceMatches = results.length - beforeCount;
+        onEvent?.({
+          stage: "device",
+          status: deviceMatches > 0 ? "success" : "warning",
+          message: deviceMatches > 0
+            ? `Matched ${deviceMatches} entr${deviceMatches === 1 ? "y" : "ies"} on ${device.name}`
+            : `No match on ${device.name}`,
+          deviceId: device.id,
+          deviceName: device.name,
+          ip: device.ip,
+        });
       } catch {
-        /* keep partial results from other devices */
+        onEvent?.({
+          stage: "device",
+          status: "error",
+          message: `SNMP query failed on ${device.name}`,
+          deviceId: device.id,
+          deviceName: device.name,
+          ip: device.ip,
+        });
       }
     });
     return sortMacHitsDeterministically(results);
@@ -3767,16 +3854,35 @@ async function startServer() {
     const mode = String(req.body?.mode || "single").trim().toLowerCase() === "trace" ? "trace" : "single";
     const maxHopsRaw = Number(req.body?.maxHops);
     const maxHops = Number.isFinite(maxHopsRaw) ? Math.max(1, Math.min(50, Math.floor(maxHopsRaw))) : 10;
-    const results = await collectMacHitsForDevices(macMatcher.matcher, macMatcher.matchType, targets);
+    const events: MacSearchEvent[] = [];
+    const addEvent = (event: Omit<MacSearchEvent, "timestamp">) => {
+      events.push({ ...event, timestamp: new Date().toISOString() });
+    };
+    addEvent({
+      stage: "request",
+      status: "info",
+      message: `Starting ${mode} search for ${macMatcher.displayMac} (${macMatcher.matchType}) across ${targets.length} device(s).`,
+    });
+    const results = await collectMacHitsForDevices(macMatcher.matcher, macMatcher.matchType, targets, addEvent);
+    addEvent({
+      stage: "request",
+      status: "success",
+      message: `Initial lookup completed with ${results.length} hit(s).`,
+    });
 
     if (mode !== "trace") {
       logAction(actorName(req), "MAC Search", `MAC ${macMatcher.displayMac} (${macMatcher.matchType}) -> ${results.length} hit(s)`, "automation");
-      return res.json({ success: true, mac: macMatcher.displayMac, matchType: macMatcher.matchType, results });
+      return res.json({ success: true, mac: macMatcher.displayMac, matchType: macMatcher.matchType, results, events });
     }
 
     const hops: MacTraceHop[] = [];
     const ambiguityNotes: string[] = [];
     if (!results.length) {
+      addEvent({
+        stage: "trace",
+        status: "warning",
+        message: "Trace skipped because no initial hit was found.",
+      });
       return res.json({
         success: true,
         mode: "trace",
@@ -3785,6 +3891,7 @@ async function startServer() {
         finalStatus: "not_found" as MacTraceStatus,
         hops,
         ambiguityNotes,
+        events,
       });
     }
 
@@ -3804,6 +3911,14 @@ async function startServer() {
       const devicePortKey = `${current.deviceId}::${normalizeIfToken(inPort)}`;
       if (visitedDevicePort.has(devicePortKey) || visitedDevices.has(current.deviceId)) {
         finalStatus = "loop_detected";
+        addEvent({
+          stage: "trace",
+          status: "warning",
+          message: `Loop guard triggered on ${current.deviceName} ${inPort}.`,
+          deviceId: current.deviceId,
+          deviceName: current.deviceName,
+          ip: current.ip,
+        });
         hops.push({
           device: current.deviceName,
           ip: current.ip,
@@ -3829,6 +3944,14 @@ async function startServer() {
 
       if (portType === "access" || portType === "unknown") {
         finalStatus = "found_access";
+        addEvent({
+          stage: "trace",
+          status: "success",
+          message: `Trace ended on ${current.deviceName} ${inPort} (${portType}).`,
+          deviceId: current.deviceId,
+          deviceName: current.deviceName,
+          ip: current.ip,
+        });
         baseHop.reason = portType === "access"
           ? "MAC terminates on access/edge port."
           : "MAC found but port type is unknown; treating as edge termination.";
@@ -3840,6 +3963,14 @@ async function startServer() {
       const neighbors = findTopologyNeighbors(current.deviceId, inPort);
       if (!neighbors.length) {
         finalStatus = "transit_last_seen";
+        addEvent({
+          stage: "trace",
+          status: "warning",
+          message: `No topology neighbor found for ${current.deviceName} ${inPort}.`,
+          deviceId: current.deviceId,
+          deviceName: current.deviceName,
+          ip: current.ip,
+        });
         baseHop.reason = "Transit/trunk port but no neighbor link found in topology.";
         hops.push(baseHop);
         break;
@@ -3848,6 +3979,14 @@ async function startServer() {
       if (neighbors.length > 1) {
         finalStatus = "ambiguous";
         ambiguityNotes.push(`Multiple neighbor links from ${current.deviceName} ${inPort}; deterministic first link selected.`);
+        addEvent({
+          stage: "trace",
+          status: "warning",
+          message: `Multiple neighbors from ${current.deviceName} ${inPort}; using first candidate.`,
+          deviceId: current.deviceId,
+          deviceName: current.deviceName,
+          ip: current.ip,
+        });
       }
       baseHop.outPort = nextLink.localPort;
       baseHop.reason = `Transit via ${portType} toward neighbor interface ${nextLink.remotePort || "unknown"}.`;
@@ -3857,13 +3996,34 @@ async function startServer() {
       if (!neighbor) {
         finalStatus = "transit_last_seen";
         ambiguityNotes.push(`Neighbor device ${nextLink.neighborId} is missing from inventory.`);
+        addEvent({
+          stage: "trace",
+          status: "error",
+          message: `Neighbor ${nextLink.neighborId} is missing from inventory.`,
+        });
         break;
       }
 
-      const nextHits = await collectMacHitsForDevices(macMatcher.matcher, macMatcher.matchType, [neighbor]);
+      addEvent({
+        stage: "trace",
+        status: "info",
+        message: `Traversing to neighbor ${neighbor.name} via ${nextLink.remotePort || "unknown"}...`,
+        deviceId: neighbor.id,
+        deviceName: neighbor.name,
+        ip: neighbor.ip,
+      });
+      const nextHits = await collectMacHitsForDevices(macMatcher.matcher, macMatcher.matchType, [neighbor], addEvent);
       if (!nextHits.length) {
         finalStatus = "transit_last_seen";
         ambiguityNotes.push(`No MAC entry on neighbor ${neighbor.name} (${neighbor.ip}); trace ends at last transit point.`);
+        addEvent({
+          stage: "trace",
+          status: "warning",
+          message: `No MAC entry on neighbor ${neighbor.name}; trace ended.`,
+          deviceId: neighbor.id,
+          deviceName: neighbor.name,
+          ip: neighbor.ip,
+        });
         break;
       }
       if (nextHits.length > 1) {
@@ -3874,9 +4034,19 @@ async function startServer() {
 
       if (depth === maxHops - 1) {
         finalStatus = "depth_limit";
+        addEvent({
+          stage: "trace",
+          status: "warning",
+          message: `Reached max hops limit (${maxHops}).`,
+        });
       }
     }
 
+    addEvent({
+      stage: "trace",
+      status: finalStatus === "found_access" ? "success" : finalStatus === "transit_last_seen" ? "warning" : "info",
+      message: `Trace finished with status: ${finalStatus}.`,
+    });
     logAction(actorName(req), "MAC Trace", `MAC ${macMatcher.displayMac} (${macMatcher.matchType}) -> ${finalStatus} (${hops.length} hop(s))`, "automation");
     return res.json({
       success: true,
@@ -3888,6 +4058,7 @@ async function startServer() {
       hops,
       ambiguityNotes,
       results,
+      events,
     });
   });
 
@@ -4072,10 +4243,12 @@ async function startServer() {
         return {
           ...item,
           name: nextName,
+          zoneKey: deriveZoneKeyFromDeviceName(nextName),
           vendor: nextVendor,
           model: nextModel,
           category: item.category || nextCategory,
           branch: item.branch || "ULN",
+          zone: resolveDeviceZone(nextName, item.zone),
           status: "online" as const,
           uptimeSeconds,
           uptime: formatDuration(uptimeSeconds),
@@ -4087,6 +4260,7 @@ async function startServer() {
         res.json(
           inventory.map((item) => ({
             ...item,
+            zoneKey: deriveZoneKeyFromDeviceName(item.name || ""),
             status: item.status ?? ("offline" as const),
           }))
         )
@@ -4106,11 +4280,12 @@ async function startServer() {
     const newSwitch = {
       ...sw,
       id: Date.now().toString(),
+      zoneKey: deriveZoneKeyFromDeviceName(String(sw.name || "")),
       category,
       subcategory: fcSubcategory || sw.subcategory || "Core",
       branch: sw.branch || "ULN",
       city: sw.city || "Ульяновск",
-      zone: sw.zone || "Core",
+      zone: resolveDeviceZone(String(sw.name || ""), sw.zone || "Core"),
     } as InventoryItem;
     upsertInventoryMetaFromItem(newSwitch);
     inventory.push(newSwitch);
@@ -4126,6 +4301,8 @@ async function startServer() {
     
     const oldName = inventory[index].name;
     inventory[index] = { ...inventory[index], ...req.body } as InventoryItem;
+    inventory[index].zoneKey = deriveZoneKeyFromDeviceName(inventory[index].name || "");
+    inventory[index].zone = resolveDeviceZone(inventory[index].name || "", inventory[index].zone);
     const category = String(inventory[index].category || "").toLowerCase();
     if (category === "fc switch" || category === "fibre channel switch" || category === "fiber channel switch") {
       inventory[index].subcategory = deriveFcSubcategoryByName(inventory[index].name || "");
@@ -4573,7 +4750,11 @@ async function startServer() {
     const branch = String(req.query.branch || "").trim();
     const topologyMode = normalizeTopologyMode(req.query.topologyMode);
     topologyLinks = topologyLinks.map((l) => ensureTopologyLinkId(l));
-    res.json({ links: topologyLinks, layout: getTopologyLayoutForScope(topologyMode, branch || undefined) });
+    res.json({
+      links: topologyLinks,
+      layout: getTopologyLayoutForScope(topologyMode, branch || undefined),
+      zoneLabelOverrides: getTopologyZoneLabelOverridesForScope(topologyMode, branch || undefined),
+    });
   });
 
   app.get("/api/topology/trunk-diagnostics", checkRole(["admin", "operator", "viewer"]), async (req, res) => {
@@ -4641,12 +4822,17 @@ async function startServer() {
     if (!branch) {
       topologyLinks = cloneTopologyLinks(snapshot.links).map((l) => ensureTopologyLinkId(l));
       setTopologyLayoutForScope(topologyMode, undefined, getSnapshotLayoutForScope(snapshot, topologyMode));
+      topologyZoneLabelOverridesScopes = cloneTopologyZoneLabelOverrideScopes(snapshot.zoneLabelOverridesScopes || { ip: {}, fc: {} });
     } else {
       const ids = branchDeviceIdSet(branch);
       const currentExternalLinks = topologyLinks.filter((l) => !(ids.has(l.source) && ids.has(l.target)));
       const targetBranchLinks = snapshot.links.filter((l) => ids.has(l.source) && ids.has(l.target));
       topologyLinks = [...currentExternalLinks, ...cloneTopologyLinks(targetBranchLinks).map((l) => ensureTopologyLinkId(l))];
       setTopologyLayoutForScope(topologyMode, branch, getSnapshotLayoutForScope(snapshot, topologyMode, branch));
+      const key = topologyLayoutBranchKey(branch);
+      topologyZoneLabelOverridesScopes[topologyMode][key] = cloneTopologyZoneLabelOverrides(
+        snapshot.zoneLabelOverridesScopes?.[topologyMode]?.[key] || {}
+      );
     }
     logAction(actor, "Topology Restore", `Restored version ${snapshot.id}${branch ? ` (branch: ${branch})` : ""}`, "inventory");
     return res.json({
@@ -4654,6 +4840,7 @@ async function startServer() {
       restored: { id: snapshot.id, createdAt: snapshot.createdAt, reason: snapshot.reason },
       links: topologyLinks,
       layout: getTopologyLayoutForScope(topologyMode, branch || undefined),
+      zoneLabelOverrides: getTopologyZoneLabelOverridesForScope(topologyMode, branch || undefined),
     });
   });
 
@@ -4678,12 +4865,21 @@ async function startServer() {
     topologySnapshots.splice(idx, 1);
     topologyLinks = cloneTopologyLinks(snapshot.links).map((l) => ensureTopologyLinkId(l));
     setTopologyLayoutForScope(topologyMode, branch || undefined, getSnapshotLayoutForScope(snapshot, topologyMode, branch || undefined));
+    if (!branch) {
+      topologyZoneLabelOverridesScopes = cloneTopologyZoneLabelOverrideScopes(snapshot.zoneLabelOverridesScopes || { ip: {}, fc: {} });
+    } else {
+      const key = topologyLayoutBranchKey(branch);
+      topologyZoneLabelOverridesScopes[topologyMode][key] = cloneTopologyZoneLabelOverrides(
+        snapshot.zoneLabelOverridesScopes?.[topologyMode]?.[key] || {}
+      );
+    }
     logAction(actor, "Topology Undo", `Restored version ${snapshot.id}${branch ? ` (branch: ${branch})` : ""}`, "inventory");
     return res.json({
       success: true,
       restored: { id: snapshot.id, createdAt: snapshot.createdAt, reason: snapshot.reason },
       links: topologyLinks,
       layout: getTopologyLayoutForScope(topologyMode, branch || undefined),
+      zoneLabelOverrides: getTopologyZoneLabelOverridesForScope(topologyMode, branch || undefined),
     });
   });
 
@@ -4836,10 +5032,54 @@ async function startServer() {
       String(profile.branch || "").trim() === from ? { ...profile, branch: to } : profile
     );
     renameTopologyLayoutBranchScopes(from, to);
+    renameTopologyZoneLabelBranchScopes(from, to);
 
     const actor = actorName(req);
     logAction(actor, "Rename Branch", `${from} -> ${to}, affected: ${renamed}`, "inventory");
     return res.json({ success: true, renamed, from, to, branches: inventoryMeta.branches });
+  });
+
+  app.post("/api/topology/zones/label", checkRole(["admin", "operator"]), (req, res) => {
+    const body = req.body as { zoneKey?: string; label?: string; branch?: string; topologyMode?: string };
+    const zoneKey = String(body.zoneKey || "").trim();
+    const label = String(body.label || "").trim();
+    const branch = String(body.branch || "").trim();
+    const topologyMode = normalizeTopologyMode(body.topologyMode);
+    if (!zoneKey) return res.status(400).json({ error: "zoneKey is required" });
+
+    const scopeKey = topologyLayoutBranchKey(branch || undefined);
+    const current = topologyZoneLabelOverridesScopes[topologyMode][scopeKey] || {};
+    const currentLabel = String(current[zoneKey] || "").trim();
+    if (currentLabel === label) {
+      return res.json({
+        success: true,
+        zoneKey,
+        label: label || null,
+        zoneLabelOverrides: getTopologyZoneLabelOverridesForScope(topologyMode, branch || undefined),
+      });
+    }
+
+    saveTopologySnapshot(actorName(req), "topology.zone.label.rename", branch || undefined);
+    const next = cloneTopologyZoneLabelOverrides(current);
+    if (label) next[zoneKey] = label;
+    else delete next[zoneKey];
+    topologyZoneLabelOverridesScopes[topologyMode][scopeKey] = next;
+
+    logAction(
+      actorName(req),
+      "Rename Zone Label",
+      label
+        ? `zone=${zoneKey} -> "${label}"${branch ? ` (branch: ${branch}, mode: ${topologyMode})` : ` (mode: ${topologyMode})`}`
+        : `zone=${zoneKey} label cleared${branch ? ` (branch: ${branch}, mode: ${topologyMode})` : ` (mode: ${topologyMode})`}`,
+      "inventory"
+    );
+
+    return res.json({
+      success: true,
+      zoneKey,
+      label: label || null,
+      zoneLabelOverrides: getTopologyZoneLabelOverridesForScope(topologyMode, branch || undefined),
+    });
   });
 
   app.post("/api/topology/links", checkRole(["admin", "operator"]), (req, res) => {

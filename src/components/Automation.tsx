@@ -112,6 +112,7 @@ type InventoryDevice = {
   ip: string;
   vendor?: string;
   branch?: string;
+  city?: string;
 };
 
 type MacSearchResult = {
@@ -152,6 +153,19 @@ type MacTraceResult = {
   hops: MacTraceHop[];
   ambiguityNotes?: string[];
   results?: MacSearchResult[];
+  events?: MacSearchEvent[];
+};
+type MacSearchEvent = {
+  stage: 'request' | 'device' | 'trace';
+  status: 'info' | 'success' | 'warning' | 'error';
+  message: string;
+  timestamp: string;
+  deviceName?: string;
+  ip?: string;
+};
+type InventoryMeta = {
+  branches?: string[];
+  cities?: string[];
 };
 
 type BackupRun = {
@@ -184,6 +198,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
   const [vlanName, setVlanName] = React.useState<string>('AUTO_VLAN_100');
 
   const [inventory, setInventory] = React.useState<InventoryDevice[]>([]);
+  const [inventoryMeta, setInventoryMeta] = React.useState<InventoryMeta>({});
   const [selectedDeviceIds, setSelectedDeviceIds] = React.useState<string[]>([]);
 
   const [vendorFilter, setVendorFilter] = React.useState('');
@@ -213,6 +228,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
   const [macSearching, setMacSearching] = React.useState(false);
   const [macResults, setMacResults] = React.useState<MacSearchResult[]>([]);
   const [macTraceResult, setMacTraceResult] = React.useState<MacTraceResult | null>(null);
+  const [macEvents, setMacEvents] = React.useState<MacSearchEvent[]>([]);
   const [macMode, setMacMode] = React.useState<'trace' | 'single'>('trace');
   const [macMaxHops, setMacMaxHops] = React.useState<number>(10);
   const [macScope, setMacScope] = React.useState<'all' | 'branch' | 'selected'>('all');
@@ -227,6 +243,13 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
       voiceOuiPrefixes: '',
     },
   });
+  const [voiceOuiList, setVoiceOuiList] = React.useState<string[]>([]);
+  const [voiceOuiInput, setVoiceOuiInput] = React.useState('');
+  const [voiceCityFilter, setVoiceCityFilter] = React.useState('');
+  const [voiceBranchFilter, setVoiceBranchFilter] = React.useState('');
+  const [voiceSwitchFilter, setVoiceSwitchFilter] = React.useState('');
+  const [voiceVlanPreview, setVoiceVlanPreview] = React.useState<Array<{ ifIndex: string; vlan: number }>>([]);
+  const [voiceVlanLoading, setVoiceVlanLoading] = React.useState(false);
   const [backupConfig, setBackupConfig] = React.useState({
     enabled: false,
     intervalHours: 6,
@@ -254,6 +277,45 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
       .split(',')
       .map((x) => x.trim())
       .filter(Boolean);
+
+  const normalizeOuiPrefix = React.useCallback((value: string) => {
+    const hex = String(value || '').toLowerCase().replace(/[^0-9a-f]/g, '');
+    if (hex.length < 6 || hex.length > 12 || hex.length % 2 !== 0) return '';
+    return hex.match(/.{1,2}/g)?.join(':') || '';
+  }, []);
+
+  const availableCities = React.useMemo(() => {
+    const items = new Set<string>();
+    (inventoryMeta.cities || []).forEach((city) => items.add(String(city)));
+    inventory.forEach((device) => {
+      const city = String(device.city || '').trim();
+      if (city) items.add(city);
+    });
+    return Array.from(items).sort((a, b) => a.localeCompare(b));
+  }, [inventory, inventoryMeta.cities]);
+
+  const availableBranches = React.useMemo(() => {
+    const items = new Set<string>();
+    inventory
+      .filter((device) => !voiceCityFilter || String(device.city || '').trim() === voiceCityFilter)
+      .forEach((device) => {
+        const branch = String(device.branch || '').trim();
+        if (branch) items.add(branch);
+      });
+    (inventoryMeta.branches || []).forEach((branch) => {
+      if (branch) items.add(String(branch));
+    });
+    return Array.from(items).sort((a, b) => a.localeCompare(b));
+  }, [inventory, inventoryMeta.branches, voiceCityFilter]);
+
+  const availableSwitches = React.useMemo(
+    () =>
+      inventory
+        .filter((device) => (!voiceCityFilter || String(device.city || '').trim() === voiceCityFilter))
+        .filter((device) => (!voiceBranchFilter || String(device.branch || '').trim() === voiceBranchFilter))
+        .sort((a, b) => `${a.name}|${a.ip}`.localeCompare(`${b.name}|${b.ip}`)),
+    [inventory, voiceBranchFilter, voiceCityFilter]
+  );
 
   const buildPlan = React.useCallback(() => {
     const filters = {
@@ -309,6 +371,17 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
     }
   }, [headers]);
 
+  const fetchInventoryMeta = React.useCallback(async () => {
+    try {
+      const response = await fetch('/api/inventory/meta', { headers });
+      if (!response.ok) return;
+      const data = await response.json();
+      setInventoryMeta(data && typeof data === 'object' ? data : {});
+    } catch {
+      /* ignore */
+    }
+  }, [headers]);
+
   const fetchJobs = React.useCallback(async () => {
     setJobsLoading(true);
     try {
@@ -346,13 +419,33 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
 
   React.useEffect(() => {
     fetchInventory();
+    fetchInventoryMeta();
     fetchJobs();
-  }, [fetchInventory, fetchJobs]);
+  }, [fetchInventory, fetchInventoryMeta, fetchJobs]);
 
   React.useEffect(() => {
     const timer = window.setInterval(fetchJobs, 5000);
     return () => window.clearInterval(timer);
   }, [fetchJobs]);
+
+  React.useEffect(() => {
+    if (voiceCityFilter && !availableCities.includes(voiceCityFilter)) {
+      setVoiceCityFilter('');
+    }
+  }, [availableCities, voiceCityFilter]);
+
+  React.useEffect(() => {
+    if (voiceBranchFilter && !availableBranches.includes(voiceBranchFilter)) {
+      setVoiceBranchFilter('');
+    }
+  }, [availableBranches, voiceBranchFilter]);
+
+  React.useEffect(() => {
+    if (voiceSwitchFilter && !availableSwitches.some((device) => device.id === voiceSwitchFilter)) {
+      setVoiceSwitchFilter('');
+      setVoiceVlanPreview([]);
+    }
+  }, [availableSwitches, voiceSwitchFilter]);
 
   React.useEffect(() => {
     if (!activeJobId) return;
@@ -429,6 +522,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
   const runMacSearch = async () => {
     setErrorText('');
     setMacSearching(true);
+    setMacEvents([]);
     try {
       const normalizedBranch = macBranchFilter.trim().toLowerCase();
       const deviceIds =
@@ -463,12 +557,14 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
           hops: Array.isArray(data?.hops) ? data.hops : [],
           ambiguityNotes: Array.isArray(data?.ambiguityNotes) ? data.ambiguityNotes : [],
           results: Array.isArray(data?.results) ? data.results : [],
+          events: Array.isArray(data?.events) ? data.events : [],
         });
         setMacResults(Array.isArray(data?.results) ? data.results : []);
       } else {
         setMacTraceResult(null);
         setMacResults(Array.isArray(data.results) ? data.results : []);
       }
+      setMacEvents(Array.isArray(data?.events) ? data.events : []);
     } catch {
       setErrorText(t('automationMacSearchFailed'));
     } finally {
@@ -503,17 +599,22 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
         if (snmpResp.ok) {
           const snmpData = await snmpResp.json();
           if (snmpData.snmp) {
+            const loadedOuiList = Array.isArray(snmpData.snmp.macSearch?.voiceOuiPrefixes)
+              ? snmpData.snmp.macSearch.voiceOuiPrefixes.map((prefix: unknown) => normalizeOuiPrefix(String(prefix))).filter(Boolean)
+              : String(snmpData.snmp.macSearch?.voiceOuiPrefixes || '')
+                  .split(/[\s,;]+/)
+                  .map((prefix) => normalizeOuiPrefix(prefix))
+                  .filter(Boolean);
             setSnmpConfig({
               macSearch: {
                 dot1dTpFdbPortOid: snmpData.snmp.macSearch?.dot1dTpFdbPortOid || '1.3.6.1.2.1.17.4.3.1.2',
                 dot1dBasePortIfIndexOid: snmpData.snmp.macSearch?.dot1dBasePortIfIndexOid || '1.3.6.1.2.1.17.1.4.1.2',
                 dot1qTpFdbPortOid: snmpData.snmp.macSearch?.dot1qTpFdbPortOid || '1.3.6.1.2.1.17.7.1.2.2.1.2',
                 voiceVlanMacOid: snmpData.snmp.macSearch?.voiceVlanMacOid || '1.3.6.1.4.1.9.9.315.1.2.3.1.1',
-                voiceOuiPrefixes: Array.isArray(snmpData.snmp.macSearch?.voiceOuiPrefixes)
-                  ? snmpData.snmp.macSearch.voiceOuiPrefixes.join('\n')
-                  : String(snmpData.snmp.macSearch?.voiceOuiPrefixes || ''),
+                voiceOuiPrefixes: loadedOuiList.join('\n'),
               },
             });
+            setVoiceOuiList(loadedOuiList);
           }
         }
         const [backupConfigResp, backupHistoryResp] = await Promise.all([
@@ -544,7 +645,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
       }
     };
     loadEnterpriseConfig();
-  }, [headers]);
+  }, [headers, normalizeOuiPrefix]);
 
   const handleSaveMacOidConfig = async () => {
     try {
@@ -556,7 +657,10 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
         headers,
         body: JSON.stringify({
           ...currentSnmp,
-          macSearch: snmpConfig.macSearch,
+          macSearch: {
+            ...snmpConfig.macSearch,
+            voiceOuiPrefixes: voiceOuiList,
+          },
         }),
       });
       const data = await response.json();
@@ -567,6 +671,58 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
       alert(data?.message || 'SNMP config saved.');
     } catch {
       alert('Failed to save SNMP config.');
+    }
+  };
+
+  const handleAddVoiceOuiPrefix = () => {
+    const normalized = normalizeOuiPrefix(voiceOuiInput);
+    if (!normalized) {
+      setErrorText(t('automationOuiInvalid'));
+      return;
+    }
+    if (voiceOuiList.includes(normalized)) {
+      setErrorText(t('automationOuiDuplicate'));
+      return;
+    }
+    setErrorText('');
+    const next = [...voiceOuiList, normalized];
+    setVoiceOuiList(next);
+    setSnmpConfig((prev) => ({ ...prev, macSearch: { ...prev.macSearch, voiceOuiPrefixes: next.join('\n') } }));
+    setVoiceOuiInput('');
+  };
+
+  const handleRemoveVoiceOuiPrefix = (prefix: string) => {
+    const next = voiceOuiList.filter((item) => item !== prefix);
+    setVoiceOuiList(next);
+    setSnmpConfig((prev) => ({
+      ...prev,
+      macSearch: { ...prev.macSearch, voiceOuiPrefixes: next.join('\n') },
+    }));
+  };
+
+  const loadVoiceVlanPreview = async () => {
+    if (!voiceSwitchFilter) {
+      setVoiceVlanPreview([]);
+      return;
+    }
+    setVoiceVlanLoading(true);
+    try {
+      const response = await fetch(`/api/automation/voice-vlan/${encodeURIComponent(voiceSwitchFilter)}`, { headers });
+      const data = await response.json();
+      if (!response.ok) {
+        setErrorText(data?.error || t('automationVoiceVlanPreviewFailed'));
+        return;
+      }
+      const map = data?.voiceVlanMap && typeof data.voiceVlanMap === 'object' ? data.voiceVlanMap : {};
+      const rows = Object.entries(map)
+        .map(([ifIndex, vlan]) => ({ ifIndex, vlan: Number(vlan) }))
+        .filter((row) => Number.isFinite(row.vlan))
+        .sort((a, b) => Number(a.ifIndex) - Number(b.ifIndex));
+      setVoiceVlanPreview(rows);
+    } catch {
+      setErrorText(t('automationVoiceVlanPreviewFailed'));
+    } finally {
+      setVoiceVlanLoading(false);
     }
   };
 
@@ -792,6 +948,31 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
               <div className="rounded border border-[#373a40] bg-[#141517] p-3 text-[10px] text-[#909296] space-y-1">
                 <p>{t('automationMacSearchHelp')}</p>
                 <p>{t('automationMacSuffixHint')}</p>
+              </div>
+              <div className="border border-[#373a40] rounded p-3 bg-[#141517] space-y-2">
+                <div className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('automationMacEventsTitle')}</div>
+                {!macEvents.length && <div className="text-xs text-[#909296]">{t('automationMacEventsEmpty')}</div>}
+                {!!macEvents.length && (
+                  <div className="max-h-[170px] overflow-auto space-y-1.5">
+                    {macEvents.map((event, idx) => (
+                      <div key={`${event.timestamp}-${idx}`} className="text-[11px] text-[#c1c2c5]">
+                        <span
+                          className={cn(
+                            'mr-2 inline-block w-2 h-2 rounded-full',
+                            event.status === 'success'
+                              ? 'bg-[#40c057]'
+                              : event.status === 'warning'
+                                ? 'bg-[#fab005]'
+                                : event.status === 'error'
+                                  ? 'bg-red-500'
+                                  : 'bg-[#868e96]'
+                          )}
+                        />
+                        {event.message}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
               {macMode === 'trace' && macTraceResult && (
                 <div className="border border-[#373a40] rounded p-3 bg-[#141517] space-y-2">
@@ -1170,15 +1351,109 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
                 onChange={(e) => setSnmpConfig({ ...snmpConfig, macSearch: { ...snmpConfig.macSearch, voiceVlanMacOid: e.target.value } })}
               />
             </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <select
+                className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                value={voiceCityFilter}
+                onChange={(e) => {
+                  setVoiceCityFilter(e.target.value);
+                  setVoiceSwitchFilter('');
+                  setVoiceVlanPreview([]);
+                }}
+              >
+                <option value="">{t('automationVoiceSelectCity')}</option>
+                {availableCities.map((city) => (
+                  <option key={city} value={city}>
+                    {city}
+                  </option>
+                ))}
+              </select>
+              <select
+                className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                value={voiceBranchFilter}
+                onChange={(e) => {
+                  setVoiceBranchFilter(e.target.value);
+                  setVoiceSwitchFilter('');
+                  setVoiceVlanPreview([]);
+                }}
+              >
+                <option value="">{t('automationVoiceSelectBranch')}</option>
+                {availableBranches.map((branch) => (
+                  <option key={branch} value={branch}>
+                    {branch}
+                  </option>
+                ))}
+              </select>
+              <select
+                className="bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                value={voiceSwitchFilter}
+                onChange={(e) => {
+                  setVoiceSwitchFilter(e.target.value);
+                  setVoiceVlanPreview([]);
+                }}
+              >
+                <option value="">{t('automationVoiceSelectSwitch')}</option>
+                {availableSwitches.map((device) => (
+                  <option key={device.id} value={device.id}>
+                    {device.name} ({device.ip})
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex flex-wrap gap-2 items-center">
+              <button
+                type="button"
+                onClick={loadVoiceVlanPreview}
+                disabled={voiceVlanLoading || !voiceSwitchFilter}
+                className={cn(actionButtonBase, 'bg-[#228be6] hover:bg-[#1c7ed6] text-white')}
+              >
+                {voiceVlanLoading ? t('loading') : t('automationVoiceLoadPreview')}
+              </button>
+              <span className="text-[10px] text-[#909296]">
+                {t('automationVoiceSwitchCount')}: {availableSwitches.length}
+              </span>
+            </div>
+            {!!voiceVlanPreview.length && (
+              <div className="border border-[#373a40] rounded p-3 bg-[#141517] max-h-[180px] overflow-auto space-y-1">
+                {voiceVlanPreview.map((row) => (
+                  <div key={row.ifIndex} className="text-[11px] text-[#c1c2c5]">
+                    ifIndex {row.ifIndex} - VLAN {row.vlan}
+                  </div>
+                ))}
+              </div>
+            )}
             <div className="space-y-2">
               <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('settingsVoiceOuiPrefixes')}</label>
-              <textarea
-                rows={5}
-                className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                value={snmpConfig.macSearch.voiceOuiPrefixes}
-                onChange={(e) => setSnmpConfig({ ...snmpConfig, macSearch: { ...snmpConfig.macSearch, voiceOuiPrefixes: e.target.value } })}
-                placeholder="00:04:f2&#10;00:90:8f&#10;aabbcc"
-              />
+              <div className="flex gap-2">
+                <input
+                  className="flex-1 bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                  value={voiceOuiInput}
+                  onChange={(e) => setVoiceOuiInput(e.target.value)}
+                  placeholder={t('automationOuiAddPlaceholder')}
+                />
+                <button
+                  type="button"
+                  onClick={handleAddVoiceOuiPrefix}
+                  className={cn(actionButtonBase, 'bg-[#40c057] hover:bg-[#37b24d] text-white')}
+                >
+                  {t('automationOuiAdd')}
+                </button>
+              </div>
+              <div className="max-h-[160px] overflow-auto space-y-1">
+                {!voiceOuiList.length && <div className="text-xs text-[#909296]">{t('automationOuiListEmpty')}</div>}
+                {voiceOuiList.map((prefix) => (
+                  <div key={prefix} className="flex items-center justify-between border border-[#373a40] rounded px-2 py-1.5 bg-[#141517] text-xs text-white">
+                    <span>{prefix}</span>
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveVoiceOuiPrefix(prefix)}
+                      className="text-red-300 hover:text-red-200 text-[10px] uppercase tracking-wider"
+                    >
+                      {t('deleteShort')}
+                    </button>
+                  </div>
+                ))}
+              </div>
               <p className="text-[10px] text-[#5c5f66]">{t('settingsVoiceOuiPrefixesHelp')}</p>
             </div>
             <div className="flex justify-end">

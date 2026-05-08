@@ -3,6 +3,7 @@ export type Vendor = 'HPE' | 'Aruba' | 'Cisco' | 'Juniper' | 'MikroTik' | 'Huawe
 export interface Switch {
   id: string;
   name: string;
+  zoneKey?: string;
   vendor: Vendor;
   model: string;
   category?: string;

@@ -3,6 +3,7 @@ import { Stage, Layer, Rect, Text, Line, Circle } from 'react-konva';
 import { Share2, Box, ZoomIn, ZoomOut, RotateCcw, Globe, TerminalSquare } from 'lucide-react';
 import { Switch } from '../types';
 import { useTranslation } from '../lib/i18n';
+import { deriveZoneKey } from '../lib/zoneKey';
 
 const safeErrorText = (value: unknown, fallback = 'Unknown error') =>
   String(value || fallback)
@@ -777,9 +778,15 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   const [isNodeDragging, setIsNodeDragging] = useState(false);
   const panLastPointRef = useRef<{ x: number; y: number } | null>(null);
   const suppressNodeContextMenuRef = useRef(false);
+  const linkDraftPointerStartRef = useRef<{ x: number; y: number } | null>(null);
+  const linkDraftIsGestureRef = useRef(false);
   const draftLinkStartedAtRef = useRef(0);
   const [topologyMode, setTopologyMode] = useState<TopologyMode>('ip');
   const [selectedRegion, setSelectedRegion] = useState<string>('');
+  const [selectedZone, setSelectedZone] = useState<string>('');
+  const [zoneLabelOverrides, setZoneLabelOverrides] = useState<Record<string, string>>({});
+  const [editingZoneKey, setEditingZoneKey] = useState<string | null>(null);
+  const [editingZoneValue, setEditingZoneValue] = useState('');
   const [newRegion, setNewRegion] = useState('');
   const [regionEditor, setRegionEditor] = useState({ from: '', to: '' });
   const [manualLink, setManualLink] = useState({ source: '', target: '', portA: '', portB: '' });
@@ -787,6 +794,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   const [editingRegionValue, setEditingRegionValue] = useState('');
   const [editingLinkId, setEditingLinkId] = useState<string | null>(null);
   const [editingLinkValue, setEditingLinkValue] = useState<{ comment: string }>({ comment: '' });
+  const zoneTapRef = useRef<{ zoneKey: string; at: number } | null>(null);
   const [topologyVersionCount, setTopologyVersionCount] = useState(0);
   const [topologyVersions, setTopologyVersions] = useState<TopologyVersion[]>([]);
   const [versionsOpen, setVersionsOpen] = useState(false);
@@ -824,7 +832,36 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     () => topologySwitches.filter((s) => (selectedRegion ? (s.branch || '') === selectedRegion : false)),
     [topologySwitches, selectedRegion]
   );
-  const topologySwitchIds = React.useMemo(() => new Set(regionSwitches.map((s) => s.id)), [regionSwitches]);
+  const zones = React.useMemo(() => {
+    const set = new Set<string>();
+    regionSwitches.forEach((s) => {
+      const zone = deriveZoneKey(s.name);
+      if (zone) set.add(zone);
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [regionSwitches]);
+  useEffect(() => {
+    if (!zones.length) {
+      if (selectedZone !== '') setSelectedZone('');
+      return;
+    }
+    if (!selectedZone || (!zones.includes(selectedZone) && selectedZone !== '__all__')) {
+      setSelectedZone(zones[0]);
+    }
+  }, [zones, selectedZone]);
+  const zoneSwitches = React.useMemo(
+    () =>
+      regionSwitches.filter((s) => {
+        if (selectedZone === '__all__') return true;
+        return selectedZone ? deriveZoneKey(s.name) === selectedZone : false;
+      }),
+    [regionSwitches, selectedZone]
+  );
+  const zoneLabel = React.useCallback((zoneKey: string) => {
+    const override = String(zoneLabelOverrides[zoneKey] || '').trim();
+    return override || zoneKey;
+  }, [zoneLabelOverrides]);
+  const topologySwitchIds = React.useMemo(() => new Set(zoneSwitches.map((s) => s.id)), [zoneSwitches]);
 
   useEffect(() => {
     let cancelled = false;
@@ -836,10 +873,15 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
             'x-user-name': username || 'unknown'
           }
         });
-        const data: { links: TopoLink[]; layout?: Record<string, { x: number; y: number }> } = await response.json();
+        const data: {
+          links: TopoLink[];
+          layout?: Record<string, { x: number; y: number }>;
+          zoneLabelOverrides?: Record<string, string>;
+        } = await response.json();
         if (!cancelled) {
           setLinks(data.links || []);
           setSavedLayout(data.layout || {});
+          setZoneLabelOverrides(data.zoneLabelOverrides || {});
         }
       } catch (error) {
         console.error('Failed to fetch topology links:', error);
@@ -915,6 +957,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       if (!response.ok) throw new Error(data?.error || t('topologyRestoreFailed'));
       setLinks(data?.links || []);
       setSavedLayout(data?.layout || {});
+      setZoneLabelOverrides((data?.zoneLabelOverrides || {}) as Record<string, string>);
       setVersionPreview(null);
       setSelectedVersionId('');
       refreshTopologyVersions();
@@ -931,7 +974,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     const h = containerRef.current?.offsetHeight || canvasSize.height;
     const visibleLinks = links.filter((l) => topologySwitchIds.has(l.source) && topologySwitchIds.has(l.target));
     const timer = window.setTimeout(() => {
-      const computed = computeLayout(regionSwitches, visibleLinks, w, h);
+      const computed = computeLayout(zoneSwitches, visibleLinks, w, h);
       setNodes(
         computed.map((n) => {
           const saved = savedLayout[n.id];
@@ -940,7 +983,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       );
     }, 80);
     return () => window.clearTimeout(timer);
-  }, [regionSwitches, topologySwitchIds, links, canvasSize.width, canvasSize.height, savedLayout]);
+  }, [zoneSwitches, topologySwitchIds, links, canvasSize.width, canvasSize.height, savedLayout]);
 
   const handleAutoLayout = async () => {
     if (!canEditTopology) return;
@@ -970,10 +1013,16 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           'x-user-name': username || 'unknown'
         }
       });
-      const data: { links?: TopoLink[]; layout?: Record<string, { x: number; y: number }>; error?: string } = await readApiPayload(response, 'Topology load failed');
+      const data: {
+        links?: TopoLink[];
+        layout?: Record<string, { x: number; y: number }>;
+        zoneLabelOverrides?: Record<string, string>;
+        error?: string;
+      } = await readApiPayload(response, 'Topology load failed');
       if (!response.ok) throw new Error(operationFailedMessage('Topology load', data, response.status));
       setLinks(data.links || []);
       setSavedLayout(data.layout || {});
+      setZoneLabelOverrides(data.zoneLabelOverrides || {});
       refreshTopologyVersions();
 
       // After rebuilding topology for this tab, classify inventory subcategories by trunk count (SNMP).
@@ -995,7 +1044,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       const w = containerRef.current?.offsetWidth || canvasSize.width;
       const h = containerRef.current?.offsetHeight || canvasSize.height;
       const visibleLinks = (data.links || []).filter((l) => topologySwitchIds.has(l.source) && topologySwitchIds.has(l.target));
-      const computed = computeLayout(regionSwitches, visibleLinks, w, h);
+      const computed = computeLayout(zoneSwitches, visibleLinks, w, h);
       // Auto-layout must take precedence over previously saved coordinates for this active tab.
       setNodes(computed);
       const nextPositions = computed.reduce<Record<string, { x: number; y: number }>>((acc, n) => {
@@ -1026,6 +1075,57 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     }
   };
 
+  const openZoneRenameEditor = React.useCallback((zoneKey: string) => {
+    if (!canEditTopology) return;
+    setEditingZoneKey(zoneKey);
+    setEditingZoneValue(zoneLabel(zoneKey));
+  }, [canEditTopology, zoneLabel]);
+
+  const handleZoneTouchEnd = React.useCallback((zoneKey: string) => {
+    if (!canEditTopology) return;
+    const now = Date.now();
+    const previous = zoneTapRef.current;
+    if (previous && previous.zoneKey === zoneKey && now - previous.at <= 350) {
+      openZoneRenameEditor(zoneKey);
+      zoneTapRef.current = null;
+      return;
+    }
+    zoneTapRef.current = { zoneKey, at: now };
+  }, [canEditTopology, openZoneRenameEditor]);
+
+  const handleRenameZoneInline = React.useCallback(async () => {
+    const zoneKey = String(editingZoneKey || '').trim();
+    const nextLabel = String(editingZoneValue || '').trim();
+    setEditingZoneKey(null);
+    setEditingZoneValue('');
+    if (!zoneKey) return;
+    const currentLabel = String(zoneLabelOverrides[zoneKey] || '').trim();
+    if (currentLabel === nextLabel) return;
+    try {
+      const response = await fetch('/api/topology/zones/label', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-user-role': role || 'viewer',
+          'x-user-name': username || 'unknown'
+        },
+        body: JSON.stringify({
+          zoneKey,
+          label: nextLabel,
+          branch: selectedRegion || undefined,
+          topologyMode,
+        }),
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(data?.error || t('topologyZoneRenameFailed'));
+      }
+      setZoneLabelOverrides((data?.zoneLabelOverrides || {}) as Record<string, string>);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : t('topologyZoneRenameFailed'));
+    }
+  }, [editingZoneKey, editingZoneValue, role, selectedRegion, t, topologyMode, username, zoneLabelOverrides]);
+
   const handleUndoLastTopologyChange = async () => {
     if (!canEditTopology) return;
     if (!selectedRegion) {
@@ -1048,6 +1148,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       }
       setLinks(data?.links || []);
       setSavedLayout(data?.layout || {});
+      setZoneLabelOverrides((data?.zoneLabelOverrides || {}) as Record<string, string>);
       refreshTopologyVersions();
     } catch (error) {
       alert(error instanceof Error ? error.message : t('topologyUndoFailed'));
@@ -1410,9 +1511,50 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
               </button>
             )
           ))}
+          <div className="h-4 w-px bg-[#373a40] mx-1" />
+          <span className="text-[10px] text-[#909296] uppercase tracking-wide">{t('topologyZones')}</span>
+          <button
+            type="button"
+            onClick={() => setSelectedZone('__all__')}
+            className={`px-3 py-1 rounded text-[10px] font-bold uppercase border ${selectedZone === '__all__' ? 'bg-[#12b886] border-[#12b886] text-white' : 'bg-[#2c2e33] border-[#373a40] text-[#c1c2c5]'}`}
+          >
+            {t('topologyAllZones')}
+          </button>
+          {zones.map((z) => (
+            editingZoneKey === z ? (
+              <input
+                key={`zone-edit-${z}`}
+                value={editingZoneValue}
+                autoFocus
+                onChange={(e) => setEditingZoneValue(e.target.value)}
+                onBlur={handleRenameZoneInline}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleRenameZoneInline();
+                  if (e.key === 'Escape') {
+                    setEditingZoneKey(null);
+                    setEditingZoneValue('');
+                  }
+                }}
+                placeholder={t('topologyZoneRenamePlaceholder')}
+                className="bg-[#141517] border border-[#12b886] rounded px-2 py-1 text-[10px] font-bold text-white w-32"
+              />
+            ) : (
+              <button
+                key={`zone-${z}`}
+                type="button"
+                onClick={() => setSelectedZone(z)}
+                onDoubleClick={() => openZoneRenameEditor(z)}
+                onTouchEnd={() => handleZoneTouchEnd(z)}
+                className={`px-3 py-1 rounded text-[10px] font-bold border ${selectedZone === z ? 'bg-[#12b886] border-[#12b886] text-white' : 'bg-[#2c2e33] border-[#373a40] text-[#c1c2c5]'}`}
+                title={canEditTopology ? t('topologyZoneRenameHint') : t('topologyZoneDerivedHint')}
+              >
+                {zoneLabel(z)}
+              </button>
+            )
+          ))}
         </div>
         <div className="text-[10px] text-[#909296]">
-          {canEditTopology ? t('renameTabInlineHint') : ''}
+          {canEditTopology ? `${t('renameTabInlineHint')} ${t('topologyZoneRenameHint')} ${t('topologyZoneDerivedHint')}` : t('topologyZoneDerivedHint')}
         </div>
       </div>
       <div className="px-3 md:px-4 py-2 border-b border-[#373a40] bg-[#16171a] text-[11px] text-[#909296]">
@@ -1433,6 +1575,9 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           setContextMenu(null);
           setEditingLinkId(null);
           setLinkDraft(null);
+          linkDraftPointerStartRef.current = null;
+          linkDraftIsGestureRef.current = false;
+          suppressNodeContextMenuRef.current = false;
         }}
       >
         <Stage
@@ -1460,6 +1605,15 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
             if (linkDraft) {
               const evt = e.evt as MouseEvent;
               const p = toStageCoords(evt.clientX, evt.clientY);
+              const start = linkDraftPointerStartRef.current;
+              if (start && !linkDraftIsGestureRef.current) {
+                const dx = evt.clientX - start.x;
+                const dy = evt.clientY - start.y;
+                if (Math.hypot(dx, dy) >= 6) {
+                  linkDraftIsGestureRef.current = true;
+                  suppressNodeContextMenuRef.current = true;
+                }
+              }
               setLinkDraft((prev) => (prev ? { ...prev, x2: p.x, y2: p.y } : prev));
               return;
             }
@@ -1480,12 +1634,16 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
             setIsRightPanning(false);
             panLastPointRef.current = null;
             suppressNodeContextMenuRef.current = false;
+            linkDraftPointerStartRef.current = null;
+            linkDraftIsGestureRef.current = false;
             setLinkDraft(null);
           }}
           onMouseLeave={() => {
             setIsRightPanning(false);
             panLastPointRef.current = null;
             suppressNodeContextMenuRef.current = false;
+            linkDraftPointerStartRef.current = null;
+            linkDraftIsGestureRef.current = false;
             setLinkDraft(null);
           }}
           onWheel={handleWheelZoom}
@@ -1577,8 +1735,9 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                     const evt = e.evt as MouseEvent;
                     if (canEditTopology && evt.button === 2) {
                       evt.preventDefault();
-                      suppressNodeContextMenuRef.current = true;
-                      draftLinkStartedAtRef.current = Date.now();
+                      suppressNodeContextMenuRef.current = false;
+                      linkDraftIsGestureRef.current = false;
+                      linkDraftPointerStartRef.current = { x: evt.clientX, y: evt.clientY };
                       const center = getNodeCenter(node.id);
                       setLinkDraft({ sourceId: node.id, x1: center.x, y1: center.y, x2: center.x, y2: center.y });
                     }
@@ -1590,17 +1749,26 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                     if (canEditTopology && evt.button === 2 && linkDraft?.sourceId && linkDraft.sourceId !== node.id) {
                       draftLinkStartedAtRef.current = Date.now();
                       createManualLink(linkDraft.sourceId, node.id);
+                      suppressNodeContextMenuRef.current = true;
+                      linkDraftPointerStartRef.current = null;
+                      linkDraftIsGestureRef.current = false;
                       setLinkDraft(null);
                     }
                   }}
                   onContextMenu={(e) => {
                     e.evt.preventDefault();
                     const justStartedDraft = Date.now() - draftLinkStartedAtRef.current < 360;
-                    if (suppressNodeContextMenuRef.current || !!linkDraft || justStartedDraft) {
+                    if (suppressNodeContextMenuRef.current || (linkDraftIsGestureRef.current && !!linkDraft) || justStartedDraft) {
                       suppressNodeContextMenuRef.current = false;
+                      linkDraftPointerStartRef.current = null;
+                      linkDraftIsGestureRef.current = false;
+                      setLinkDraft(null);
                       return;
                     }
-                    if (!canEditTopology) return;
+                    if (linkDraft) {
+                      setLinkDraft(null);
+                      linkDraftPointerStartRef.current = null;
+                    }
                     setContextMenu({
                       node,
                       x: e.evt.clientX,
