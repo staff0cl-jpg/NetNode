@@ -319,6 +319,9 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   const panLastPointRef = useRef<{ x: number; y: number } | null>(null);
   const [topologyMode, setTopologyMode] = useState<'ip' | 'fc'>('ip');
   const [selectedRegion, setSelectedRegion] = useState<string>('');
+  const [newRegion, setNewRegion] = useState('');
+  const [regionEditor, setRegionEditor] = useState({ from: '', to: '' });
+  const [manualLink, setManualLink] = useState({ source: '', target: '', portA: '', portB: '' });
   const [editingRegion, setEditingRegion] = useState<string | null>(null);
   const [editingRegionValue, setEditingRegionValue] = useState('');
   const [editingLinkId, setEditingLinkId] = useState<string | null>(null);
@@ -1024,6 +1027,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                   onContextMenu={(e) => {
                     e.evt.preventDefault();
                     if (!canEditTopology) return;
+                    if (linkDraft) return;
                     setContextMenu({
                       node,
                       x: e.evt.clientX,
@@ -1052,15 +1056,15 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
             onClick={(e) => e.stopPropagation()}
           >
             <input
-              value={editingLinkValue.portA}
-              onChange={(e) => setEditingLinkValue((prev) => ({ ...prev, portA: e.target.value }))}
+              value={editingLinkValue.comment}
+              onChange={(e) => setEditingLinkValue({ comment: e.target.value })}
               placeholder={t('topologyLinkCommentPlaceholder')}
               className="bg-[#141517] border border-[#373a40] rounded px-1 py-0.5 text-[10px] text-white w-44"
             />
             <button
               className="text-[#40c057] px-1 text-[10px]"
               onClick={() => {
-                handleRenameLink(editingLink, editingLinkValue);
+                handleRenameLink(editingLink, editingLinkValue.comment);
                 setEditingLinkId(null);
               }}
               title={t('save')}
@@ -1097,7 +1101,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                           if (!canEditTopology) return;
                           if (!key) return;
                           setEditingLinkId(key);
-                          setEditingLinkValue({ portA: l.portA || '', portB: l.portB || '' });
+                          setEditingLinkValue({ comment: getLinkLabel(l) });
                         }}
                       >
                         {getLinkLabel(l)}
@@ -1107,14 +1111,14 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                   return (
                     <span className="flex items-center gap-1">
                       <input
-                        value={editingLinkValue.portA}
-                        onChange={(e) => setEditingLinkValue((prev) => ({ ...prev, portA: e.target.value }))}
+                        value={editingLinkValue.comment}
+                        onChange={(e) => setEditingLinkValue({ comment: e.target.value })}
                         className="bg-[#141517] border border-[#373a40] rounded px-1 py-0.5 text-[10px] text-white w-36"
                       />
                       <button
                         className="text-[#40c057] px-1"
                         onClick={() => {
-                          handleRenameLink(l, editingLinkValue);
+                          handleRenameLink(l, editingLinkValue.comment);
                           setEditingLinkId(null);
                         }}
                         title={t('save')}

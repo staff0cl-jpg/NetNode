@@ -3200,6 +3200,9 @@ async function startServer() {
   app.post("/api/topology/layout", checkRole(["admin", "operator"]), (req, res) => {
     const body = req.body as { positions?: Record<string, { x: number; y: number }> };
     const positions = body?.positions || {};
+    const actor = actorName(req);
+    const hasIncoming = Object.keys(positions).length > 0;
+    if (hasIncoming) saveTopologySnapshot(actor, "topology.layout.update");
     for (const [id, pos] of Object.entries(positions)) {
       if (Number.isFinite(pos?.x) && Number.isFinite(pos?.y)) {
         topologyLayout[id] = { x: Number(pos.x), y: Number(pos.y) };
