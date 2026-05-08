@@ -660,12 +660,32 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       const h = containerRef.current?.offsetHeight || canvasSize.height;
       const visibleLinks = (data.links || []).filter((l) => topologySwitchIds.has(l.source) && topologySwitchIds.has(l.target));
       const computed = computeLayout(regionSwitches, visibleLinks, w, h);
-      setNodes(
-        computed.map((n) => {
-          const saved = (data.layout || {})[n.id];
-          return saved ? { ...n, x: saved.x, y: saved.y } : n;
-        })
-      );
+      // Auto-layout must take precedence over previously saved coordinates for this active tab.
+      setNodes(computed);
+      const nextPositions = computed.reduce<Record<string, { x: number; y: number }>>((acc, n) => {
+        acc[n.id] = { x: n.x, y: n.y };
+        return acc;
+      }, {});
+      setSavedLayout((prev) => {
+        const merged = { ...prev };
+        Object.keys(merged).forEach((id) => {
+          if (topologySwitchIds.has(id)) delete merged[id];
+        });
+        return { ...merged, ...nextPositions };
+      });
+      try {
+        await fetch('/api/topology/layout', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-user-role': role || 'viewer',
+            'x-user-name': username || 'unknown'
+          },
+          body: JSON.stringify({ positions: nextPositions }),
+        });
+      } catch {
+        // ignore layout persistence errors on auto-layout
+      }
     } catch (error) {
       console.error('Failed to refresh topology:', error);
       alert(error instanceof Error ? error.message : 'Failed to refresh topology');

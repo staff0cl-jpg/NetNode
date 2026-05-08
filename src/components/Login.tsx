@@ -73,6 +73,7 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
                 type="text"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
+                autoComplete="username"
                 className="w-full bg-[#141517] border border-[#373a40] py-3 pl-10 pr-4 rounded text-white focus:border-[#228be6] outline-none transition-all placeholder:text-[#5c5f66]"
                 placeholder={t('opId')}
                 required
@@ -88,6 +89,7 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
                 className="w-full bg-[#141517] border border-[#373a40] py-3 pl-10 pr-4 rounded text-white focus:border-[#228be6] outline-none transition-all placeholder:text-[#5c5f66]"
                 placeholder={t('accToken')}
                 required

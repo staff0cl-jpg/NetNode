@@ -2737,7 +2737,8 @@ async function startServer() {
     const { sid, user } = readSession(req);
     if (!user) {
       if (sid) clearSessionCookie(res, useSecureCookie);
-      return res.status(401).json({ success: false, message: "Session expired or invalid" });
+      // Return 200 to avoid noisy expected 401 logs before login in browser console.
+      return res.json({ success: false, message: "Session expired or invalid" });
     }
     return res.json({ success: true, user });
   });
