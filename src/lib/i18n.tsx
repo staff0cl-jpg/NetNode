@@ -159,6 +159,12 @@ export const translations: Translations = {
   // Settings
   sysConfig: { ru: 'Конфигурация системы', en: 'System Configuration' },
   manageInfra: { ru: 'Управление параметрами инфраструктуры, контролем доступа и распределением ресурсов.', en: 'Manage infrastructure settings, access control, and resource allocation.' },
+  settingsTabGeneralSystem: { ru: 'Общие / Система', en: 'General / System' },
+  settingsTabDiscoverySnmp: { ru: 'Discovery и SNMP', en: 'Discovery & SNMP' },
+  settingsTabSshProfile: { ru: 'SSH профиль терминала', en: 'SSH terminal profile' },
+  settingsTabLdap: { ru: 'LDAP', en: 'LDAP' },
+  settingsTabAutomationDefaults: { ru: 'Автоматизация по умолчанию', en: 'Automation defaults' },
+  settingsTabAdminMeta: { ru: 'Админ / Метаданные', en: 'Admin / Meta' },
   saveChanges: { ru: 'Сохранить изменения', en: 'Save Changes' },
   autoDiscovery: { ru: 'Авто-обнаружение сети', en: 'Network Auto-Discovery' },
   discoverySubnets: { ru: 'Подсети для сканирования (через запятую)', en: 'Scanning Subnets (comma separated)' },

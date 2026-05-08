@@ -33,11 +33,7 @@ const TOPO_RING_STEP = 136;
 
 function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: number): NodeWithPos[] {
   if (switches.length === 0) return [];
-  const width = Math.max(1480, Math.floor(cw * 1.42));
-  const height = Math.max(980, Math.floor(ch * 1.36));
   const margin = 110;
-  const rightLimit = width - TOPO_NODE_WIDTH - 26;
-  const bottomLimit = height - TOPO_NODE_HEIGHT - 24;
   const byId = new Map(switches.map((s) => [s.id, s]));
   const adj = new Map<string, Set<string>>();
   const degree = new Map<string, number>();
@@ -54,18 +50,22 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
   });
 
   const lower = (v?: string) => String(v || '').trim().toLowerCase();
+  const toName = (s?: Switch) => String(s?.name || '').trim().toLowerCase();
+  const switchSortKey = (id: string) => `${toName(byId.get(id))}\u0000${id}`;
   const stableSort = (items: Switch[], rank: (s: Switch) => number) =>
     [...items].sort((a, b) => {
       const dr = rank(b) - rank(a);
       if (dr !== 0) return dr;
-      const na = String(a.name || '').toLowerCase();
-      const nb = String(b.name || '').toLowerCase();
+      const na = toName(a);
+      const nb = toName(b);
       if (na !== nb) return na.localeCompare(nb);
       return String(a.id).localeCompare(String(b.id));
     });
-  const byName = (a: string, b: string) => a.localeCompare(b);
-  const toName = (s: Switch) => String(s.name || '').trim().toLowerCase();
-  const byIdStable = (a: string, b: string) => byName(a, b);
+  const byIdStable = (a: string, b: string) => {
+    const ka = switchSortKey(a);
+    const kb = switchSortKey(b);
+    return ka === kb ? a.localeCompare(b) : ka.localeCompare(kb);
+  };
 
   const isRouterLike = (s: Switch) =>
     lower(s.category) === 'router' ||
@@ -102,25 +102,135 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
   const trunkThreshold = Math.max(3, Math.ceil(Math.sqrt(Math.max(2, switches.length)) * 1.4));
   const isTrunkRich = (s: Switch) => (degree.get(s.id) || 0) >= trunkThreshold;
 
-  const routers = stableSort(switches.filter(isRouterLike), (s) => degree.get(s.id) || 0);
-  let cores = stableSort(
-    switches.filter((s) => !isRouterLike(s) && isExplicitCore(s)),
-    (s) => degree.get(s.id) || 0
-  );
-  if (!cores.length) {
-    cores = stableSort(
-      switches.filter((s) => !isRouterLike(s) && !isDistribution(s) && !isAccess(s) && isTrunkRich(s)),
-      (s) => degree.get(s.id) || 0
-    );
-  }
-
-  const pos = new Map<string, { x: number; y: number }>();
   const rankedAll = stableSort(switches, (s) => degree.get(s.id) || 0);
   const laneMap = new Map<string, Lane>();
   rankedAll.forEach((s) => laneMap.set(s.id, laneScore(s).lane));
 
-  const sourceCores = stableSort(cores, (s) => degree.get(s.id) || 0);
+  type ComponentInfo = {
+    id: string;
+    nodes: Switch[];
+    nodeIds: Set<string>;
+    edgeCount: number;
+    maxDegree: number;
+    hasRouter: boolean;
+    hasExplicitCore: boolean;
+    isSpider: boolean;
+  };
+
+  const components: ComponentInfo[] = [];
+  const visited = new Set<string>();
+  const sortedIds = switches.map((s) => s.id).sort(byIdStable);
+  sortedIds.forEach((startId) => {
+    if (visited.has(startId)) return;
+    const queue = [startId];
+    const nodeIds = new Set<string>();
+    visited.add(startId);
+    while (queue.length) {
+      const current = queue.shift()!;
+      nodeIds.add(current);
+      Array.from(adj.get(current) || []).sort(byIdStable).forEach((next) => {
+        if (visited.has(next)) return;
+        visited.add(next);
+        queue.push(next);
+      });
+    }
+    const nodes = stableSort(
+      Array.from(nodeIds).map((id) => byId.get(id)).filter((s): s is Switch => !!s),
+      (s) => degree.get(s.id) || 0
+    );
+    const edgeCount = links.filter((l) => nodeIds.has(l.source) && nodeIds.has(l.target)).length;
+    const maxDegree = nodes.reduce((max, n) => Math.max(max, degree.get(n.id) || 0), 0);
+    const hasRouter = nodes.some(isRouterLike);
+    const hasExplicitCore = nodes.some((n) => !isRouterLike(n) && isExplicitCore(n));
+    const leafCount = nodes.filter((n) => (degree.get(n.id) || 0) <= 1).length;
+    components.push({
+      id: nodes[0]?.id || startId,
+      nodes,
+      nodeIds,
+      edgeCount,
+      maxDegree,
+      hasRouter,
+      hasExplicitCore,
+      isSpider: nodes.length >= 5 && (maxDegree >= nodes.length - 2 || leafCount / nodes.length >= 0.68),
+    });
+  });
+
+  const componentRank = (c: ComponentInfo) =>
+    (c.hasRouter ? 9000 : 0) +
+    (c.hasExplicitCore ? 7000 : 0) +
+    c.edgeCount * 90 +
+    c.nodes.length * 30 +
+    c.maxDegree * 10 -
+    (c.isSpider && !c.hasExplicitCore && !c.hasRouter ? 500 : 0);
+
+  components.sort((a, b) => {
+    const dr = componentRank(b) - componentRank(a);
+    if (dr !== 0) return dr;
+    if (a.nodes.length !== b.nodes.length) return b.nodes.length - a.nodes.length;
+    return switchSortKey(a.id).localeCompare(switchSortKey(b.id));
+  });
+
+  const primaryComponent = components[0];
+  const primaryIds = primaryComponent?.nodeIds || new Set<string>();
+  const primaryNodes = primaryComponent?.nodes || [];
+  const secondaryComponents = components.slice(1).sort((a, b) => {
+    if (a.isSpider !== b.isSpider) return a.isSpider ? -1 : 1;
+    if (a.nodes.length !== b.nodes.length) return b.nodes.length - a.nodes.length;
+    if (a.edgeCount !== b.edgeCount) return b.edgeCount - a.edgeCount;
+    return switchSortKey(a.id).localeCompare(switchSortKey(b.id));
+  });
+
+  let sourceCores = stableSort(
+    primaryNodes.filter((s) => !isRouterLike(s) && isExplicitCore(s)),
+    (s) => degree.get(s.id) || 0
+  );
+  if (!sourceCores.length) {
+    sourceCores = stableSort(
+      primaryNodes.filter((s) => !isRouterLike(s) && !isDistribution(s) && !isAccess(s) && isTrunkRich(s)),
+      (s) => degree.get(s.id) || 0
+    );
+  }
+  if (!sourceCores.length && primaryNodes.length) {
+    const inferredCore = stableSort(primaryNodes.filter((s) => !isRouterLike(s)), (s) => degree.get(s.id) || 0)[0] || primaryNodes[0];
+    sourceCores = inferredCore ? [inferredCore] : [];
+  }
+
   const coreIds = new Set(sourceCores.map((c) => c.id));
+  sourceCores.forEach((core) => laneMap.set(core.id, 'core'));
+  const routers = stableSort(primaryNodes.filter((s) => isRouterLike(s) && !coreIds.has(s.id)), (s) => degree.get(s.id) || 0);
+
+  const laneOrder: Lane[] = ['router', 'core', 'distribution', 'access', 'unknown'];
+  const laneGapX = TOPO_NODE_WIDTH + 54;
+  const primaryLaneCounts = new Map<Lane, number>();
+  laneOrder.forEach((lane) => primaryLaneCounts.set(lane, 0));
+  primaryNodes.forEach((node) => {
+    const lane = laneMap.get(node.id) || 'unknown';
+    primaryLaneCounts.set(lane, (primaryLaneCounts.get(lane) || 0) + 1);
+  });
+  const maxPrimaryLane = Math.max(1, ...Array.from(primaryLaneCounts.values()));
+  const islandColumns = secondaryComponents.length ? Math.min(3, secondaryComponents.length) : 0;
+  const islandRows = islandColumns ? Math.ceil(secondaryComponents.length / islandColumns) : 0;
+  const primaryWidth = Math.max(
+    980,
+    maxPrimaryLane * laneGapX + 280,
+    Math.max(1, sourceCores.length) * TOPO_CLUSTER_STEP_X + 240
+  );
+  const islandStartX = margin + primaryWidth + 280;
+  const islandColumnWidth = 430;
+  const islandRowHeight = 276;
+  const width = Math.max(
+    1480,
+    Math.floor(cw * 1.42),
+    islandStartX + islandColumns * islandColumnWidth + margin
+  );
+  const height = Math.max(
+    980,
+    Math.floor(ch * 1.36),
+    margin + TOPO_LAYER_GAP * 4 + islandRows * islandRowHeight + 120
+  );
+  const rightLimit = width - TOPO_NODE_WIDTH - 26;
+  const bottomLimit = height - TOPO_NODE_HEIGHT - 24;
+  const pos = new Map<string, { x: number; y: number }>();
 
   const owners = new Map<string, string>();
   const dist = new Map<string, number>();
@@ -133,6 +243,7 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
   while (queue.length) {
     const u = queue.shift()!;
     for (const v of Array.from(adj.get(u) || []).sort(byIdStable)) {
+      if (!primaryIds.has(v)) continue;
       const cand = (dist.get(u) || 0) + 1;
       const cur = dist.get(v);
       if (cur === undefined || cand < cur) {
@@ -148,20 +259,20 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
   }
 
   const fallbackCore = sourceCores[0];
-  switches.forEach((s) => {
+  primaryNodes.forEach((s) => {
     if (owners.has(s.id) || !fallbackCore) return;
     owners.set(s.id, fallbackCore.id);
   });
 
   const unknownIds = new Set<string>();
-  switches.forEach((s) => {
+  primaryNodes.forEach((s) => {
     const meta = laneScore(s);
     if (meta.lane === 'unknown' || meta.score <= 1) unknownIds.add(s.id);
   });
 
   const coreClusterMap = new Map<string, Switch[]>();
   sourceCores.forEach((c) => coreClusterMap.set(c.id, [c]));
-  rankedAll.forEach((s) => {
+  stableSort(primaryNodes, (s) => degree.get(s.id) || 0).forEach((s) => {
     if (coreIds.has(s.id) || unknownIds.has(s.id)) return;
     const owner = owners.get(s.id);
     if (!owner) {
@@ -178,8 +289,7 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
   });
 
   if (!sourceCores.length) {
-    const laneOrder: Lane[] = ['router', 'core', 'distribution', 'access', 'unknown'];
-    const hasRouter = routers.length > 0;
+    const hasRouter = primaryNodes.some(isRouterLike);
     const baseY = margin;
     const laneY = new Map<Lane, number>([
       ['router', baseY],
@@ -190,7 +300,7 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
     ]);
     const itemsByLane = new Map<Lane, Switch[]>();
     laneOrder.forEach((lane) => itemsByLane.set(lane, []));
-    rankedAll.forEach((s) => {
+    stableSort(primaryNodes, (s) => degree.get(s.id) || 0).forEach((s) => {
       const lane = laneMap.get(s.id) || 'unknown';
       itemsByLane.get(lane)?.push(s);
     });
@@ -201,7 +311,7 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
         const col = idx % 6;
         const laneBaseY = laneY.get(lane) || baseY;
         pos.set(s.id, {
-          x: margin + col * (TOPO_NODE_WIDTH + 64),
+          x: margin + col * laneGapX,
           y: laneBaseY + row * (TOPO_NODE_HEIGHT + 18),
         });
       });
@@ -222,9 +332,7 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
     ]);
 
     const left = margin;
-    const unknownZoneWidth = Math.max(290, Math.floor(width * 0.23));
-    const usableRight = width - margin - unknownZoneWidth;
-    const availableWidth = Math.max(700, usableRight - left);
+    const availableWidth = primaryWidth;
     const sortedCores = [...sourceCores].sort((a, b) => {
       const aRouterHits = Array.from(adj.get(a.id) || []).filter((id) => routers.some((r) => r.id === id)).length;
       const bRouterHits = Array.from(adj.get(b.id) || []).filter((id) => routers.some((r) => r.id === id)).length;
@@ -240,9 +348,7 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
       if (na !== nb) return na.localeCompare(nb);
       return String(a.id).localeCompare(String(b.id));
     });
-    const coreStep = sortedCores.length === 1
-      ? 0
-      : Math.max(TOPO_CLUSTER_STEP_X, availableWidth / (sortedCores.length - 1));
+    const coreStep = sortedCores.length === 1 ? 0 : availableWidth / (sortedCores.length - 1);
     sortedCores.forEach((core, idx) => {
       const x = sortedCores.length === 1
         ? left + availableWidth / 2
@@ -259,7 +365,7 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
       pos.set(r.id, { x: baseX + (spread - 0.5) * 136, y: yRouter });
     });
 
-    sortedCores.forEach((core) => {
+    sortedCores.forEach((core, coreIdx) => {
       const coreX = pos.get(core.id)?.x || left + availableWidth / 2;
       const members = (coreClusterMap.get(core.id) || []).filter((n) => n.id !== core.id);
       const clusterDist = stableSort(
@@ -283,7 +389,7 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
 
       const clusterDistIds = new Set(clusterDist.map((d) => d.id));
       const accessByDist = new Map<string, Switch[]>();
-      const distParentSet = new Set<string>([core.id, ...routers.map((r) => r.id)]);
+      const distParentSet = new Set<string>([core.id, ...routers.map((r) => r.id), ...sortedCores.map((c) => c.id)]);
       const orderedDist = [...clusterDist].sort((a, b) => {
         const pa = parentKey(a.id, distParentSet);
         const pb = parentKey(b.id, distParentSet);
@@ -297,7 +403,10 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
         return String(a.id).localeCompare(String(b.id));
       });
 
-      const distStep = Math.max(TOPO_RING_STEP, TOPO_NODE_WIDTH + 36);
+      const slotLeft = sortedCores.length === 1 ? left : left + (coreIdx / sortedCores.length) * availableWidth;
+      const slotRight = sortedCores.length === 1 ? left + availableWidth : left + ((coreIdx + 1) / sortedCores.length) * availableWidth;
+      const slotWidth = Math.max(TOPO_NODE_WIDTH, slotRight - slotLeft);
+      const distStep = Math.max(TOPO_RING_STEP, Math.min(laneGapX, slotWidth / Math.max(1, orderedDist.length)));
       orderedDist.forEach((d, idx) => {
         const offset = (idx - (orderedDist.length - 1) / 2) * distStep;
         pos.set(d.id, { x: coreX + offset, y: yDist });
@@ -333,11 +442,12 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
           const parents = Array.from(adj.get(a.id) || []).filter((id) => clusterDistIds.has(id)).sort(byIdStable);
           return (parents[0] || '') === d.id;
         });
-        const step = TOPO_NODE_WIDTH + 28;
+        const step = TOPO_NODE_WIDTH + 30;
         group.forEach((a, idx) => {
           const offset = (idx - (group.length - 1) / 2) * step;
           const base = pos.get(d.id)?.x || coreX;
-          pos.set(a.id, { x: base + offset, y: yAccess });
+          const row = Math.floor(idx / 8);
+          pos.set(a.id, { x: base + offset, y: yAccess + row * (TOPO_NODE_HEIGHT + 18) });
           placedAccess.add(a.id);
         });
       });
@@ -349,35 +459,74 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
     });
 
     const unknownNodes = stableSort(
-      switches.filter((s) => unknownIds.has(s.id) || !pos.has(s.id)),
+      primaryNodes.filter((s) => unknownIds.has(s.id) || !pos.has(s.id)),
       (s) => degree.get(s.id) || 0
     );
-    const unknownStartX = usableRight + 26;
+    const unknownStartX = margin;
     unknownNodes.forEach((n, idx) => {
-      const col = idx % 2;
-      const row = Math.floor(idx / 2);
+      const col = idx % 6;
+      const row = Math.floor(idx / 6);
       pos.set(n.id, {
-        x: unknownStartX + col * (TOPO_NODE_WIDTH + 24),
+        x: unknownStartX + col * laneGapX,
         y: laneY.get('unknown')! + row * (TOPO_NODE_HEIGHT + 18),
       });
     });
   }
 
+  const placeRow = (items: Switch[], baseX: number, y: number, maxColumns: number) => {
+    const step = TOPO_NODE_WIDTH + 30;
+    const columns = Math.max(1, Math.min(maxColumns, items.length));
+    items.forEach((item, idx) => {
+      const row = Math.floor(idx / columns);
+      const col = idx % columns;
+      const rowItems = Math.min(columns, items.length - row * columns);
+      const rowWidth = (rowItems - 1) * step;
+      pos.set(item.id, {
+        x: baseX - rowWidth / 2 + col * step,
+        y: y + row * (TOPO_NODE_HEIGHT + 18),
+      });
+    });
+  };
+
+  secondaryComponents.forEach((component, idx) => {
+    const col = islandColumns ? idx % islandColumns : 0;
+    const row = islandColumns ? Math.floor(idx / islandColumns) : 0;
+    const baseX = islandStartX + col * islandColumnWidth + islandColumnWidth / 2 - TOPO_NODE_WIDTH / 2;
+    const baseY = margin + row * islandRowHeight;
+    const ordered = stableSort(component.nodes, (s) => degree.get(s.id) || 0);
+    const hubs = ordered.filter((s) => isRouterLike(s) || isExplicitCore(s) || (degree.get(s.id) || 0) === component.maxDegree);
+    const hub = hubs[0] || ordered[0];
+    if (!hub) return;
+    const hubLane = isRouterLike(hub) ? 'router' : 'core';
+    laneMap.set(hub.id, hubLane);
+    pos.set(hub.id, { x: baseX, y: baseY });
+
+    const rest = ordered.filter((s) => s.id !== hub.id);
+    const middle = rest.filter((s) => isDistribution(s) || (degree.get(s.id) || 0) > 1);
+    const leaves = rest.filter((s) => !middle.some((m) => m.id === s.id));
+    middle.forEach((s) => laneMap.set(s.id, 'distribution'));
+    leaves.forEach((s) => laneMap.set(s.id, 'access'));
+    placeRow(middle, baseX, baseY + 118, 3);
+    placeRow(leaves, baseX, baseY + (middle.length ? 224 : 118), 4);
+  });
+
   const points = switches.map((s) => {
     const p = pos.get(s.id) || { x: width / 2, y: height / 2 };
     return { id: s.id, x: p.x, y: p.y, lane: (laneMap.get(s.id) || 'unknown') as Lane };
   });
-  const laneOrder: Lane[] = ['router', 'core', 'distribution', 'access', 'unknown'];
   const laneIdx = new Map<Lane, number>(laneOrder.map((lane, idx) => [lane, idx]));
   const laneNodes = new Map<Lane, { id: string; x: number; y: number; lane: Lane }[]>();
   laneOrder.forEach((lane) => laneNodes.set(lane, []));
-  points.forEach((p) => laneNodes.get(p.lane)?.push(p));
+  points
+    .filter((p) => primaryIds.has(p.id) && p.lane !== 'unknown')
+    .forEach((p) => laneNodes.get(p.lane)?.push(p));
   const idToPoint = new Map(points.map((p) => [p.id, p]));
   const byLaneEdges = new Map<number, Array<{ a: string; b: string }>>();
   links.forEach((l) => {
     const a = idToPoint.get(l.source);
     const b = idToPoint.get(l.target);
     if (!a || !b) return;
+    if (!primaryIds.has(a.id) || !primaryIds.has(b.id)) return;
     const ai = laneIdx.get(a.lane) ?? 0;
     const bi = laneIdx.get(b.lane) ?? 0;
     if (Math.abs(ai - bi) !== 1) return;
@@ -388,7 +537,6 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
   });
 
   const anchorX = new Map<string, number>(points.map((p) => [p.id, p.x]));
-  const laneGapX = TOPO_NODE_WIDTH + 48;
   const nodeHalf = TOPO_NODE_WIDTH / 2;
   const median = (nums: number[]) => {
     if (!nums.length) return 0;
@@ -404,7 +552,7 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
       const minX = prev.x + laneGapX;
       if (cur.x < minX) cur.x = minX;
     }
-    const maxRight = rightLimit - nodeHalf;
+    const maxRight = Math.min(rightLimit - nodeHalf, margin + primaryWidth - nodeHalf);
     const minLeft = 35 + nodeHalf;
     let shift = 0;
     if (lanePoints.length) {
@@ -418,10 +566,10 @@ function computeLayout(switches: Switch[], links: TopoLink[], cw: number, ch: nu
     }
     laneNodes.set(lane, lanePoints);
   };
-  laneOrder.forEach(resolveLane);
+  laneOrder.filter((lane) => lane !== 'unknown').forEach(resolveLane);
 
   for (let iter = 0; iter < 6; iter++) {
-    const passOrder = iter % 2 === 0 ? laneOrder : [...laneOrder].reverse();
+    const passOrder = iter % 2 === 0 ? laneOrder.filter((lane) => lane !== 'unknown') : laneOrder.filter((lane) => lane !== 'unknown').reverse();
     passOrder.forEach((lane) => {
       const idx = laneIdx.get(lane) ?? 0;
       const lanePoints = laneNodes.get(lane) || [];
@@ -1007,24 +1155,6 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                 {t('topologyUndo')}
               </button>
             )}
-            {canEditTopology && (
-              <span className="text-[10px] text-[#909296] uppercase tracking-wider">
-                {t('topologyVersions')}: {topologyVersionCount}
-              </span>
-            )}
-            <button
-              type="button"
-              onClick={() => {
-                setVersionsOpen(true);
-                setSelectedVersionId('');
-                setVersionPreview(null);
-                refreshTopologyVersions();
-              }}
-              className="flex items-center gap-2 px-3 py-1.5 bg-[#2c2e33] text-[#c1c2c5] hover:text-white rounded text-[10px] font-bold uppercase transition-all border border-[#373a40]"
-            >
-              <Box size={14} />
-              {t('topologyVersions')}
-            </button>
             <button
               type="button"
               onClick={() => setScale((s) => Math.max(0.35, s - 0.1))}
@@ -1052,6 +1182,24 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
             >
               <RotateCcw size={12} />
             </button>
+            <button
+              type="button"
+              onClick={() => {
+                setVersionsOpen(true);
+                setSelectedVersionId('');
+                setVersionPreview(null);
+                refreshTopologyVersions();
+              }}
+              className="flex items-center gap-2 px-3 py-1.5 bg-[#2c2e33] text-[#c1c2c5] hover:text-white rounded text-[10px] font-bold uppercase transition-all border border-[#373a40]"
+            >
+              <Box size={14} />
+              {t('topologyVersions')}
+            </button>
+            {canEditTopology && (
+              <span className="text-[10px] text-[#909296] uppercase tracking-wider pl-1">
+                {t('topologyVersions')}: {topologyVersionCount}
+              </span>
+            )}
           </nav>
         </div>
         {canEditTopology && (

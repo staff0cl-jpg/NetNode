@@ -55,10 +55,13 @@ interface SettingsProps {
   username?: string;
 }
 
+type SettingsTabKey = 'general' | 'discovery' | 'ssh' | 'ldap' | 'automation' | 'adminMeta';
+
 const Settings: React.FC<SettingsProps> = ({ role, username }) => {
   const { t } = useTranslation();
   const isAdmin = role === 'admin';
   const isOperator = role === 'admin' || role === 'operator';
+  const [activeTab, setActiveTab] = React.useState<SettingsTabKey>('general');
   const [discoveryConfig, setDiscoveryConfig] = React.useState({
     subnets: '10.0.0.0/24, 192.168.1.0/24',
     protocol: 'snmp',
@@ -691,6 +694,15 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
     }
   };
 
+  const settingsTabs: Array<{ key: SettingsTabKey; label: string }> = [
+    { key: 'general', label: t('settingsTabGeneralSystem') },
+    { key: 'discovery', label: t('settingsTabDiscoverySnmp') },
+    { key: 'ssh', label: t('settingsTabSshProfile') },
+    { key: 'ldap', label: t('settingsTabLdap') },
+    { key: 'automation', label: t('settingsTabAutomationDefaults') },
+    { key: 'adminMeta', label: t('settingsTabAdminMeta') },
+  ];
+
   return (
     <div className="p-4 md:p-8 space-y-8 max-w-4xl animate-in slide-in-from-bottom-5 duration-700">
       <header>
@@ -698,8 +710,29 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         <p className="text-sm text-[#909296]">{t('manageInfra')}</p>
       </header>
 
+      <nav className="border border-[#373a40] rounded bg-[#1c1d21] p-2">
+        <div className="flex gap-2 overflow-x-auto pb-1">
+          {settingsTabs.map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => setActiveTab(tab.key)}
+              className={cn(
+                'shrink-0 px-3 py-2 rounded text-[10px] font-bold uppercase tracking-widest border transition-colors',
+                activeTab === tab.key
+                  ? 'bg-[#228be6] border-[#228be6] text-white'
+                  : 'bg-[#25262b] border-[#373a40] text-[#c1c2c5] hover:text-white'
+              )}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      </nav>
+
       <div className="space-y-6">
         {/* Language Section */}
+        {activeTab === 'general' && (
         <div className={cn("bg-[#25262b] border border-[#373a40] rounded overflow-hidden", !isAdmin && "opacity-50 pointer-events-none")}>
           <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
             <Database size={18} className="text-[#228be6]" />
@@ -739,107 +772,11 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
                 </button>
               </div>
             </div>
-            <div className="max-w-3xl space-y-3 mt-6 min-w-0">
-              <label className="text-[10px] font-bold text-[#909296] uppercase tracking-wider">{t('automationDefaultsTitle')}</label>
-              <p className="text-[10px] text-[#5c5f66]">{t('automationDefaultsHelp')}</p>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => setAutomationDefaults(automationPresets.safe)}
-                  className="px-3 py-1.5 text-[10px] uppercase font-bold bg-[#25262b] border border-[#373a40] rounded text-[#c1c2c5] hover:text-white"
-                >
-                  {t('automationPresetSafe')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setAutomationDefaults(automationPresets.balanced)}
-                  className="px-3 py-1.5 text-[10px] uppercase font-bold bg-[#25262b] border border-[#373a40] rounded text-[#c1c2c5] hover:text-white"
-                >
-                  {t('automationPresetBalanced')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setAutomationDefaults(automationPresets.fast)}
-                  className="px-3 py-1.5 text-[10px] uppercase font-bold bg-[#25262b] border border-[#373a40] rounded text-[#c1c2c5] hover:text-white"
-                >
-                  {t('automationPresetFast')}
-                </button>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <label className="space-y-1">
-                  <span className="text-[11px] text-[#c1c2c5]">{t('automationBatchSize')}</span>
-                  <input
-                    type="number"
-                    min={1}
-                    max={100}
-                    value={automationDefaults.batchSize}
-                    onChange={(e) => setAutomationDefaults({ ...automationDefaults, batchSize: Number(e.target.value) || 1 })}
-                    className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                  />
-                  <span className="text-[10px] text-[#5c5f66]">{t('automationBatchSizeHelp')}</span>
-                </label>
-                <label className="space-y-1">
-                  <span className="text-[11px] text-[#c1c2c5]">{t('automationTimeoutMs')}</span>
-                  <input
-                    type="number"
-                    min={1000}
-                    max={60000}
-                    value={automationDefaults.timeoutMs}
-                    onChange={(e) => setAutomationDefaults({ ...automationDefaults, timeoutMs: Number(e.target.value) || 1000 })}
-                    className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                  />
-                  <span className="text-[10px] text-[#5c5f66]">{t('automationTimeoutMsHelp')}</span>
-                </label>
-                <label className="space-y-1">
-                  <span className="text-[11px] text-[#c1c2c5]">{t('automationRetry')}</span>
-                  <input
-                    type="number"
-                    min={0}
-                    max={5}
-                    value={automationDefaults.retry}
-                    onChange={(e) => setAutomationDefaults({ ...automationDefaults, retry: Number(e.target.value) || 0 })}
-                    className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                  />
-                  <span className="text-[10px] text-[#5c5f66]">{t('automationRetryHelp')}</span>
-                </label>
-                <label className="space-y-1">
-                  <span className="text-[11px] text-[#c1c2c5]">{t('automationConcurrency')}</span>
-                  <input
-                    type="number"
-                    min={1}
-                    max={100}
-                    value={automationDefaults.concurrency}
-                    onChange={(e) => setAutomationDefaults({ ...automationDefaults, concurrency: Number(e.target.value) || 1 })}
-                    className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                  />
-                  <span className="text-[10px] text-[#5c5f66]">{t('automationConcurrencyHelp')}</span>
-                </label>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3 items-end">
-                <label className="space-y-1">
-                  <span className="text-[11px] text-[#c1c2c5]">{t('automationErrorThreshold')}</span>
-                  <input
-                    type="number"
-                    min={1}
-                    max={10000}
-                    value={automationDefaults.errorThreshold}
-                    onChange={(e) => setAutomationDefaults({ ...automationDefaults, errorThreshold: Number(e.target.value) || 1 })}
-                    className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
-                  />
-                  <span className="text-[10px] text-[#5c5f66]">{t('automationErrorThresholdHelp')}</span>
-                </label>
-                <button
-                  type="button"
-                  onClick={() => saveSystemConfig({ automationDefaults })}
-                  className="px-4 py-2 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-[10px] font-bold uppercase tracking-widest transition-all"
-                >
-                  {t('saveChanges')}
-                </button>
-              </div>
-            </div>
           </div>
         </div>
+        )}
 
+        {activeTab === 'ssh' && (
         <div className={cn("bg-[#25262b] border border-[#373a40] rounded overflow-hidden", !isOperator && "opacity-50 pointer-events-none")}>
           <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
             <Shield className="text-[#40c057]" size={18} />
@@ -904,8 +841,10 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             </div>
           </div>
         </div>
+        )}
 
         {/* LDAP */}
+        {activeTab === 'ldap' && (
         <div className={cn("bg-[#25262b] border border-[#373a40] rounded overflow-hidden", !isAdmin && "opacity-50 pointer-events-none")}>
           <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
             <Key size={18} className="text-[#40c057]" />
@@ -1056,8 +995,10 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             </div>
           </div>
         </div>
+        )}
 
         {/* Auto-Discovery Section */}
+        {activeTab === 'discovery' && (
         <div className={cn("bg-[#25262b] border border-[#373a40] rounded overflow-hidden", !isOperator && "opacity-50 pointer-events-none")}>
           <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
             <Database className="text-[#228be6]" size={18} />
@@ -1226,8 +1167,10 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             </div>
           </div>
         </div>
+        )}
 
         {/* Inventory dictionaries */}
+        {activeTab === 'adminMeta' && (
         <div className={cn("bg-[#25262b] border border-[#373a40] rounded overflow-hidden", !isAdmin && "opacity-50 pointer-events-none")}>
           <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
             <Database className="text-[#228be6]" size={18} />
@@ -1254,8 +1197,10 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             </div>
           </div>
         </div>
+        )}
 
         {/* SNMP Configuration Section */}
+        {activeTab === 'discovery' && (
         <div className={cn("bg-[#25262b] border border-[#373a40] rounded overflow-hidden", !isAdmin && "opacity-50 pointer-events-none")}>
           <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
             <Shield className="text-[#fab005]" size={18} />
@@ -1337,8 +1282,10 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             </div>
           </div>
         </div>
+        )}
 
         {/* SNMP Template Management */}
+        {activeTab === 'discovery' && (
         <div className={cn("bg-[#25262b] border border-[#373a40] rounded overflow-hidden", !isAdmin && "opacity-50 pointer-events-none")}>
           <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
             <HardDrive className="text-[#228be6]" size={18} />
@@ -1422,6 +1369,115 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             </div>
           </div>
         </div>
+        )}
+
+        {activeTab === 'automation' && (
+        <div className={cn("bg-[#25262b] border border-[#373a40] rounded overflow-hidden", !isAdmin && "opacity-50 pointer-events-none")}>
+          <div className="p-4 border-b border-[#373a40] bg-[#1c1d21] flex items-center gap-3">
+            <Database size={18} className="text-[#228be6]" />
+            <h3 className="text-sm font-bold text-white uppercase tracking-widest">{t('automationDefaultsTitle')}</h3>
+          </div>
+          <div className="p-4 md:p-6">
+            <div className="max-w-3xl space-y-3 min-w-0">
+              <p className="text-[10px] text-[#5c5f66]">{t('automationDefaultsHelp')}</p>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => setAutomationDefaults(automationPresets.safe)}
+                  className="px-3 py-1.5 text-[10px] uppercase font-bold bg-[#25262b] border border-[#373a40] rounded text-[#c1c2c5] hover:text-white"
+                >
+                  {t('automationPresetSafe')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAutomationDefaults(automationPresets.balanced)}
+                  className="px-3 py-1.5 text-[10px] uppercase font-bold bg-[#25262b] border border-[#373a40] rounded text-[#c1c2c5] hover:text-white"
+                >
+                  {t('automationPresetBalanced')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAutomationDefaults(automationPresets.fast)}
+                  className="px-3 py-1.5 text-[10px] uppercase font-bold bg-[#25262b] border border-[#373a40] rounded text-[#c1c2c5] hover:text-white"
+                >
+                  {t('automationPresetFast')}
+                </button>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <label className="space-y-1">
+                  <span className="text-[11px] text-[#c1c2c5]">{t('automationBatchSize')}</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={automationDefaults.batchSize}
+                    onChange={(e) => setAutomationDefaults({ ...automationDefaults, batchSize: Number(e.target.value) || 1 })}
+                    className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                  />
+                  <span className="text-[10px] text-[#5c5f66]">{t('automationBatchSizeHelp')}</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-[11px] text-[#c1c2c5]">{t('automationTimeoutMs')}</span>
+                  <input
+                    type="number"
+                    min={1000}
+                    max={60000}
+                    value={automationDefaults.timeoutMs}
+                    onChange={(e) => setAutomationDefaults({ ...automationDefaults, timeoutMs: Number(e.target.value) || 1000 })}
+                    className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                  />
+                  <span className="text-[10px] text-[#5c5f66]">{t('automationTimeoutMsHelp')}</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-[11px] text-[#c1c2c5]">{t('automationRetry')}</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={5}
+                    value={automationDefaults.retry}
+                    onChange={(e) => setAutomationDefaults({ ...automationDefaults, retry: Number(e.target.value) || 0 })}
+                    className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                  />
+                  <span className="text-[10px] text-[#5c5f66]">{t('automationRetryHelp')}</span>
+                </label>
+                <label className="space-y-1">
+                  <span className="text-[11px] text-[#c1c2c5]">{t('automationConcurrency')}</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={automationDefaults.concurrency}
+                    onChange={(e) => setAutomationDefaults({ ...automationDefaults, concurrency: Number(e.target.value) || 1 })}
+                    className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                  />
+                  <span className="text-[10px] text-[#5c5f66]">{t('automationConcurrencyHelp')}</span>
+                </label>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3 items-end">
+                <label className="space-y-1">
+                  <span className="text-[11px] text-[#c1c2c5]">{t('automationErrorThreshold')}</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={10000}
+                    value={automationDefaults.errorThreshold}
+                    onChange={(e) => setAutomationDefaults({ ...automationDefaults, errorThreshold: Number(e.target.value) || 1 })}
+                    className="w-full bg-[#141517] border border-[#373a40] p-2.5 rounded text-sm text-white"
+                  />
+                  <span className="text-[10px] text-[#5c5f66]">{t('automationErrorThresholdHelp')}</span>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => saveSystemConfig({ automationDefaults })}
+                  className="px-4 py-2 bg-[#228be6] hover:bg-[#1c7ed6] text-white rounded text-[10px] font-bold uppercase tracking-widest transition-all"
+                >
+                  {t('saveChanges')}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+        )}
 
       </div>
     </div>
