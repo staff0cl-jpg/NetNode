@@ -27,6 +27,7 @@ import { registerFirstRunSetupRoutes } from "./setup/setupRoutes.js";
 import { createInitialUsers } from "./auth/initialUsers.js";
 import { hashPassword, verifyLocalPassword } from "./auth/password.js";
 import type { AuthUser, LocalUser } from "./auth/types.js";
+import { materialFromUserPassword, readPasswordMaterial, type PasswordMaterial } from "./crypto/credentialMaterial.js";
 import type { InventoryItem } from "./inventory/inventoryTypes.js";
 import { evaluateInventoryWarnings } from "./inventory/warnings.js";
 import { applySecurityMiddleware, createLoginRateLimiter } from "./middleware/security.js";
@@ -162,12 +163,16 @@ function trimDiscoveryWatchRunJobs(max = 50) {
 }
 type SshReadonlyProfile = {
   username: string;
-  password: string;
+  passwordMaterial: PasswordMaterial;
   port: number;
   allowMetricsFallback: boolean;
   expiresAt: number;
 };
 let sshReadonlyProfile: SshReadonlyProfile | null = null;
+
+function sshReadonlyPassword(profile: SshReadonlyProfile): string {
+  return readPasswordMaterial(profile.passwordMaterial);
+}
 
 const LEGACY_SSH_ALGORITHMS = {
   // Prefer modern algorithms but keep legacy fallbacks for older Cisco/HP/HPE stacks.
@@ -2421,7 +2426,7 @@ async function runBackupJob(actor: string): Promise<BackupHistoryItem> {
         const output = await runSshReadonlyCommands(
           device.ip,
           profile.username,
-          profile.password,
+          sshReadonlyPassword(profile),
           profile.port,
           backupCommandsForVendor(device.vendor)
         );
@@ -2501,7 +2506,7 @@ async function collectTrunkMetricsWithFallback(item: InventoryItem): Promise<Tru
     const output = await runSshReadonlyCommands(
       item.ip,
       profile.username,
-      profile.password,
+      sshReadonlyPassword(profile),
       profile.port,
       sshCommandsForModel(item.model)
     );
@@ -2652,7 +2657,10 @@ async function runSshCommandBatch(device: InventoryItem, commands: string[], tim
   const profile = getActiveSshReadonlyProfile();
   if (!profile) throw new Error("SSH readonly profile is not configured");
   const timeout = new Promise<string>((_r, reject) => setTimeout(() => reject(new Error("SSH command timeout")), timeoutMs));
-  return Promise.race([runSshReadonlyCommands(device.ip, profile.username, profile.password, profile.port, commands), timeout]);
+  return Promise.race([
+    runSshReadonlyCommands(device.ip, profile.username, sshReadonlyPassword(profile), profile.port, commands),
+    timeout,
+  ]);
 }
 
 async function executeAutomationStep(job: AutomationJob, step: AutomationStepResult, retryLimit: number): Promise<void> {
@@ -3759,23 +3767,19 @@ export async function startServer() {
   };
 
   if (discoveryScheduler) clearInterval(discoveryScheduler);
-  discoveryScheduler = setInterval(async () => {
-    try {
-      discoverySchedulerLastTickAt = new Date().toISOString();
-      const enabled = discoveryWatchProfiles.some((p) => p.enabled);
-      if (!enabled) return;
-      const out = await (async () => {
-        if (discoveryRunLock) return { started: false };
-        return { started: true };
-      })();
-      if (!out.started) return;
-      // Trigger only due profiles; actor is system scheduler
-      const actor = "system-scheduler";
-      if (discoveryRunLock) return;
-      discoveryRunLock = true;
+  discoveryScheduler = setInterval(() => {
+    void (async () => {
+      let acquired = false;
       try {
+        discoverySchedulerLastTickAt = new Date().toISOString();
+        const enabled = discoveryWatchProfiles.some((p) => p.enabled);
+        if (!enabled) return;
+        if (discoveryRunLock) return;
+        discoveryRunLock = true;
+        acquired = true;
         const now = Date.now();
         let processed = 0;
+        const actor = "system-scheduler";
         for (const p of discoveryWatchProfiles) {
           if (!p.enabled) continue;
           const intervalMs = Math.max(1, Number(p.intervalHours || 3)) * 60 * 60 * 1000;
@@ -3803,12 +3807,12 @@ export async function startServer() {
           logAction(actor, "Discovery Watch Scheduled Run", `Profiles processed: ${processed}`, "inventory");
           await persistPgDiscoveryProfiles("scheduler-tick");
         }
+      } catch {
+        /* ignore scheduler errors */
       } finally {
-        discoveryRunLock = false;
+        if (acquired) discoveryRunLock = false;
       }
-    } catch {
-      /* ignore scheduler errors */
-    }
+    })();
   }, 60 * 1000);
   logAction("system", "Discovery Watch Scheduler Start", "Scheduler initialized (1-minute tick, per-profile interval)", "system");
 
@@ -4014,6 +4018,7 @@ export async function startServer() {
           }
         }
       } finally {
+        automationCancellation.delete(job.id);
         await persistPgAutomationMaps();
       }
     })();
@@ -5970,7 +5975,7 @@ type MacSearchEvent = {
     if (!username || !password) return res.status(400).json({ error: "username/password required" });
     sshReadonlyProfile = {
       username,
-      password,
+      passwordMaterial: materialFromUserPassword(password),
       port: Number.isFinite(port) && port > 0 && port <= 65535 ? port : 22,
       allowMetricsFallback: body.allowMetricsFallback !== false,
       expiresAt: Date.now() + ttlHours * 60 * 60 * 1000,
@@ -6045,26 +6050,41 @@ type MacSearchEvent = {
       const sshPort = typeof port === "number" && port > 0 && port < 65536 ? port : 22;
       const pwd = typeof password === "string" ? password : "";
 
-      sshClient
-        .on("keyboard-interactive", (_name, _instr, _lang, prompts, finish) => {
-          if (pwd && prompts?.length) {
-            finish(prompts.map(() => pwd));
-          } else {
-            finish([]);
-          }
-        })
-        .on("ready", () => {
-          socket.emit("ssh:status", { sessionId, status: "connected" });
-          sshClient.shell(
-            {
-              term: "xterm-256color",
-              cols: 160,
-              rows: 40,
-            },
-            (err, stream) => {
+      try {
+        sshClient
+          .on("keyboard-interactive", (_name, _instr, _lang, prompts, finish) => {
+            if (pwd && prompts?.length) {
+              finish(prompts.map(() => pwd));
+            } else {
+              finish([]);
+            }
+          })
+          .on("ready", () => {
+            logAction(
+              socketUser.username,
+              "SSH Connect",
+              `Opened SSH proxy to ${host}:${sshPort} as ${username}`,
+              "system"
+            );
+            socket.emit("ssh:status", { sessionId, status: "connected" });
+            sshClient.shell(
+              {
+                term: "xterm-256color",
+                cols: 160,
+                rows: 40,
+              },
+              (err, stream) => {
             if (err) {
               const message = normalizeSshErrorForClient(err);
-              return socket.emit("ssh:data", { sessionId, data: `\r\n*** SSH Shell Error: ${message} ***\r\n` });
+              socket.emit("ssh:data", { sessionId, data: `\r\n*** SSH Shell Error: ${message} ***\r\n` });
+              socket.emit("ssh:status", { sessionId, status: "disconnected" });
+              try {
+                sshClient.end();
+              } catch {
+                /* ignore */
+              }
+              sessions.delete(sessionId);
+              return;
             }
             
             const session = sessions.get(sessionId);
@@ -6074,7 +6094,13 @@ type MacSearchEvent = {
               } catch {
                 /* ignore */
               }
-              sshClient.end();
+              try {
+                sshClient.end();
+              } catch {
+                /* ignore */
+              }
+              sessions.delete(sessionId);
+              socket.emit("ssh:status", { sessionId, status: "disconnected" });
               return;
             }
             session.stream = stream;
@@ -6144,7 +6170,17 @@ type MacSearchEvent = {
           keepaliveCountMax: 6,
           ...legacySshConnectOptions(),
         });
-      logAction(socketUser.username, "SSH Connect", `Opened SSH proxy to ${host}:${sshPort} as ${username}`, "system");
+      } catch (e) {
+        sessions.delete(sessionId);
+        try {
+          sshClient.end();
+        } catch {
+          /* ignore */
+        }
+        const message = normalizeSshErrorForClient(e);
+        socket.emit("ssh:data", { sessionId, data: `\r\n*** SSH Connect Error: ${message} ***\r\n` });
+        socket.emit("ssh:status", { sessionId, status: "disconnected" });
+      }
     });
 
     socket.on("ssh:input", ({ sessionId, input }) => {

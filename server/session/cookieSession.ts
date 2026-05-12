@@ -9,6 +9,26 @@ type SessionRecord = { user: AuthUser; expiresAt: number };
 
 const sessionStore = new Map<string, SessionRecord>();
 
+const DEFAULT_SESSION_STORE_MAX = 10_000;
+
+function sessionStoreMax(): number {
+  const n = Number(process.env.NETNODE_SESSION_STORE_MAX);
+  if (!Number.isFinite(n)) return DEFAULT_SESSION_STORE_MAX;
+  return Math.max(100, Math.min(500_000, Math.floor(n)));
+}
+
+/** Drop oldest rows (Map insertion order) until under the cap — mitigates unbounded growth if prune lags. */
+function enforceSessionStoreCap(): void {
+  const cap = sessionStoreMax();
+  let guard = 0;
+  while (sessionStore.size >= cap && guard < cap + 100) {
+    const first = sessionStore.keys().next().value as string | undefined;
+    if (first === undefined) break;
+    sessionStore.delete(first);
+    guard += 1;
+  }
+}
+
 function parseCookieHeader(src = ""): Record<string, string> {
   return src
     .split(";")
@@ -54,6 +74,8 @@ export function shouldUseSecureCookie(req: express.Request, isProd: boolean): bo
 }
 
 export function makeSession(user: AuthUser): string {
+  pruneExpiredSessions();
+  enforceSessionStoreCap();
   const sid = crypto.randomBytes(32).toString("hex");
   sessionStore.set(sid, { user, expiresAt: Date.now() + SESSION_TTL_MS });
   return sid;
@@ -88,5 +110,6 @@ export function pruneExpiredSessions(now = Date.now()): number {
       removed += 1;
     }
   }
+  enforceSessionStoreCap();
   return removed;
 }
