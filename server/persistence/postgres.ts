@@ -60,6 +60,9 @@ export async function ensureSchema(pool: Pool): Promise<void> {
 
     CREATE INDEX IF NOT EXISTS inventory_device_updated_at_idx ON inventory_device (updated_at DESC);
 
+    CREATE INDEX IF NOT EXISTS inventory_device_payload_status_idx ON inventory_device ((payload->>'status'));
+    CREATE INDEX IF NOT EXISTS inventory_device_payload_branch_idx ON inventory_device ((payload->>'branch'));
+
     CREATE TABLE IF NOT EXISTS app_kv (
       key TEXT PRIMARY KEY,
       value JSONB NOT NULL,

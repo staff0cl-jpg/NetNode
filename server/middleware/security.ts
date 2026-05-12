@@ -71,3 +71,43 @@ export function createLoginRateLimiter(): (req: Request, res: Response, next: Ne
     next();
   };
 }
+
+type MutateApiBucket = { windowStart: number; count: number };
+
+const mutatingApiBuckets = new Map<string, MutateApiBucket>();
+
+/**
+ * Sliding-window cap for mutating /api calls per client IP (POST/PUT/PATCH/DELETE).
+ * GET/HEAD/OPTIONS and POST /api/auth/login are excluded (login has its own limiter).
+ * Set NETNODE_API_MUTATE_RATE_DISABLED=1 to disable.
+ */
+export function createMutatingApiRateLimiter(): (req: Request, res: Response, next: NextFunction) => void {
+  const disabled = String(process.env.NETNODE_API_MUTATE_RATE_DISABLED || "").trim() === "1";
+  const windowMs = Math.max(5000, Math.min(120_000, Number(process.env.NETNODE_API_MUTATE_WINDOW_MS) || 60_000));
+  const maxOps = Math.max(30, Math.min(10_000, Number(process.env.NETNODE_API_MUTATE_MAX) || 400));
+
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (disabled) return next();
+    if (!req.path.startsWith("/api")) return next();
+    const m = req.method.toUpperCase();
+    if (m === "GET" || m === "HEAD" || m === "OPTIONS") return next();
+    if (req.path === "/api/auth/login") return next();
+
+    const ip = clientIp(req);
+    const now = Date.now();
+    let bucket = mutatingApiBuckets.get(ip);
+    if (!bucket || now - bucket.windowStart > windowMs) {
+      bucket = { windowStart: now, count: 0 };
+      mutatingApiBuckets.set(ip, bucket);
+    }
+    bucket.count += 1;
+    if (bucket.count > maxOps) {
+      res.setHeader("Retry-After", String(Math.ceil(windowMs / 1000)));
+      return res.status(429).json({
+        error: "Too many requests. Try again later.",
+        source: "api.mutate_rate_limit",
+      });
+    }
+    next();
+  };
+}

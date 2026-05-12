@@ -9,8 +9,15 @@ import { promises as fs } from "fs";
 import path from "path";
 import { Client } from "ssh2";
 import ldap from "ldapjs";
-import snmp from "net-snmp";
 import type { Pool } from "pg";
+import { getSnmpProbeFor, snmpGetMapFor, snmpWalkFor, type SnmpLiveContext, type SnmpProbe } from "./snmp/snmpClient.js";
+import {
+  cachedSnmpGetMap,
+  cachedSnmpProbe,
+  cachedSnmpWalk,
+  clearSnmpResultCaches,
+  readSnmpResultCacheTtlMs,
+} from "./snmp/snmpResultCache.js";
 import type { InventoryRowPayload } from "./persistence/postgres.js";
 import {
   APP_KV_KEYS,
@@ -37,7 +44,7 @@ import {
 } from "./crypto/credentialMaterial.js";
 import type { InventoryItem } from "./inventory/inventoryTypes.js";
 import { evaluateInventoryWarnings } from "./inventory/warnings.js";
-import { applySecurityMiddleware, createLoginRateLimiter } from "./middleware/security.js";
+import { applySecurityMiddleware, createLoginRateLimiter, createMutatingApiRateLimiter } from "./middleware/security.js";
 import { csrfProtectionMiddleware } from "./middleware/csrf.js";
 import { registerInventoryHttpRoutes } from "./routes/inventoryHttp.js";
 import { discoveryStartBodySchema, discoveryWatchSaveBodySchema } from "./validation/discovery.js";
@@ -682,7 +689,7 @@ type BackupScope = {
 };
 
 type BackupCredentials = {
-  username?: string;
+  usernameMaterial: PasswordMaterial;
   domain?: string;
   passwordMaterial: PasswordMaterial;
 };
@@ -722,11 +729,19 @@ let backupConfig: BackupConfig = {
   intervalHours: 6,
   networkSharePath: "",
   scope: { mode: "all" },
-  credentials: { username: "", domain: "", passwordMaterial: { kind: "plain", value: "" } },
+  credentials: {
+    usernameMaterial: { kind: "plain", value: "" },
+    domain: "",
+    passwordMaterial: { kind: "plain", value: "" },
+  },
 };
 
 function defaultBackupCredentials(): BackupCredentials {
-  return { username: "", domain: "", passwordMaterial: { kind: "plain", value: "" } };
+  return {
+    usernameMaterial: { kind: "plain", value: "" },
+    domain: "",
+    passwordMaterial: { kind: "plain", value: "" },
+  };
 }
 
 function hydrateBackupConfigFromKv(raw: unknown): BackupConfig {
@@ -742,12 +757,19 @@ function hydrateBackupConfigFromKv(raw: unknown): BackupConfig {
   const scopeIn = v.scope && typeof v.scope === "object" ? (v.scope as BackupScope) : undefined;
   const c = v.credentials as Record<string, unknown> | undefined;
   let passwordMaterial = defaultBackupCredentials().passwordMaterial;
+  let usernameMaterial = defaultBackupCredentials().usernameMaterial;
   if (c && typeof c === "object") {
     const pm = c.passwordMaterial;
     if (pm && typeof pm === "object" && pm !== null && "kind" in pm) {
       passwordMaterial = pm as PasswordMaterial;
     } else if (typeof c.password === "string") {
       passwordMaterial = { kind: "plain", value: c.password };
+    }
+    const um = c.usernameMaterial;
+    if (um && typeof um === "object" && um !== null && "kind" in um) {
+      usernameMaterial = um as PasswordMaterial;
+    } else if (typeof c.username === "string") {
+      usernameMaterial = { kind: "plain", value: c.username };
     }
   }
   return {
@@ -762,7 +784,7 @@ function hydrateBackupConfigFromKv(raw: unknown): BackupConfig {
       branches: Array.isArray(scopeIn?.branches) ? scopeIn!.branches!.map((x) => String(x)) : defaults.scope.branches,
     },
     credentials: {
-      username: String(c?.username ?? "").trim(),
+      usernameMaterial,
       domain: String(c?.domain ?? "").trim(),
       passwordMaterial,
     },
@@ -777,25 +799,33 @@ function backupConfigApiConfigPayload(): Record<string, unknown> {
     networkSharePath: backupConfig.networkSharePath,
     scope: backupConfig.scope,
     credentials: {
-      username: cred.username || "",
+      username: materialHasValue(cred.usernameMaterial) ? SNMP_SECRET_MASK : "",
       domain: cred.domain || "",
+      hasUsername: materialHasValue(cred.usernameMaterial),
       hasPassword: materialHasValue(cred.passwordMaterial),
     },
   };
 }
 
-async function mergeBackupCredentialsFromBody(body: Partial<BackupConfig> & { credentials?: { username?: string; domain?: string; password?: string } }) {
+async function mergeBackupCredentialsFromBody(
+  body: Partial<BackupConfig> & { credentials?: { username?: string; domain?: string; password?: string } }
+) {
   const prev = backupConfig.credentials ?? defaultBackupCredentials();
   const inc = body.credentials;
-  const username = String(inc?.username ?? prev.username ?? "").trim();
   const domain = String(inc?.domain ?? prev.domain ?? "").trim();
   let passwordMaterial = prev.passwordMaterial;
+  let usernameMaterial = prev.usernameMaterial;
+  if (inc && "username" in inc && typeof inc.username === "string") {
+    const u = inc.username.trim();
+    if (u === "") usernameMaterial = { kind: "plain", value: "" };
+    else if (u !== SNMP_SECRET_MASK) usernameMaterial = await materialFromUserPassword(u);
+  }
   if (inc && "password" in inc && typeof inc.password === "string") {
     const p = inc.password.trim();
     if (p === "") passwordMaterial = { kind: "plain", value: "" };
     else if (p !== SNMP_SECRET_MASK) passwordMaterial = await materialFromUserPassword(p);
   }
-  backupConfig.credentials = { username, domain, passwordMaterial };
+  backupConfig.credentials = { usernameMaterial, domain, passwordMaterial };
 }
 
 let sealVolatileCredentialsMutex: Promise<void> = Promise.resolve();
@@ -819,11 +849,12 @@ async function sealVolatileCredentialMaterialsAfterHydrate() {
       };
     }
     const cred = backupConfig.credentials;
-    if (cred?.passwordMaterial) {
+    if (cred) {
       backupConfig = {
         ...backupConfig,
         credentials: {
           ...cred,
+          usernameMaterial: await upgrade(cred.usernameMaterial),
           passwordMaterial: await upgrade(cred.passwordMaterial),
         },
       };
@@ -1972,12 +2003,6 @@ function detectModelFromSnmp(sysDescr: string, sysObjectId = "", sysName = ""): 
   return parseModelFromDescr(sysDescr);
 }
 
-function snmpVersionsFromConfig(): snmp.Version[] {
-  const preferred = snmpConfig.version.includes("v1") ? snmp.Version1 : snmp.Version2c;
-  const fallback = preferred === snmp.Version1 ? snmp.Version2c : snmp.Version1;
-  return [preferred, fallback];
-}
-
 async function snmpCommunities(): Promise<string[]> {
   const directStr = (await readPasswordMaterial(snmpConfig.communityMaterial)).trim();
   const direct = directStr ? [directStr] : [];
@@ -1998,28 +2023,46 @@ async function snmpCommunities(): Promise<string[]> {
   return uniq;
 }
 
-type SnmpProbe = {
-  ok: boolean;
-  sysName?: string;
-  sysDescr?: string;
-  sysObjectId?: string;
-  uptimeSeconds?: number;
-};
+function snmpLiveContext(): SnmpLiveContext {
+  return {
+    port: snmpConfig.port,
+    retries: snmpConfig.retries,
+    defaultTimeoutMs: snmpConfig.timeoutMs,
+    versionLabel: snmpConfig.version,
+    getCommunities: snmpCommunities,
+  };
+}
 
-const uptimeOidProfiles: Array<{ oid: string; multiplier: number }> = [
-  // RFC1213-MIB::sysUpTimeInstance (TimeTicks, 1/100 sec)
-  { oid: "1.3.6.1.2.1.1.3.0", multiplier: 0.01 },
-  // HOST-RESOURCES-MIB::hrSystemUptime (TimeTicks, 1/100 sec)
-  { oid: "1.3.6.1.2.1.25.1.1.0", multiplier: 0.01 },
-];
+function snmpResultCacheKeyPrefix(ctx: SnmpLiveContext, host: string, timeout: number): string {
+  return `${host}\t${timeout}\t${ctx.port}\t${ctx.retries}\t${ctx.versionLabel}`;
+}
 
-function parseSnmpTimeTicksSeconds(value: unknown, multiplier = 0.01): number {
-  const rawText = String(value ?? "").trim();
-  const rawNumber = typeof value === "number"
-    ? value
-    : Number(rawText.match(/\((\d+)\)/)?.[1] ?? rawText.replace(/[^\d.-]/g, ""));
-  if (!Number.isFinite(rawNumber) || rawNumber <= 0) return 0;
-  return Math.max(0, Math.floor(rawNumber * multiplier));
+function getSnmpProbe(host: string, timeout = snmpConfig.timeoutMs): Promise<SnmpProbe> {
+  const ctx = snmpLiveContext();
+  const ttl = readSnmpResultCacheTtlMs();
+  const run = () => getSnmpProbeFor(ctx, host, timeout);
+  if (ttl <= 0) return run();
+  const key = `probe\t${snmpResultCacheKeyPrefix(ctx, host, timeout)}`;
+  return cachedSnmpProbe(ttl, key, run);
+}
+
+function snmpGetMap(host: string, oids: string[], timeout = snmpConfig.timeoutMs): Promise<Record<string, number | string>> {
+  const ctx = snmpLiveContext();
+  const ttl = readSnmpResultCacheTtlMs();
+  const run = () => snmpGetMapFor(ctx, host, oids, timeout);
+  if (ttl <= 0) return run();
+  const oidsKey = [...oids].sort().join(",");
+  const key = `getmap\t${snmpResultCacheKeyPrefix(ctx, host, timeout)}\t${oidsKey}`;
+  return cachedSnmpGetMap(ttl, key, run);
+}
+
+function snmpWalk(host: string, baseOid: string, timeout = snmpConfig.timeoutMs): Promise<Record<string, string>> {
+  const ctx = snmpLiveContext();
+  const ttl = readSnmpResultCacheTtlMs();
+  const run = () => snmpWalkFor(ctx, host, baseOid, timeout);
+  if (ttl <= 0) return run();
+  const key = `walk\t${snmpResultCacheKeyPrefix(ctx, host, timeout)}\t${baseOid}`;
+  return cachedSnmpWalk(ttl, key, run);
 }
 
 function detectCategoryFromSnmp(sysDescr: string, sysObjectId: string, sysName = ""): string {
@@ -2055,97 +2098,6 @@ function deriveFcSubcategoryByName(name: string): "Core" | "Access" {
   return "Access";
 }
 
-function getSnmpProbe(host: string, timeout = snmpConfig.timeoutMs): Promise<SnmpProbe> {
-  return (async () => {
-    const communities = await snmpCommunities();
-    return await new Promise<SnmpProbe>((resolve) => {
-    const oids = ["1.3.6.1.2.1.1.5.0", "1.3.6.1.2.1.1.1.0", "1.3.6.1.2.1.1.2.0", ...uptimeOidProfiles.map((p) => p.oid)];
-    const baseOids = ["1.3.6.1.2.1.1.5.0", "1.3.6.1.2.1.1.1.0", "1.3.6.1.2.1.1.2.0"];
-    const versions = snmpVersionsFromConfig();
-    let idx = 0;
-    let versionIdx = 0;
-    const fallbackProbeSingle = (community: string, version: snmp.Version) => {
-      const session = snmp.createSession(host, community, {
-        timeout: Math.max(timeout, 1200),
-        retries: Math.max(snmpConfig.retries, 0),
-        version,
-        port: snmpConfig.port,
-      });
-      const readOne = (oid: string) =>
-        new Promise<string>((r) => {
-          session.get([oid], (e, vars) => {
-            if (e || !vars?.length) return r("");
-            const value = vars[0]?.value;
-            r(value === undefined || value === null ? "" : String(value));
-          });
-        });
-      (async () => {
-        try {
-          const sysName = await readOne(baseOids[0]);
-          const sysDescr = await readOne(baseOids[1]);
-          const sysObjectId = await readOne(baseOids[2]);
-          let uptimeSeconds = 0;
-          for (const profile of uptimeOidProfiles) {
-            uptimeSeconds ||= parseSnmpTimeTicksSeconds(await readOne(profile.oid), profile.multiplier);
-          }
-          if (sysName || sysDescr || sysObjectId) {
-            return resolve({ ok: true, sysName, sysDescr, sysObjectId, uptimeSeconds });
-          }
-          return tryNext();
-        } catch {
-          return tryNext();
-        } finally {
-          try {
-            session.close();
-          } catch {
-            /* ignore */
-          }
-        }
-      })();
-    };
-    const tryNext = () => {
-      if (versionIdx >= versions.length) return resolve({ ok: false });
-      if (idx >= communities.length) {
-        idx = 0;
-        versionIdx++;
-        return tryNext();
-      }
-      const community = communities[idx++];
-      const session = snmp.createSession(host, community, {
-        timeout,
-        retries: snmpConfig.retries,
-        version: versions[versionIdx],
-        port: snmpConfig.port,
-      });
-      session.get(oids, (err, varbinds) => {
-        try {
-          session.close();
-        } catch {
-          /* ignore */
-        }
-        if (err || !varbinds?.length) {
-          // Do not fallback on plain timeout, otherwise scans become very slow on /24.
-          // Fallback is reserved for non-timeout SNMP agent quirks.
-          const errMsg = String((err as any)?.message || "").toLowerCase();
-          const isTimeout = errMsg.includes("timeout");
-          if (isTimeout || !err) return tryNext();
-          return fallbackProbeSingle(community, versions[versionIdx]);
-        }
-        const sysName = varbinds[0]?.value ? String(varbinds[0].value) : "";
-        const sysDescr = varbinds[1]?.value ? String(varbinds[1].value) : "";
-        const sysObjectId = varbinds[2]?.value ? String(varbinds[2].value) : "";
-        let uptimeSeconds = 0;
-        uptimeOidProfiles.forEach((profile, i) => {
-          uptimeSeconds ||= parseSnmpTimeTicksSeconds(varbinds[3 + i]?.value, profile.multiplier);
-        });
-        return resolve({ ok: true, sysName, sysDescr, sysObjectId, uptimeSeconds });
-      });
-    };
-    tryNext();
-  });
-  })();
-}
-
 function pickTemplate(item: InventoryItem): SnmpTemplate | undefined {
   if (item.snmpTemplateId) {
     return snmpTemplates.find((t) => t.id === item.snmpTemplateId);
@@ -2159,91 +2111,6 @@ function pickTemplate(item: InventoryItem): SnmpTemplate | undefined {
     return snmpTemplates.find((t) => t.id === "zbx-ups-basic");
   }
   return snmpTemplates.find((t) => t.id === "zbx-switch-basic");
-}
-
-function snmpGetMap(host: string, oids: string[], timeout = snmpConfig.timeoutMs): Promise<Record<string, number | string>> {
-  return (async () => {
-    const communities = await snmpCommunities();
-    return await new Promise<Record<string, number | string>>((resolve) => {
-    const versions = snmpVersionsFromConfig();
-    let idx = 0;
-    let versionIdx = 0;
-    const tryNext = () => {
-      if (versionIdx >= versions.length) return resolve({});
-      if (idx >= communities.length) {
-        idx = 0;
-        versionIdx++;
-        return tryNext();
-      }
-      const session = snmp.createSession(host, communities[idx++], {
-        timeout,
-        retries: snmpConfig.retries,
-        version: versions[versionIdx],
-        port: snmpConfig.port,
-      });
-      session.get(oids, (err, vars) => {
-        try {
-          session.close();
-        } catch {
-          /* ignore */
-        }
-        if (err || !vars?.length) return tryNext();
-        const out: Record<string, number | string> = {};
-        vars.forEach((v, i) => {
-          const raw = v?.value;
-          out[oids[i]] = typeof raw === "number" ? raw : String(raw ?? "");
-        });
-        resolve(out);
-      });
-    };
-    tryNext();
-  });
-  })();
-}
-
-function snmpWalk(host: string, baseOid: string, timeout = snmpConfig.timeoutMs): Promise<Record<string, string>> {
-  return (async () => {
-    const communities = await snmpCommunities();
-    return await new Promise<Record<string, string>>((resolve) => {
-    const versions = snmpVersionsFromConfig();
-    let idx = 0;
-    let versionIdx = 0;
-    const tryNext = () => {
-      if (versionIdx >= versions.length) return resolve({});
-      if (idx >= communities.length) {
-        idx = 0;
-        versionIdx++;
-        return tryNext();
-      }
-      const session = snmp.createSession(host, communities[idx++], {
-        timeout,
-        retries: snmpConfig.retries,
-        version: versions[versionIdx],
-        port: snmpConfig.port,
-      });
-      const out: Record<string, string> = {};
-      session.subtree(
-        baseOid,
-        (varbinds) => {
-          for (const vb of varbinds) {
-            const suffix = vb.oid.startsWith(`${baseOid}.`) ? vb.oid.slice(baseOid.length + 1) : vb.oid;
-            out[suffix] = String(vb.value ?? "");
-          }
-        },
-        (err) => {
-          try {
-            session.close();
-          } catch {
-            /* ignore */
-          }
-          if (err) return tryNext();
-          resolve(out);
-        }
-      );
-    };
-    tryNext();
-  });
-  })();
 }
 
 function normalizeMac(raw: string): string {
@@ -3748,7 +3615,10 @@ function applyPgKv(key: string, value: unknown) {
         if (typeof value === "object") systemConfig = { ...systemConfig, ...(value as typeof systemConfig) };
         break;
       case APP_KV_KEYS.snmp_config:
-        if (value && typeof value === "object") snmpConfig = hydrateSnmpFromKv(value);
+        if (value && typeof value === "object") {
+          snmpConfig = hydrateSnmpFromKv(value);
+          clearSnmpResultCaches();
+        }
         break;
       case APP_KV_KEYS.ldap_config:
         if (value && typeof value === "object" && "admin" in value && "operator" in value) {
@@ -4081,6 +3951,7 @@ export async function startServer() {
   registerFirstRunSetupRoutes(app, { reloadPersistenceAfterSetup });
   app.use(attachNetnodeSession());
   app.use(csrfProtectionMiddleware());
+  app.use(createMutatingApiRateLimiter());
   // Helper: Role Check Middleware (server-side session only)
   const checkRole = (roles: string[]) => (req: express.Request, res: express.Response, next: express.NextFunction) => {
     const user = authFromRequest(req);
@@ -5376,58 +5247,69 @@ type MacSearchEvent = {
       });
     }
 
-    const jobId = `md-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const nowIso = new Date().toISOString();
-    const job: ManualDiscoveryJob = {
-      id: jobId,
-      actor,
-      status: "running",
-      createdAt: nowIso,
-      startedAt: nowIso,
-      input: { subnets, protocol, city, zone, branch },
-    };
-    manualDiscoveryJobs.set(jobId, job);
-    trimManualDiscoveryJobs();
-    activeManualDiscoveryJobId = jobId;
-    void persistPgDiscoveryJobMaps();
+    discoveryRunLock = true;
+    let createdJobId: string | undefined;
+    try {
+      const jobId = `md-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      createdJobId = jobId;
+      const nowIso = new Date().toISOString();
+      const job: ManualDiscoveryJob = {
+        id: jobId,
+        actor,
+        status: "running",
+        createdAt: nowIso,
+        startedAt: nowIso,
+        input: { subnets, protocol, city, zone, branch },
+      };
+      manualDiscoveryJobs.set(jobId, job);
+      trimManualDiscoveryJobs();
+      activeManualDiscoveryJobId = jobId;
+      await persistPgDiscoveryJobMaps();
 
-    // Non-blocking run to avoid reverse-proxy timeouts on long subnets.
-    (async () => {
-      discoveryRunLock = true;
-      try {
-        const summary = await runDiscoveryScan({ subnets, protocol, city, zone, branch, actor, reason: "manual" });
-        const current = manualDiscoveryJobs.get(jobId);
-        if (current) {
-          current.status = "done";
-          current.summary = summary;
-          current.finishedAt = new Date().toISOString();
-          manualDiscoveryJobs.set(jobId, current);
+      // Non-blocking run to avoid reverse-proxy timeouts on long subnets.
+      void (async () => {
+        try {
+          const summary = await runDiscoveryScan({ subnets, protocol, city, zone, branch, actor, reason: "manual" });
+          const current = manualDiscoveryJobs.get(jobId);
+          if (current) {
+            current.status = "done";
+            current.summary = summary;
+            current.finishedAt = new Date().toISOString();
+            manualDiscoveryJobs.set(jobId, current);
+          }
+        } catch (e) {
+          const msg = safeErrorDetail(e);
+          const current = manualDiscoveryJobs.get(jobId);
+          if (current) {
+            current.status = "error";
+            current.error = msg;
+            current.finishedAt = new Date().toISOString();
+            manualDiscoveryJobs.set(jobId, current);
+          }
+          console.warn(`[discovery] manual scan failed job=${jobId}: ${msg}`);
+          logAction(actor, "Discovery Failed", msg, "inventory");
+        } finally {
+          discoveryRunLock = false;
+          if (activeManualDiscoveryJobId === jobId) activeManualDiscoveryJobId = null;
+          await persistPgDiscoveryJobMaps();
         }
-      } catch (e) {
-        const msg = safeErrorDetail(e);
-        const current = manualDiscoveryJobs.get(jobId);
-        if (current) {
-          current.status = "error";
-          current.error = msg;
-          current.finishedAt = new Date().toISOString();
-          manualDiscoveryJobs.set(jobId, current);
-        }
-        console.warn(`[discovery] manual scan failed job=${jobId}: ${msg}`);
-        logAction(actor, "Discovery Failed", msg, "inventory");
-      } finally {
-        discoveryRunLock = false;
-        if (activeManualDiscoveryJobId === jobId) activeManualDiscoveryJobId = null;
-        await persistPgDiscoveryJobMaps();
-      }
-    })();
+      })();
 
-    return res.status(202).json({
-      success: true,
-      accepted: true,
-      jobId,
-      status: "running",
-      statusEndpoint: `/api/discovery/start/status/${jobId}`,
-    });
+      return res.status(202).json({
+        success: true,
+        accepted: true,
+        jobId,
+        status: "running",
+        statusEndpoint: `/api/discovery/start/status/${jobId}`,
+      });
+    } catch (e) {
+      discoveryRunLock = false;
+      activeManualDiscoveryJobId = null;
+      if (createdJobId) manualDiscoveryJobs.delete(createdJobId);
+      const msg = safeErrorDetail(e);
+      console.warn(`[discovery] manual start failed before job run: ${msg}`);
+      return res.status(500).json(clientErrorPayload("discovery.start.persist", msg || "Failed to start discovery"));
+    }
   });
 
   app.get("/api/discovery/start/status/:jobId", checkRole(["admin", "operator"]), (req, res) => {
@@ -6296,6 +6178,7 @@ type MacSearchEvent = {
       };
     }
     logAction(actor, 'SNMP Config Update', `Changed SNMP settings (Version: ${version})`, 'config');
+    clearSnmpResultCaches();
     await persistPgConfigs("snmp");
     res.json({ success: true, message: "SNMP configuration saved.", snmp: snmpConfigForClient() });
   });
