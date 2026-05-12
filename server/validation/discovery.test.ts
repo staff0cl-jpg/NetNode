@@ -18,3 +18,13 @@ test("discovery start body rejects empty subnets", () => {
   const r = discoveryStartBodySchema.safeParse({ subnets: "   " });
   assert.equal(r.success, false);
 });
+
+test("discovery start body rejects invalid subnet tokens", () => {
+  const r = discoveryStartBodySchema.safeParse({ subnets: "not-a-cidr" });
+  assert.equal(r.success, false);
+});
+
+test("discovery start body accepts single host ipv4", () => {
+  const r = discoveryStartBodySchema.safeParse({ subnets: "10.0.0.1" });
+  assert.equal(r.success, true);
+});

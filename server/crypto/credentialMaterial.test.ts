@@ -1,20 +1,55 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { materialFromUserPassword, readPasswordMaterial } from "./credentialMaterial.js";
+import {
+  materialFromUserPassword,
+  materialFromUserPasswordSync,
+  readPasswordMaterial,
+  readPasswordMaterialSync,
+} from "./credentialMaterial.js";
 
-test("plain material when NETNODE_CREDENTIALS_KEY is unset", () => {
+const STRONG_KEY = "k".repeat(32);
+
+test("plain material when NETNODE_CREDENTIALS_KEY is unset", async () => {
   delete process.env.NETNODE_CREDENTIALS_KEY;
-  const m = materialFromUserPassword("secret");
+  const m = await materialFromUserPassword("secret");
   assert.equal(m.kind, "plain");
-  assert.equal(readPasswordMaterial(m), "secret");
+  assert.equal(await readPasswordMaterial(m), "secret");
 });
 
-test("sealed round-trip when NETNODE_CREDENTIALS_KEY is set", () => {
-  process.env.NETNODE_CREDENTIALS_KEY = "test-secret-at-least-8-chars";
+test("g2 round-trip when NETNODE_CREDENTIALS_KEY is strong (>= 32 bytes)", async () => {
+  process.env.NETNODE_CREDENTIALS_KEY = STRONG_KEY;
   try {
-    const m = materialFromUserPassword("p@ss w0rd!");
+    const m = await materialFromUserPassword("p@ss w0rd!");
     assert.equal(m.kind, "sealed");
-    assert.equal(readPasswordMaterial(m), "p@ss w0rd!");
+    assert.ok(m.payload.startsWith("g2:"));
+    assert.equal(await readPasswordMaterial(m), "p@ss w0rd!");
+    assert.equal(readPasswordMaterialSync(m), "p@ss w0rd!");
+  } finally {
+    delete process.env.NETNODE_CREDENTIALS_KEY;
+  }
+});
+
+test("materialFromUserPasswordSync matches async for strong key", async () => {
+  process.env.NETNODE_CREDENTIALS_KEY = STRONG_KEY;
+  try {
+    const a = await materialFromUserPassword("x");
+    const b = materialFromUserPasswordSync("x");
+    assert.equal(a.kind, "sealed");
+    assert.equal(b.kind, "sealed");
+    assert.equal(await readPasswordMaterial(a), "x");
+    assert.equal(readPasswordMaterialSync(b), "x");
+  } finally {
+    delete process.env.NETNODE_CREDENTIALS_KEY;
+  }
+});
+
+test("legacy g1 round-trip when key is 8–31 bytes", async () => {
+  process.env.NETNODE_CREDENTIALS_KEY = "legacy-8-chars-min";
+  try {
+    const m = materialFromUserPasswordSync("legacy-secret");
+    assert.equal(m.kind, "sealed");
+    assert.ok(m.payload.startsWith("g1:"));
+    assert.equal(await readPasswordMaterial(m), "legacy-secret");
   } finally {
     delete process.env.NETNODE_CREDENTIALS_KEY;
   }

@@ -29,7 +29,12 @@ import { registerFirstRunSetupRoutes } from "./setup/setupRoutes.js";
 import { createInitialUsers } from "./auth/initialUsers.js";
 import { hashPassword, verifyLocalPassword } from "./auth/password.js";
 import type { AuthUser, LocalUser } from "./auth/types.js";
-import { materialFromUserPassword, readPasswordMaterial, type PasswordMaterial } from "./crypto/credentialMaterial.js";
+import {
+  materialFromUserPassword,
+  readPasswordMaterial,
+  materialHasValue,
+  type PasswordMaterial,
+} from "./crypto/credentialMaterial.js";
 import type { InventoryItem } from "./inventory/inventoryTypes.js";
 import { evaluateInventoryWarnings } from "./inventory/warnings.js";
 import { applySecurityMiddleware, createLoginRateLimiter } from "./middleware/security.js";
@@ -177,7 +182,7 @@ type SshReadonlyProfile = {
 };
 let sshReadonlyProfile: SshReadonlyProfile | null = null;
 
-function sshReadonlyPassword(profile: SshReadonlyProfile): string {
+async function sshReadonlyPassword(profile: SshReadonlyProfile): Promise<string> {
   return readPasswordMaterial(profile.passwordMaterial);
 }
 
@@ -560,22 +565,133 @@ let systemConfig = {
   },
 };
 
-let snmpConfig = {
-  community: "public",
-  communities: ["public"],
-  version: "SNMP v2c",
-  port: 161,
-  timeoutMs: 1200,
-  retries: 0,
-  macSearch: {
+const SNMP_SECRET_MASK = "********";
+
+function defaultSnmpMacSearch() {
+  return {
     dot1dTpFdbPortOid: "1.3.6.1.2.1.17.4.3.1.2",
     dot1dBasePortIfIndexOid: "1.3.6.1.2.1.17.1.4.1.2",
     dot1qTpFdbPortOid: "1.3.6.1.2.1.17.7.1.2.2.1.2",
     voiceVlanMacOid: "1.3.6.1.4.1.9.9.315.1.2.3.1.1",
     voiceOuiPrefixes: [] as string[],
     voiceOuiEntries: [] as Array<{ ouiAddress: string; mask: string; description: string }>,
-  },
+  };
+}
+
+type SnmpMacSearchConfig = ReturnType<typeof defaultSnmpMacSearch>;
+
+type SnmpRuntimeConfig = {
+  communityMaterial: PasswordMaterial;
+  communitiesMaterials: PasswordMaterial[];
+  version: string;
+  port: number;
+  timeoutMs: number;
+  retries: number;
+  macSearch: SnmpMacSearchConfig;
 };
+
+function defaultSnmpRuntime(): SnmpRuntimeConfig {
+  return {
+    communityMaterial: { kind: "plain", value: "public" },
+    communitiesMaterials: [{ kind: "plain", value: "public" }],
+    version: "SNMP v2c",
+    port: 161,
+    timeoutMs: 1200,
+    retries: 0,
+    macSearch: defaultSnmpMacSearch(),
+  };
+}
+
+let snmpConfig: SnmpRuntimeConfig = defaultSnmpRuntime();
+
+function hydrateSnmpFromKv(value: unknown): SnmpRuntimeConfig {
+  const base = defaultSnmpRuntime();
+  if (!value || typeof value !== "object") return base;
+  const v = value as Record<string, unknown>;
+  const mac =
+    v.macSearch && typeof v.macSearch === "object" ? { ...base.macSearch, ...(v.macSearch as object) } : base.macSearch;
+  let communityMaterial = base.communityMaterial;
+  const cm = v.communityMaterial;
+  if (cm && typeof cm === "object" && cm !== null && "kind" in cm) {
+    communityMaterial = cm as PasswordMaterial;
+  } else if (typeof v.community === "string") {
+    communityMaterial = { kind: "plain", value: v.community };
+  }
+  let communitiesMaterials = base.communitiesMaterials;
+  const cms = v.communitiesMaterials;
+  if (Array.isArray(cms) && cms.every((x) => x && typeof x === "object" && x !== null && "kind" in x)) {
+    communitiesMaterials = cms as PasswordMaterial[];
+  } else if (Array.isArray(v.communities)) {
+    communitiesMaterials = (v.communities as unknown[]).map((s) =>
+      typeof s === "string" ? ({ kind: "plain", value: s } as PasswordMaterial) : ({ kind: "plain", value: "" } as PasswordMaterial)
+    );
+  }
+  return {
+    communityMaterial,
+    communitiesMaterials,
+    version: typeof v.version === "string" ? v.version : base.version,
+    port: typeof v.port === "number" && Number.isFinite(v.port) ? v.port : base.port,
+    timeoutMs: typeof v.timeoutMs === "number" && Number.isFinite(v.timeoutMs) ? v.timeoutMs : base.timeoutMs,
+    retries: typeof v.retries === "number" && Number.isFinite(v.retries) ? v.retries : base.retries,
+    macSearch: mac as SnmpRuntimeConfig["macSearch"],
+  };
+}
+
+function snmpConfigForClient(): Record<string, unknown> {
+  return {
+    community: materialHasValue(snmpConfig.communityMaterial) ? SNMP_SECRET_MASK : "",
+    communities: snmpConfig.communitiesMaterials.map((m) => (materialHasValue(m) ? SNMP_SECRET_MASK : "")),
+    version: snmpConfig.version,
+    port: snmpConfig.port,
+    timeoutMs: snmpConfig.timeoutMs,
+    retries: snmpConfig.retries,
+    macSearch: snmpConfig.macSearch,
+  };
+}
+
+async function mergeSnmpCredentialsFromBody(
+  body: Record<string, unknown>,
+  prev: SnmpRuntimeConfig
+): Promise<{ communityMaterial: PasswordMaterial; communitiesMaterials: PasswordMaterial[] }> {
+  let communityMaterial = prev.communityMaterial;
+  if (typeof body.community === "string") {
+    const s = body.community.trim();
+    if (s && s !== SNMP_SECRET_MASK) communityMaterial = await materialFromUserPassword(s);
+  }
+  let communitiesMaterials = prev.communitiesMaterials;
+  if (Array.isArray(body.communities)) {
+    const inc = body.communities as unknown[];
+    communitiesMaterials = await Promise.all(
+      inc.map(async (raw, i) => {
+        const token = typeof raw === "string" ? raw.trim() : "";
+        if (!token || token === SNMP_SECRET_MASK) {
+          return prev.communitiesMaterials[i] ?? ({ kind: "plain", value: "" } as PasswordMaterial);
+        }
+        return materialFromUserPassword(token);
+      })
+    );
+  }
+  return { communityMaterial, communitiesMaterials };
+}
+
+async function sealVolatileCredentialMaterialsAfterHydrate() {
+  const upgrade = async (m: PasswordMaterial): Promise<PasswordMaterial> => {
+    if (m.kind !== "plain") return m;
+    return materialFromUserPassword(m.value);
+  };
+  snmpConfig.communityMaterial = await upgrade(snmpConfig.communityMaterial);
+  snmpConfig.communitiesMaterials = await Promise.all(snmpConfig.communitiesMaterials.map(upgrade));
+  ldapConfig = {
+    admin: { ...ldapConfig.admin, bindPasswordMaterial: await upgrade(ldapConfig.admin.bindPasswordMaterial) },
+    operator: { ...ldapConfig.operator, bindPasswordMaterial: await upgrade(ldapConfig.operator.bindPasswordMaterial) },
+  };
+  if (sshReadonlyProfile) {
+    sshReadonlyProfile = {
+      ...sshReadonlyProfile,
+      passwordMaterial: await upgrade(sshReadonlyProfile.passwordMaterial),
+    };
+  }
+}
 
 type BackupScope = {
   mode: "all" | "filtered";
@@ -1295,21 +1411,54 @@ interface LdapRoleProfile {
   enabled: boolean;
   url: string;
   bindDn: string;
-  bindPassword: string;
+  bindPasswordMaterial: PasswordMaterial;
   searchBase: string;
   searchFilter: string;
   tlsRejectUnauthorized: boolean;
 }
 
+type LdapClientPatch = Partial<{
+  enabled: boolean;
+  url: string;
+  bindDn: string;
+  bindPassword: string;
+  searchBase: string;
+  searchFilter: string;
+  tlsRejectUnauthorized: boolean;
+}>;
+
 const defaultLdapProfile = (): LdapRoleProfile => ({
   enabled: false,
   url: "ldap://127.0.0.1:389",
   bindDn: "",
-  bindPassword: "",
+  bindPasswordMaterial: { kind: "plain", value: "" },
   searchBase: "dc=example,dc=com",
   searchFilter: "(sAMAccountName={{username}})",
   tlsRejectUnauthorized: true,
 });
+
+function hydrateLdapRole(raw: unknown): LdapRoleProfile {
+  const d = defaultLdapProfile();
+  if (!raw || typeof raw !== "object") return d;
+  const r = raw as Record<string, unknown>;
+  let bindPasswordMaterial = d.bindPasswordMaterial;
+  const mat = r.bindPasswordMaterial;
+  if (mat && typeof mat === "object" && mat !== null && "kind" in mat) {
+    bindPasswordMaterial = mat as PasswordMaterial;
+  } else if (typeof r.bindPassword === "string") {
+    bindPasswordMaterial = { kind: "plain", value: r.bindPassword };
+  }
+  return {
+    enabled: typeof r.enabled === "boolean" ? r.enabled : d.enabled,
+    url: typeof r.url === "string" ? r.url : d.url,
+    bindDn: typeof r.bindDn === "string" ? r.bindDn : d.bindDn,
+    bindPasswordMaterial,
+    searchBase: typeof r.searchBase === "string" ? r.searchBase : d.searchBase,
+    searchFilter: typeof r.searchFilter === "string" ? r.searchFilter : d.searchFilter,
+    tlsRejectUnauthorized:
+      typeof r.tlsRejectUnauthorized === "boolean" ? r.tlsRejectUnauthorized : d.tlsRejectUnauthorized,
+  };
+}
 
 let ldapConfig: { admin: LdapRoleProfile; operator: LdapRoleProfile } = {
   admin: defaultLdapProfile(),
@@ -1318,24 +1467,33 @@ let ldapConfig: { admin: LdapRoleProfile; operator: LdapRoleProfile } = {
 
 function maskLdapForClient() {
   const mask = (p: LdapRoleProfile) => ({
-    ...p,
-    bindPassword: p.bindPassword ? "********" : "",
+    enabled: p.enabled,
+    url: p.url,
+    bindDn: p.bindDn,
+    bindPassword: materialHasValue(p.bindPasswordMaterial) ? "********" : "",
+    searchBase: p.searchBase,
+    searchFilter: p.searchFilter,
+    tlsRejectUnauthorized: p.tlsRejectUnauthorized,
   });
   return { admin: mask(ldapConfig.admin), operator: mask(ldapConfig.operator) };
 }
 
-function mergeLdapPasswords(incoming: { admin?: Partial<LdapRoleProfile>; operator?: Partial<LdapRoleProfile> }) {
-  const pick = (key: "admin" | "operator", patch?: Partial<LdapRoleProfile>) => {
+async function mergeLdapPasswords(incoming: { admin?: LdapClientPatch; operator?: LdapClientPatch }) {
+  const pick = async (key: "admin" | "operator", patch?: LdapClientPatch) => {
     const cur = ldapConfig[key];
-    const next = { ...cur, ...patch } as LdapRoleProfile;
-    if (!patch?.bindPassword || patch.bindPassword === "********") {
-      next.bindPassword = cur.bindPassword;
+    const { bindPassword: bpIn, ...rest } = patch || {};
+    const next: LdapRoleProfile = { ...cur, ...rest };
+    let bindPasswordMaterial = cur.bindPasswordMaterial;
+    if (typeof bpIn === "string") {
+      const bp = bpIn.trim();
+      if (bp && bp !== "********") bindPasswordMaterial = await materialFromUserPassword(bp);
     }
+    next.bindPasswordMaterial = bindPasswordMaterial;
     return next;
   };
   ldapConfig = {
-    admin: pick("admin", incoming.admin),
-    operator: pick("operator", incoming.operator),
+    admin: await pick("admin", incoming.admin),
+    operator: await pick("operator", incoming.operator),
   };
 }
 
@@ -1364,59 +1522,69 @@ function verifyLdapLogin(profile: LdapRoleProfile, username: string, password: s
     return Promise.resolve(false);
   }
 
-  return new Promise((resolve) => {
-    const safeUser = escapeLdapFilterValue(username);
-    const filter = (profile.searchFilter || "(uid={{username}})").replace(/\{\{username\}\}/g, safeUser);
+  return (async () => {
+    let bindSecret: string;
+    try {
+      bindSecret = await readPasswordMaterial(profile.bindPasswordMaterial);
+    } catch {
+      return false;
+    }
+    if (!bindSecret) return false;
 
-    const client = ldap.createClient({
-      url: profile.url,
-      timeout: 15000,
-      connectTimeout: 15000,
-      tlsOptions: { rejectUnauthorized: profile.tlsRejectUnauthorized },
-    });
+    return await new Promise<boolean>((resolve) => {
+      const safeUser = escapeLdapFilterValue(username);
+      const filter = (profile.searchFilter || "(uid={{username}})").replace(/\{\{username\}\}/g, safeUser);
 
-    const done = (ok: boolean) => {
-      try {
-        client.unbind();
-      } catch {
-        /* ignore */
-      }
-      resolve(ok);
-    };
+      const client = ldap.createClient({
+        url: profile.url,
+        timeout: 15000,
+        connectTimeout: 15000,
+        tlsOptions: { rejectUnauthorized: profile.tlsRejectUnauthorized },
+      });
 
-    client.on("error", () => done(false));
-
-    client.bind(profile.bindDn, profile.bindPassword, (bindErr) => {
-      if (bindErr) return done(false);
-
-      client.search(
-        profile.searchBase,
-        { filter, scope: "sub", attributes: ["dn"], sizeLimit: 1 },
-        (searchErr, res) => {
-          if (searchErr || !res) {
-            try {
-              client.unbind();
-            } catch {
-              /* ignore */
-            }
-            return done(false);
-          }
-
-          let userDn: string | null = null;
-          res.on("searchEntry", (entry) => {
-            userDn = ldapEntryDn(entry);
-          });
-          res.on("error", () => done(false));
-          res.on("end", () => {
-            if (!userDn) return done(false);
-            client.bind(userDn, password, (userBindErr) => {
-              done(!userBindErr);
-            });
-          });
+      const done = (ok: boolean) => {
+        try {
+          client.unbind();
+        } catch {
+          /* ignore */
         }
-      );
+        resolve(ok);
+      };
+
+      client.on("error", () => done(false));
+
+      client.bind(profile.bindDn, bindSecret, (bindErr) => {
+        if (bindErr) return done(false);
+
+        client.search(
+          profile.searchBase,
+          { filter, scope: "sub", attributes: ["dn"], sizeLimit: 1 },
+          (searchErr, res) => {
+            if (searchErr || !res) {
+              try {
+                client.unbind();
+              } catch {
+                /* ignore */
+              }
+              return done(false);
+            }
+
+            let userDn: string | null = null;
+            res.on("searchEntry", (entry) => {
+              userDn = ldapEntryDn(entry);
+            });
+            res.on("error", () => done(false));
+            res.on("end", () => {
+              if (!userDn) return done(false);
+              client.bind(userDn, password, (userBindErr) => {
+                done(!userBindErr);
+              });
+            });
+          }
+        );
+      });
     });
-  });
+  })();
 }
 
 function ipv4ToInt(ip: string): number | null {
@@ -1718,10 +1886,24 @@ function snmpVersionsFromConfig(): snmp.Version[] {
   return [preferred, fallback];
 }
 
-function snmpCommunities(): string[] {
-  const fromList = (snmpConfig.communities || []).map((s) => s.trim()).filter(Boolean);
-  const direct = snmpConfig.community?.trim() ? [snmpConfig.community.trim()] : [];
-  return [...new Set([...fromList, ...direct])];
+async function snmpCommunities(): Promise<string[]> {
+  const directStr = (await readPasswordMaterial(snmpConfig.communityMaterial)).trim();
+  const direct = directStr ? [directStr] : [];
+  const fromList = (
+    await Promise.all(snmpConfig.communitiesMaterials.map((m) => readPasswordMaterial(m)))
+  )
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const merged = [...direct, ...fromList];
+  const uniq: string[] = [];
+  const seen = new Set<string>();
+  for (const c of merged) {
+    if (!seen.has(c)) {
+      seen.add(c);
+      uniq.push(c);
+    }
+  }
+  return uniq;
 }
 
 type SnmpProbe = {
@@ -1782,8 +1964,9 @@ function deriveFcSubcategoryByName(name: string): "Core" | "Access" {
 }
 
 function getSnmpProbe(host: string, timeout = snmpConfig.timeoutMs): Promise<SnmpProbe> {
-  return new Promise((resolve) => {
-    const communities = snmpCommunities();
+  return (async () => {
+    const communities = await snmpCommunities();
+    return await new Promise<SnmpProbe>((resolve) => {
     const oids = ["1.3.6.1.2.1.1.5.0", "1.3.6.1.2.1.1.1.0", "1.3.6.1.2.1.1.2.0", ...uptimeOidProfiles.map((p) => p.oid)];
     const baseOids = ["1.3.6.1.2.1.1.5.0", "1.3.6.1.2.1.1.1.0", "1.3.6.1.2.1.1.2.0"];
     const versions = snmpVersionsFromConfig();
@@ -1868,6 +2051,7 @@ function getSnmpProbe(host: string, timeout = snmpConfig.timeoutMs): Promise<Snm
     };
     tryNext();
   });
+  })();
 }
 
 function pickTemplate(item: InventoryItem): SnmpTemplate | undefined {
@@ -1886,8 +2070,9 @@ function pickTemplate(item: InventoryItem): SnmpTemplate | undefined {
 }
 
 function snmpGetMap(host: string, oids: string[], timeout = snmpConfig.timeoutMs): Promise<Record<string, number | string>> {
-  return new Promise((resolve) => {
-    const communities = snmpCommunities();
+  return (async () => {
+    const communities = await snmpCommunities();
+    return await new Promise<Record<string, number | string>>((resolve) => {
     const versions = snmpVersionsFromConfig();
     let idx = 0;
     let versionIdx = 0;
@@ -1921,11 +2106,13 @@ function snmpGetMap(host: string, oids: string[], timeout = snmpConfig.timeoutMs
     };
     tryNext();
   });
+  })();
 }
 
 function snmpWalk(host: string, baseOid: string, timeout = snmpConfig.timeoutMs): Promise<Record<string, string>> {
-  return new Promise((resolve) => {
-    const communities = snmpCommunities();
+  return (async () => {
+    const communities = await snmpCommunities();
+    return await new Promise<Record<string, string>>((resolve) => {
     const versions = snmpVersionsFromConfig();
     let idx = 0;
     let versionIdx = 0;
@@ -1964,6 +2151,7 @@ function snmpWalk(host: string, baseOid: string, timeout = snmpConfig.timeoutMs)
     };
     tryNext();
   });
+  })();
 }
 
 function normalizeMac(raw: string): string {
@@ -2447,7 +2635,7 @@ async function runBackupJob(actor: string): Promise<BackupHistoryItem> {
         const output = await runSshReadonlyCommands(
           device.ip,
           profile.username,
-          sshReadonlyPassword(profile),
+          await sshReadonlyPassword(profile),
           profile.port,
           backupCommandsForVendor(device.vendor)
         );
@@ -2527,7 +2715,7 @@ async function collectTrunkMetricsWithFallback(item: InventoryItem): Promise<Tru
     const output = await runSshReadonlyCommands(
       item.ip,
       profile.username,
-      sshReadonlyPassword(profile),
+      await sshReadonlyPassword(profile),
       profile.port,
       sshCommandsForModel(item.model)
     );
@@ -2677,9 +2865,10 @@ function detectNoopFromOutput(output: string, scenario: AutomationScenario, vlan
 async function runSshCommandBatch(device: InventoryItem, commands: string[], timeoutMs: number): Promise<string> {
   const profile = getActiveSshReadonlyProfile();
   if (!profile) throw new Error("SSH readonly profile is not configured");
+  const pwd = await sshReadonlyPassword(profile);
   const timeout = new Promise<string>((_r, reject) => setTimeout(() => reject(new Error("SSH command timeout")), timeoutMs));
   return Promise.race([
-    runSshReadonlyCommands(device.ip, profile.username, sshReadonlyPassword(profile), profile.port, commands),
+    runSshReadonlyCommands(device.ip, profile.username, pwd, profile.port, commands),
     timeout,
   ]);
 }
@@ -3322,40 +3511,48 @@ function rebuildTopologyFromInventory() {
 }
 
 function testLdapServiceBind(profile: LdapRoleProfile): Promise<{ ok: boolean; message: string }> {
-  return new Promise((resolve) => {
-    if (!profile.url?.trim()) return resolve({ ok: false, message: "Укажите URL сервера LDAP" });
-    if (!profile.bindDn?.trim()) return resolve({ ok: false, message: "Укажите Bind DN" });
-    if (!profile.searchBase?.trim()) return resolve({ ok: false, message: "Укажите Search Base" });
+  return (async () => {
+    let bindSecret: string;
+    try {
+      bindSecret = await readPasswordMaterial(profile.bindPasswordMaterial);
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : "Bind password unavailable" };
+    }
+    return await new Promise((resolve) => {
+      if (!profile.url?.trim()) return resolve({ ok: false, message: "Укажите URL сервера LDAP" });
+      if (!profile.bindDn?.trim()) return resolve({ ok: false, message: "Укажите Bind DN" });
+      if (!profile.searchBase?.trim()) return resolve({ ok: false, message: "Укажите Search Base" });
 
-    const client = ldap.createClient({
-      url: profile.url,
-      timeout: 12000,
-      connectTimeout: 12000,
-      tlsOptions: { rejectUnauthorized: profile.tlsRejectUnauthorized },
-    });
-    const done = (ok: boolean, message: string) => {
-      try {
-        client.unbind();
-      } catch {
-        /* ignore */
-      }
-      resolve({ ok, message });
-    };
-    client.on("error", (err: Error) => done(false, err.message));
-    client.bind(profile.bindDn, profile.bindPassword, (bindErr: Error | null) => {
-      if (bindErr) return done(false, bindErr.message);
-      client.search(
-        profile.searchBase,
-        { filter: "(objectClass=*)", scope: "base", sizeLimit: 1 },
-        (sErr, res) => {
-          if (sErr || !res) return done(false, sErr?.message || "Ошибка LDAP search");
-          res.on("searchEntry", () => {});
-          res.on("error", (e: Error) => done(false, e.message));
-          res.on("end", () => done(true, "Соединение и bind успешны, база поиска доступна"));
+      const client = ldap.createClient({
+        url: profile.url,
+        timeout: 12000,
+        connectTimeout: 12000,
+        tlsOptions: { rejectUnauthorized: profile.tlsRejectUnauthorized },
+      });
+      const done = (ok: boolean, message: string) => {
+        try {
+          client.unbind();
+        } catch {
+          /* ignore */
         }
-      );
+        resolve({ ok, message });
+      };
+      client.on("error", (err: Error) => done(false, err.message));
+      client.bind(profile.bindDn, bindSecret, (bindErr: Error | null) => {
+        if (bindErr) return done(false, bindErr.message);
+        client.search(
+          profile.searchBase,
+          { filter: "(objectClass=*)", scope: "base", sizeLimit: 1 },
+          (sErr, res) => {
+            if (sErr || !res) return done(false, sErr?.message || "Ошибка LDAP search");
+            res.on("searchEntry", () => {});
+            res.on("error", (e: Error) => done(false, e.message));
+            res.on("end", () => done(true, "Соединение и bind успешны, база поиска доступна"));
+          }
+        );
+      });
     });
-  });
+  })();
 }
 
 function getRequestIp(req: express.Request): string {
@@ -3459,11 +3656,15 @@ function applyPgKv(key: string, value: unknown) {
         if (typeof value === "object") systemConfig = { ...systemConfig, ...(value as typeof systemConfig) };
         break;
       case APP_KV_KEYS.snmp_config:
-        if (typeof value === "object") snmpConfig = { ...snmpConfig, ...(value as typeof snmpConfig) };
+        if (value && typeof value === "object") snmpConfig = hydrateSnmpFromKv(value);
         break;
       case APP_KV_KEYS.ldap_config:
-        if (typeof value === "object" && value && "admin" in value && "operator" in value) {
-          ldapConfig = { ...(value as typeof ldapConfig) };
+        if (value && typeof value === "object" && "admin" in value && "operator" in value) {
+          const v = value as { admin?: unknown; operator?: unknown };
+          ldapConfig = {
+            admin: hydrateLdapRole(v.admin),
+            operator: hydrateLdapRole(v.operator),
+          };
         }
         break;
       case APP_KV_KEYS.backup_config:
@@ -3757,6 +3958,7 @@ async function connectAndHydratePostgres() {
       auditLogs = logs as AuditLog[];
     },
   });
+  await sealVolatileCredentialMaterialsAfterHydrate();
 }
 
 async function reloadPersistenceAfterSetup() {
@@ -4788,8 +4990,8 @@ type MacSearchEvent = {
 
   app.post("/api/config/ldap", checkRole(['admin']), async (req, res) => {
     const actor = actorName(req);
-    const body = req.body as { admin?: Partial<LdapRoleProfile>; operator?: Partial<LdapRoleProfile> };
-    mergeLdapPasswords(body || {});
+    const body = req.body as { admin?: LdapClientPatch; operator?: LdapClientPatch };
+    await mergeLdapPasswords(body || {});
     logAction(actor, 'LDAP Config Update', 'Updated LDAP authentication profiles', 'config');
     await persistPgConfigs("ldap");
     res.json({ success: true, ldap: maskLdapForClient() });
@@ -4798,17 +5000,26 @@ type MacSearchEvent = {
   app.post("/api/config/ldap/test", checkRole(["admin"]), async (req, res) => {
     const body = req.body as {
       profile?: "admin" | "operator";
-      draft?: Partial<LdapRoleProfile>;
+      draft?: LdapClientPatch;
       testUsername?: string;
       testPassword?: string;
     };
     const key = body.profile === "operator" ? "operator" : "admin";
     let p: LdapRoleProfile = { ...ldapConfig[key] };
     if (body.draft && typeof body.draft === "object") {
-      p = { ...p, ...body.draft } as LdapRoleProfile;
-      const bp = body.draft.bindPassword;
-      if (!bp?.trim() || bp === "********") {
-        p.bindPassword = ldapConfig[key].bindPassword;
+      const d = body.draft;
+      p = {
+        ...p,
+        enabled: d.enabled ?? p.enabled,
+        url: d.url ?? p.url,
+        bindDn: d.bindDn ?? p.bindDn,
+        searchBase: d.searchBase ?? p.searchBase,
+        searchFilter: d.searchFilter ?? p.searchFilter,
+        tlsRejectUnauthorized: d.tlsRejectUnauthorized ?? p.tlsRejectUnauthorized,
+      };
+      const bp = d.bindPassword;
+      if (bp !== undefined && bp.trim() && bp !== "********") {
+        p.bindPasswordMaterial = await materialFromUserPassword(bp.trim());
       }
     }
 
@@ -5794,7 +6005,7 @@ type MacSearchEvent = {
   });
 
   app.get("/api/config/snmp", checkRole(['admin', 'operator']), (_req, res) => {
-    res.json({ snmp: snmpConfig });
+    res.json({ snmp: snmpConfigForClient() });
   });
 
   app.get("/api/backup/config", checkRole(["admin", "operator", "viewer"]), (_req, res) => {
@@ -5971,34 +6182,39 @@ type MacSearchEvent = {
 
   // API: SNMP Configuration
   app.post("/api/config/snmp", checkRole(['admin']), async (req, res) => {
-    const { community, version, communities, timeoutMs, retries, port, macSearch } = req.body;
+    const body = req.body as Record<string, unknown>;
+    const { version, timeoutMs, retries, port, macSearch } = body;
     const actor = actorName(req);
-    if (typeof community === "string" && community.trim()) snmpConfig.community = community.trim();
-    if (Array.isArray(communities)) {
-      snmpConfig.communities = communities.map((v) => String(v).trim()).filter(Boolean);
-    }
+    const mergedCred = await mergeSnmpCredentialsFromBody(body, snmpConfig);
+    snmpConfig.communityMaterial = mergedCred.communityMaterial;
+    snmpConfig.communitiesMaterials = mergedCred.communitiesMaterials;
     if (typeof version === "string" && version.trim()) snmpConfig.version = version.trim();
     if (Number.isFinite(Number(timeoutMs))) snmpConfig.timeoutMs = Math.max(300, Math.min(5000, Number(timeoutMs)));
     if (Number.isFinite(Number(retries))) snmpConfig.retries = Math.max(0, Math.min(3, Number(retries)));
     if (Number.isFinite(Number(port))) snmpConfig.port = Math.max(1, Math.min(65535, Number(port)));
     if (macSearch && typeof macSearch === "object") {
-      const normalizedPrefixes = normalizeOuiPrefixList(macSearch.voiceOuiPrefixes ?? snmpConfig.macSearch.voiceOuiPrefixes);
-      const explicitEntries = normalizeVoiceOuiEntries(macSearch.voiceOuiEntries ?? snmpConfig.macSearch.voiceOuiEntries);
+      const normalizedPrefixes = normalizeOuiPrefixList(
+        (macSearch as { voiceOuiPrefixes?: unknown }).voiceOuiPrefixes ?? snmpConfig.macSearch.voiceOuiPrefixes
+      );
+      const explicitEntries = normalizeVoiceOuiEntries(
+        (macSearch as { voiceOuiEntries?: unknown }).voiceOuiEntries ?? snmpConfig.macSearch.voiceOuiEntries
+      );
       const compatEntries = buildVoiceOuiEntriesFromPrefixes(normalizedPrefixes);
       const mergedVoiceOuiEntries = normalizeVoiceOuiEntries([...explicitEntries, ...compatEntries]);
+      const ms = macSearch as Record<string, unknown>;
       snmpConfig.macSearch = {
         ...snmpConfig.macSearch,
-        dot1dTpFdbPortOid: String(macSearch.dot1dTpFdbPortOid || snmpConfig.macSearch.dot1dTpFdbPortOid).trim(),
-        dot1dBasePortIfIndexOid: String(macSearch.dot1dBasePortIfIndexOid || snmpConfig.macSearch.dot1dBasePortIfIndexOid).trim(),
-        dot1qTpFdbPortOid: String(macSearch.dot1qTpFdbPortOid || snmpConfig.macSearch.dot1qTpFdbPortOid).trim(),
-        voiceVlanMacOid: String(macSearch.voiceVlanMacOid || snmpConfig.macSearch.voiceVlanMacOid).trim(),
+        dot1dTpFdbPortOid: String(ms.dot1dTpFdbPortOid || snmpConfig.macSearch.dot1dTpFdbPortOid).trim(),
+        dot1dBasePortIfIndexOid: String(ms.dot1dBasePortIfIndexOid || snmpConfig.macSearch.dot1dBasePortIfIndexOid).trim(),
+        dot1qTpFdbPortOid: String(ms.dot1qTpFdbPortOid || snmpConfig.macSearch.dot1qTpFdbPortOid).trim(),
+        voiceVlanMacOid: String(ms.voiceVlanMacOid || snmpConfig.macSearch.voiceVlanMacOid).trim(),
         voiceOuiPrefixes: normalizedPrefixes,
         voiceOuiEntries: mergedVoiceOuiEntries,
       };
     }
     logAction(actor, 'SNMP Config Update', `Changed SNMP settings (Version: ${version})`, 'config');
     await persistPgConfigs("snmp");
-    res.json({ success: true, message: "SNMP configuration saved.", snmp: snmpConfig });
+    res.json({ success: true, message: "SNMP configuration saved.", snmp: snmpConfigForClient() });
   });
 
   app.get("/api/config/ssh-readonly", checkRole(["admin", "operator"]), (_req, res) => {
@@ -6014,7 +6230,7 @@ type MacSearchEvent = {
     });
   });
 
-  app.post("/api/config/ssh-readonly", checkRole(["admin", "operator"]), (req, res) => {
+  app.post("/api/config/ssh-readonly", checkRole(["admin", "operator"]), async (req, res) => {
     const body = req.body as {
       username?: string;
       password?: string;
@@ -6029,7 +6245,7 @@ type MacSearchEvent = {
     if (!username || !password) return res.status(400).json({ error: "username/password required" });
     sshReadonlyProfile = {
       username,
-      passwordMaterial: materialFromUserPassword(password),
+      passwordMaterial: await materialFromUserPassword(password),
       port: Number.isFinite(port) && port > 0 && port <= 65535 ? port : 22,
       allowMetricsFallback: body.allowMetricsFallback !== false,
       expiresAt: Date.now() + ttlHours * 60 * 60 * 1000,
