@@ -270,10 +270,8 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
   const headers = React.useMemo(
     () => ({
       'Content-Type': 'application/json',
-      'x-user-role': role || 'viewer',
-      'x-user-name': username || 'unknown',
     }),
-    [role, username]
+    []
   );
 
   const parseCsv = (value: string) =>

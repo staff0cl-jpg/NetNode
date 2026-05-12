@@ -34,8 +34,6 @@ const UserManagement: React.FC<UserManagementProps> = ({ role, username }) => {
     try {
       const response = await fetch('/api/users', {
         headers: { 
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
         }
       });
       const data = await response.json();
@@ -58,8 +56,6 @@ const UserManagement: React.FC<UserManagementProps> = ({ role, username }) => {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
         },
         body: JSON.stringify(newUser),
       });
@@ -79,8 +75,6 @@ const UserManagement: React.FC<UserManagementProps> = ({ role, username }) => {
       await fetch('/api/users/' + id, { 
         method: 'DELETE',
         headers: { 
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
         }
       });
       await fetchUsers();
@@ -95,8 +89,6 @@ const UserManagement: React.FC<UserManagementProps> = ({ role, username }) => {
         method: 'PATCH',
         headers: { 
           'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
         },
         body: JSON.stringify({ role: newRole }),
       });
@@ -115,8 +107,6 @@ const UserManagement: React.FC<UserManagementProps> = ({ role, username }) => {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
         },
         body: JSON.stringify({ password: newPassword }),
       });

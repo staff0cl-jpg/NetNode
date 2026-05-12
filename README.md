@@ -374,8 +374,17 @@ pm2 logs netnode
 - **`AMQP_URL` or `RABBITMQ_URL`**: optional; enables publishing to the broker.
 - **`NETNODE_SKIP_SETUP=1`**: skip the setup wizard even without `DATABASE_URL` (in-memory mode).
 - **`NETNODE_INITIAL_ADMIN_PASSWORD` / `NETNODE_INITIAL_ADMIN_USERNAME`**: optional alternative to the wizard for injecting a first admin when you already provide `DATABASE_URL` via env (see server startup logs).
+- **`NETNODE_ALLOW_INSECURE_DEV_USERS=1`**: **development only** (requires `DATABASE_URL`, `NODE_ENV` ≠ `production`). Recreates well-known accounts `admin` / `admin` and `operator_01` / `password`. Remove for any shared, staging, or production host.
+- **`NETNODE_LOGIN_RATE_LIMIT_MAX`**: maximum **failed** login responses (HTTP 401) accepted per client IP per 15-minute window for `/api/auth/login` (default **40**).
 - The app is designed to run fully on-premise without cloud dependency.
 - **`data/netnode-instance.json`** is created by the wizard and contains database (and optional AMQP) credentials. Restrict filesystem permissions on `data/` to the service account (e.g. `chmod 700 data` on Linux). The directory is listed in `.gitignore`; do not commit secrets.
+
+## Backend layout and scaling
+
+- **Entrypoint** `server.ts` loads `.env`, applies `data/netnode-instance.json` into `process.env`, then starts the HTTP stack exported from `server/netnodeServer.ts`.
+- **Application core** `server/netnodeServer.ts` holds Express routes, schedulers, SNMP/discovery helpers, and Socket.IO. Shared logic is split into focused modules under `server/` (`auth/`, `inventory/warnings.ts`, `middleware/security.ts`, `messaging/broker.ts`, `persistence/postgres.ts`, `setup/`, …) so new features extend modules instead of growing unrelated entry files.
+- **Single process**: session cookies, in-memory inventory cache, topology editor state, and scheduler locks live in one Node process. **Do not** run multiple unsynchronized instances (for example `pm2` in cluster mode or several replicas behind a load balancer) without redesign—use one active worker or externalize sessions/state (e.g. Redis) first.
+- **Automated checks**: `npm test` runs lightweight unit tests (`server/**/*.test.ts`).
 
 ## Nginx Reverse Proxy Example
 
@@ -407,7 +416,7 @@ server {
 
 ## Security notes
 
-- After the **first-run wizard**, only the administrator you defined exists—store that password safely. If you used legacy dev defaults (`DATABASE_URL` + non-production Node env), change bundled passwords immediately.
+- After the **first-run wizard**, only the administrator you defined exists—store that password safely. Do **not** set `NETNODE_ALLOW_INSECURE_DEV_USERS` outside a disposable local machine.
 - **`data/netnode-instance.json`** holds PostgreSQL (and optional AMQP) credentials created by the wizard. Restrict directory permissions (`chmod 700 data`), run the service under a dedicated account, and back up this file only to encrypted storage.
 - Keep SNMP communities and SSH credentials restricted and rotated.
 - Use role-based access and audit logs for operational accountability.

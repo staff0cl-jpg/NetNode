@@ -67,10 +67,6 @@ function AppContent() {
     try {
       const response = await fetch('/api/inventory', {
         credentials: 'include',
-        headers: { 
-          'x-user-role': user?.role || 'viewer',
-          'x-user-name': user?.username || 'unknown'
-        }
       });
       if (response.status === 401 || response.status === 403) {
         setUser(null);
@@ -152,10 +148,6 @@ function AppContent() {
       try {
         const response = await fetch('/api/system/banner', {
           credentials: 'include',
-          headers: {
-            'x-user-role': user?.role || 'viewer',
-            'x-user-name': user?.username || 'unknown'
-          }
         });
         if (response.status === 401 || response.status === 403) {
           setUser(null);

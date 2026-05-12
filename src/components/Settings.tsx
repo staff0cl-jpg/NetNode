@@ -153,10 +153,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
     const fetchConfig = async () => {
       try {
         const response = await fetch('/api/config/system', {
-          headers: { 
-            'x-user-role': role || 'viewer',
-            'x-user-name': username || 'unknown'
-          }
+          credentials: 'include',
         });
         const data = await response.json();
         if (data.config && data.config.defaultLanguage) {
@@ -183,10 +180,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
           });
         }
         const snmpResp = await fetch('/api/config/snmp', {
-          headers: {
-            'x-user-role': role || 'viewer',
-            'x-user-name': username || 'unknown'
-          }
+          credentials: 'include',
         });
         if (snmpResp.ok) {
           const snmpData = await snmpResp.json();
@@ -202,10 +196,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
           }
         }
         const sshReadonlyResp = await fetch('/api/config/ssh-readonly', {
-          headers: {
-            'x-user-role': role || 'viewer',
-            'x-user-name': username || 'unknown'
-          }
+          credentials: 'include',
         });
         if (sshReadonlyResp.ok) {
           const sshData = await sshReadonlyResp.json();
@@ -222,10 +213,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         }
         const templateResp = await fetch('/api/snmp/templates', {
           credentials: 'include',
-          headers: {
-            'x-user-role': role || 'viewer',
-            'x-user-name': username || 'unknown'
-          }
         });
         if (templateResp.ok) {
           const templateData = await templateResp.json();
@@ -235,10 +222,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         }
         const invMetaResp = await fetch('/api/inventory/meta', {
           credentials: 'include',
-          headers: {
-            'x-user-role': role || 'viewer',
-            'x-user-name': username || 'unknown'
-          }
         });
         if (invMetaResp.ok) {
           const inv = await invMetaResp.json();
@@ -252,10 +235,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
           });
         }
         const watchResp = await fetch('/api/discovery/watch', {
-          headers: {
-            'x-user-role': role || 'viewer',
-            'x-user-name': username || 'unknown'
-          }
+          credentials: 'include',
         });
         if (watchResp.ok) {
           const watchData = await watchResp.json();
@@ -264,10 +244,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
           }
         }
         const watchStatusResp = await fetch('/api/discovery/watch/status', {
-          headers: {
-            'x-user-role': role || 'viewer',
-            'x-user-name': username || 'unknown'
-          }
+          credentials: 'include',
         });
         if (watchStatusResp.ok) {
           const status = await watchStatusResp.json();
@@ -278,7 +255,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       }
     };
     fetchConfig();
-  }, [role, username]);
+  }, []);
 
   React.useEffect(() => {
     if (!isOperator) return;
@@ -286,16 +263,10 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       try {
         const [watchResp, statusResp] = await Promise.all([
           fetch('/api/discovery/watch', {
-            headers: {
-              'x-user-role': role || 'viewer',
-              'x-user-name': username || 'unknown'
-            }
+            credentials: 'include',
           }),
           fetch('/api/discovery/watch/status', {
-            headers: {
-              'x-user-role': role || 'viewer',
-              'x-user-name': username || 'unknown'
-            }
+            credentials: 'include',
           })
         ]);
         if (watchResp.ok) {
@@ -311,17 +282,14 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       }
     }, 20000);
     return () => window.clearInterval(timer);
-  }, [isOperator, role, username]);
+  }, [isOperator]);
 
   React.useEffect(() => {
     if (!isAdmin) return;
     const loadLdap = async () => {
       try {
         const response = await fetch('/api/config/ldap', {
-          headers: {
-            'x-user-role': role || 'viewer',
-            'x-user-name': username || 'unknown',
-          },
+          credentials: 'include',
         });
         const data = await response.json();
         if (data.ldap) {
@@ -335,7 +303,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       }
     };
     loadLdap();
-  }, [isAdmin, role, username]);
+  }, [isAdmin]);
 
   const saveLdapProfiles = async () => {
     try {
@@ -343,8 +311,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown',
         },
         body: JSON.stringify(ldapForm),
       });
@@ -373,8 +339,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
         },
         body: JSON.stringify(payload),
       });
@@ -460,8 +424,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown',
         },
         body: JSON.stringify(body),
       });
@@ -488,8 +450,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
         },
         body: JSON.stringify(payload),
       });
@@ -511,10 +471,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       const poll = async () => {
         attempts += 1;
         const statusResp = await fetch(`/api/discovery/start/status/${encodeURIComponent(jobId)}`, {
-          headers: {
-            'x-user-role': role || 'viewer',
-            'x-user-name': username || 'unknown'
-          }
+          credentials: 'include',
         });
         const statusData = await readApiPayload(statusResp, 'Discovery status check failed');
         if (!statusResp.ok) {
@@ -563,8 +520,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
         },
         body: JSON.stringify({ profiles: watchProfiles }),
       });
@@ -586,8 +541,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
         },
         body: JSON.stringify(profileId ? { profileIds: [profileId] } : {}),
       });
@@ -610,10 +563,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       const poll = async () => {
         attempts += 1;
         const statusResp = await fetch(`/api/discovery/watch/run/status/${encodeURIComponent(jobId)}`, {
-          headers: {
-            'x-user-role': role || 'viewer',
-            'x-user-name': username || 'unknown'
-          }
+          credentials: 'include',
         });
         const statusData = await readApiPayload(statusResp, 'Discovery watch status check failed');
         if (!statusResp.ok) {
@@ -623,10 +573,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         if (Array.isArray(statusData.profiles)) setWatchProfiles(statusData.profiles);
         try {
           const watchResp = await fetch('/api/discovery/watch/status', {
-            headers: {
-              'x-user-role': role || 'viewer',
-              'x-user-name': username || 'unknown'
-            }
+            credentials: 'include',
           });
           if (watchResp.ok) setWatchStatus(await watchResp.json());
         } catch {
@@ -682,8 +629,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
         },
         body: JSON.stringify({
           community: snmpConfig.community,
@@ -711,8 +656,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
         },
         body: JSON.stringify({
           username: sshReadonlyConfig.username,
@@ -745,10 +688,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
     try {
       const response = await fetch(`/api/snmp/templates/${id}`, {
         method: 'DELETE',
-        headers: {
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
-        }
       });
       const data = await response.json();
       if (!response.ok) {
@@ -775,8 +714,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
         },
         body: JSON.stringify({
           categories: parseList(inventoryMetaEditor.categories),
@@ -834,8 +771,6 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
         },
         body: JSON.stringify({
           id: templateEditor.id.trim(),

@@ -582,10 +582,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     (async () => {
       try {
         const response = await fetch(`/api/topology/links${topologyScopeQuery(topologyMode, selectedRegion || undefined)}`, {
-          headers: {
-            'x-user-role': role || 'viewer',
-            'x-user-name': username || 'unknown'
-          }
+          credentials: 'include',
         });
         const data: {
           links: TopoLink[];
@@ -604,15 +601,12 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     return () => {
       cancelled = true;
     };
-  }, [topologyMode, selectedRegion, role, username]);
+  }, [topologyMode, selectedRegion]);
 
   const refreshTopologyVersions = React.useCallback(async () => {
     try {
       const response = await fetch('/api/topology/versions', {
-        headers: {
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
-        }
+        credentials: 'include',
       });
       if (!response.ok) return;
       const data = await response.json();
@@ -622,7 +616,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     } catch {
       // ignore
     }
-  }, [role, username]);
+  }, []);
 
   useEffect(() => {
     refreshTopologyVersions();
@@ -635,10 +629,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       setPreviewLoading(true);
       const query = topologyScopeQuery(topologyMode, selectedRegion || undefined);
       const response = await fetch(`/api/topology/versions/${encodeURIComponent(versionId)}/preview${query}`, {
-        headers: {
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
-        }
+        credentials: 'include',
       });
       const data = await response.json().catch(() => null);
       if (!response.ok) throw new Error(data?.error || t('topologyPreviewFailed'));
@@ -648,7 +639,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     } finally {
       setPreviewLoading(false);
     }
-  }, [role, username, selectedRegion, topologyMode, t]);
+  }, [selectedRegion, topologyMode, t]);
 
   const handleRestoreSelectedVersion = React.useCallback(async () => {
     if (!canEditTopology) return;
@@ -662,8 +653,6 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
         },
         body: JSON.stringify({ versionId: selectedVersionId, branch: selectedRegion || undefined, topologyMode }),
       });
@@ -701,7 +690,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       const controller = new AbortController();
       const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
       try {
-        return await fetch(input, { ...init, signal: controller.signal });
+        return await fetch(input, { credentials: "include", ...init, signal: controller.signal });
       } finally {
         window.clearTimeout(timeoutId);
       }
@@ -740,12 +729,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   );
 
   const refreshLinksScoped = React.useCallback(async () => {
-    const response = await fetchWithTimeout(`/api/topology/links${topologyScopeQuery(topologyMode, selectedRegion || undefined)}`, {
-      headers: {
-        'x-user-role': role || 'viewer',
-        'x-user-name': username || 'unknown'
-      }
-    });
+    const response = await fetchWithTimeout(`/api/topology/links${topologyScopeQuery(topologyMode, selectedRegion || undefined)}`, {});
     const data: {
       links?: TopoLink[];
       layout?: Record<string, { x: number; y: number }>;
@@ -754,7 +738,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     } = await readApiPayload(response, 'Topology load failed');
     if (!response.ok) throw new Error(operationFailedMessage('Topology load', data, response.status));
     return data;
-  }, [fetchWithTimeout, role, selectedRegion, topologyMode, username]);
+  }, [fetchWithTimeout, selectedRegion, topologyMode]);
 
   const refreshLinksScopedWithFallback = React.useCallback(async () => {
     try {
@@ -763,10 +747,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       const isTimeout = error instanceof DOMException && error.name === 'AbortError';
       if (!isTimeout) throw error;
       const response = await fetch(`/api/topology/links${topologyScopeQuery(topologyMode, selectedRegion || undefined)}`, {
-        headers: {
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
-        }
+        credentials: 'include',
       });
       const data: {
         links?: TopoLink[];
@@ -777,7 +758,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       if (!response.ok) throw new Error(operationFailedMessage('Topology load', data, response.status));
       return data;
     }
-  }, [refreshLinksScoped, role, selectedRegion, topologyMode, username]);
+  }, [refreshLinksScoped, selectedRegion, topologyMode]);
 
   const handleAutoLayout = async () => {
     if (!canEditTopology) return;
@@ -794,8 +775,6 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'x-user-role': role || 'viewer',
-            'x-user-name': username || 'unknown'
           },
           body: JSON.stringify({ branch: selectedRegion, topologyMode }),
         });
@@ -819,8 +798,6 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'x-user-role': role || 'viewer',
-              'x-user-name': username || 'unknown'
             },
             body: JSON.stringify({ branch: selectedRegion })
           }, TOPO_AUTO_LAYOUT_FOLLOWUP_TIMEOUT_MS);
@@ -881,8 +858,6 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
         },
         body: JSON.stringify({
           zoneKey,
@@ -912,8 +887,6 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
         },
         body: JSON.stringify({ branch: selectedRegion, topologyMode }),
       });
@@ -973,8 +946,6 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
         },
         body: JSON.stringify({ positions: { [id]: { x, y } }, branch: selectedRegion || undefined, topologyMode }),
       });
@@ -991,8 +962,6 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'x-user-role': role || 'viewer',
-            'x-user-name': username || 'unknown'
           },
           body: JSON.stringify({ positions, branch: selectedRegion || undefined, topologyMode }),
         });
@@ -1382,8 +1351,6 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
         },
         body: JSON.stringify({ from, to })
       });

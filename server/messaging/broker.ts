@@ -8,8 +8,27 @@ let ch: AmqpChannel | null = null;
 let exchangeReady = false;
 const EXCHANGE = "netnode.events";
 
+let reconnectTimer: NodeJS.Timeout | null = null;
+let reconnectAttempt = 0;
+let amqpShuttingDown = false;
+
 function amqpUrl(): string | undefined {
   return process.env.AMQP_URL?.trim() || process.env.RABBITMQ_URL?.trim() || undefined;
+}
+
+function scheduleReconnect(): void {
+  if (amqpShuttingDown) return;
+  const url = amqpUrl();
+  if (!url) return;
+  if (reconnectTimer) return;
+  const base = 800;
+  const cap = 30_000;
+  const delay = Math.min(cap, base * 2 ** Math.min(reconnectAttempt, 6));
+  reconnectAttempt += 1;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    void ensureChannel();
+  }, delay);
 }
 
 async function ensureChannel(): Promise<AmqpChannel | null> {
@@ -18,6 +37,7 @@ async function ensureChannel(): Promise<AmqpChannel | null> {
   try {
     if (!channelModel) {
       channelModel = await amqpConnect(url);
+      reconnectAttempt = 0;
       channelModel.on("error", (err: Error) => {
         console.error("[amqp] connection error:", err?.message || err);
         ch = null;
@@ -27,6 +47,7 @@ async function ensureChannel(): Promise<AmqpChannel | null> {
         ch = null;
         channelModel = null;
         exchangeReady = false;
+        scheduleReconnect();
       });
     }
     if (!ch) {
@@ -40,6 +61,7 @@ async function ensureChannel(): Promise<AmqpChannel | null> {
     ch = null;
     channelModel = null;
     exchangeReady = false;
+    scheduleReconnect();
     return null;
   }
 }
@@ -52,11 +74,34 @@ async function ensureChannel(): Promise<AmqpChannel | null> {
 export async function publishAmqpJson(routingKey: string, payload: unknown): Promise<void> {
   const channel = await ensureChannel();
   if (!channel || !exchangeReady) return;
-  const body = Buffer.from(JSON.stringify({ v: 1, ts: new Date().toISOString(), routingKey, payload }), "utf8");
-  channel.publish(EXCHANGE, routingKey, body, { contentType: "application/json", persistent: true });
+  try {
+    const body = Buffer.from(JSON.stringify({ v: 1, ts: new Date().toISOString(), routingKey, payload }), "utf8");
+    channel.publish(EXCHANGE, routingKey, body, { contentType: "application/json", persistent: true });
+  } catch (e) {
+    console.error("[amqp] publish failed:", e instanceof Error ? e.message : e);
+    try {
+      await ch?.close();
+    } catch {
+      /* ignore */
+    }
+    ch = null;
+    exchangeReady = false;
+    try {
+      await channelModel?.close();
+    } catch {
+      /* ignore */
+    }
+    channelModel = null;
+    scheduleReconnect();
+  }
 }
 
 export async function closeAmqp(): Promise<void> {
+  amqpShuttingDown = true;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
   try {
     await ch?.close();
   } catch {
@@ -70,4 +115,5 @@ export async function closeAmqp(): Promise<void> {
   ch = null;
   channelModel = null;
   exchangeReady = false;
+  amqpShuttingDown = false;
 }

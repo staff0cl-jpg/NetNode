@@ -81,14 +81,21 @@ export async function persistInventoryDevices(pool: Pool, items: InventoryRowPay
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query("DELETE FROM inventory_device");
+    const ids: string[] = [];
     for (const row of items) {
       const id = String(row.id || "").trim();
       if (!id) continue;
-      await client.query(`INSERT INTO inventory_device (id, payload, updated_at) VALUES ($1, $2::jsonb, now())`, [
-        id,
-        JSON.stringify(row),
-      ]);
+      ids.push(id);
+      await client.query(
+        `INSERT INTO inventory_device (id, payload, updated_at) VALUES ($1, $2::jsonb, now())
+         ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()`,
+        [id, JSON.stringify(row)]
+      );
+    }
+    if (ids.length === 0) {
+      await client.query("DELETE FROM inventory_device");
+    } else {
+      await client.query(`DELETE FROM inventory_device WHERE NOT (id = ANY($1::text[]))`, [ids]);
     }
     await client.query("COMMIT");
   } catch (e) {

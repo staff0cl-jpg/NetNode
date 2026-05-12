@@ -194,10 +194,6 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
   React.useEffect(() => {
     fetch('/api/inventory/meta', {
       credentials: 'include',
-      headers: {
-        'x-user-role': role || 'viewer',
-        'x-user-name': username || 'unknown'
-      }
     })
       .then((r) => r.json())
       .then((data) => {
@@ -208,10 +204,6 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
       .catch(() => {});
     fetch('/api/snmp/templates', {
       credentials: 'include',
-      headers: {
-        'x-user-role': role || 'viewer',
-        'x-user-name': username || 'unknown'
-      }
     })
       .then((r) => r.json())
       .then((data) => {
@@ -220,7 +212,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
         }
       })
       .catch(() => {});
-  }, [role, username]);
+  }, []);
 
   React.useEffect(() => {
     const onDocClick = (event: MouseEvent) => {
@@ -258,8 +250,6 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
           credentials: 'include',
           headers: { 
             'Content-Type': 'application/json',
-            'x-user-role': role || 'viewer',
-            'x-user-name': username || 'unknown'
           },
           body: JSON.stringify(payload),
         });
@@ -273,8 +263,6 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
           credentials: 'include',
           headers: { 
             'Content-Type': 'application/json',
-            'x-user-role': role || 'viewer',
-            'x-user-name': username || 'unknown'
           },
           body: JSON.stringify(payload),
         });
@@ -303,10 +291,6 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
         await fetch(`/api/inventory/${id}`, {
           method: 'DELETE',
           credentials: 'include',
-          headers: { 
-            'x-user-role': role || 'viewer',
-            'x-user-name': username || 'unknown'
-          }
         });
         notifyInfo(t('inventoryDeviceRemoved'));
       } catch (error) {
@@ -351,8 +335,6 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
         credentials: 'include',
         headers: { 
           'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
         },
         body: JSON.stringify({ ids: selectedIds, action, value }),
       });

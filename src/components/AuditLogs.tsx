@@ -36,8 +36,6 @@ const AuditLogs: React.FC<{ role?: string, username?: string }> = ({ role, usern
     try {
       const response = await fetch('/api/audit-logs', {
         headers: { 
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
         }
       });
       const data = await response.json();

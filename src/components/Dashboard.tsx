@@ -69,10 +69,7 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
     const loadUi = async () => {
       try {
         const r = await fetch('/api/config/system', {
-          headers: {
-            'x-user-role': role || 'viewer',
-            'x-user-name': username || 'unknown'
-          }
+          credentials: 'include',
         });
         if (!r.ok) return;
         const data = await r.json();
@@ -85,7 +82,7 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
       }
     };
     loadUi();
-  }, [role, username]);
+  }, []);
 
   React.useEffect(() => {
     const load = async () => {
@@ -208,8 +205,6 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-user-role': role || 'viewer',
-          'x-user-name': username || 'unknown'
         },
         body: JSON.stringify({ dashboardPanels: nextPanels }),
       });
