@@ -13,7 +13,11 @@ const scryptAsync = promisify(crypto.scrypt) as (
   options: crypto.ScryptOptions
 ) => Promise<Buffer>;
 
-const KDF_SALT_LEGACY = Buffer.from("netnode-cred-v1", "utf8");
+/**
+ * Fixed scrypt salt for **legacy g1** blobs only (decrypt + optional re-seal to g2).
+ * All **new** seals use g2 with a random 16-byte salt per credential (see `sealG2`).
+ */
+export const LEGACY_G1_KDF_SALT = Buffer.from("netnode-cred-v1", "utf8");
 
 const SCRYPT_PARAMS = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 } as const;
 
@@ -46,7 +50,7 @@ function keyMeetsLegacy(): boolean {
 function deriveKeyG1Sync(): Buffer | null {
   const key = envCredentialsKey();
   if (!keyMeetsLegacy()) return null;
-  return crypto.scryptSync(key, KDF_SALT_LEGACY, 32, SCRYPT_PARAMS);
+  return crypto.scryptSync(key, LEGACY_G1_KDF_SALT, 32, SCRYPT_PARAMS);
 }
 
 async function deriveKeyG2(secret: string, salt: Buffer): Promise<Buffer> {
@@ -73,6 +77,40 @@ async function sealG2(plain: string): Promise<PasswordMaterial> {
 export async function materialFromUserPassword(plain: string): Promise<PasswordMaterial> {
   if (keyMeetsStrong()) return sealG2(plain);
   return { kind: "plain", value: plain };
+}
+
+/** True if sealed material uses the legacy g1 format (shared KDF salt), not g2. */
+export function isLegacyG1SealedMaterial(m: PasswordMaterial): boolean {
+  if (m.kind !== "sealed") return false;
+  return !m.payload.startsWith("g2:");
+}
+
+/**
+ * When `NETNODE_CREDENTIALS_KEY` is strong (≥32 UTF-8 bytes), re-wrap legacy g1 sealed values as g2
+ * (per-secret random scrypt salt). Plaintext and g2 payloads are unchanged.
+ */
+export async function reSealCredentialMaterialIfLegacyG1(m: PasswordMaterial): Promise<PasswordMaterial> {
+  if (m.kind === "plain" || m.payload.startsWith("g2:")) return m;
+  if (!keyMeetsStrong()) return m;
+  try {
+    const plain = await readPasswordMaterial(m);
+    return await materialFromUserPassword(plain);
+  } catch {
+    return m;
+  }
+}
+
+/** Log once if the key is long enough for legacy g1 decrypt but not for g2 sealing. */
+export function warnIfSubProductionCredentialsKey(): void {
+  const key = envCredentialsKey();
+  if (!key) return;
+  const bytes = Buffer.byteLength(key, "utf8");
+  if (bytes >= CREDENTIALS_KEY_MIN_STRONG_BYTES) return;
+  if (bytes >= CREDENTIALS_KEY_MIN_LEGACY_BYTES) {
+    console.warn(
+      `[credentials] NETNODE_CREDENTIALS_KEY is ${bytes} UTF-8 bytes; use at least ${CREDENTIALS_KEY_MIN_STRONG_BYTES} for AES-g2 sealing. Legacy g1 decrypt may still work.`
+    );
+  }
 }
 
 /** Sync seal for startup paths that cannot await (g2 only when key is strong). */

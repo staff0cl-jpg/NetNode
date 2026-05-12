@@ -10,7 +10,9 @@ export async function initSessionRuntime(): Promise<void> {
   const url = process.env.REDIS_URL?.trim() || process.env.NETNODE_REDIS_URL?.trim();
   if (!url) {
     backend = new MemorySessionBackend();
-    console.log("[session] backend=memory (set REDIS_URL or NETNODE_REDIS_URL for Redis)");
+    console.log(
+      "[session] backend=memory (set REDIS_URL or NETNODE_REDIS_URL for Redis; cap via NETNODE_SESSION_STORE_MAX)"
+    );
     return;
   }
   const client = createClient({ url }) as unknown as SessionRedisClient;

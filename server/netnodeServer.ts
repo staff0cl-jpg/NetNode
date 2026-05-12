@@ -38,8 +38,10 @@ import { hashPassword, verifyLocalPassword } from "./auth/password.js";
 import type { AuthUser, LocalUser } from "./auth/types.js";
 import {
   materialFromUserPassword,
-  readPasswordMaterial,
   materialHasValue,
+  readPasswordMaterial,
+  reSealCredentialMaterialIfLegacyG1,
+  warnIfSubProductionCredentialsKey,
   type PasswordMaterial,
 } from "./crypto/credentialMaterial.js";
 import type { InventoryItem } from "./inventory/inventoryTypes.js";
@@ -47,6 +49,14 @@ import { evaluateInventoryWarnings } from "./inventory/warnings.js";
 import { applySecurityMiddleware, createLoginRateLimiter, createMutatingApiRateLimiter } from "./middleware/security.js";
 import { csrfProtectionMiddleware } from "./middleware/csrf.js";
 import { registerInventoryHttpRoutes } from "./routes/inventoryHttp.js";
+import { serverMemory } from "./runtime/serverMemory.js";
+import type {
+  TopologyLayout,
+  TopologyLink,
+  TopologyMode,
+  TopologySnapshot,
+  TopologyZoneLabelOverrides,
+} from "./topology/topologyTypes.js";
 import { discoveryStartBodySchema, discoveryWatchSaveBodySchema } from "./validation/discovery.js";
 import { createUserBodySchema, loginBodySchema, patchUserBodySchema, resetPasswordBodySchema } from "./validation/auth.js";
 import {
@@ -62,9 +72,7 @@ import {
 import { attachNetnodeSession } from "./session/sessionMiddleware.js";
 import { initSessionRuntime, shutdownSessionRuntime } from "./session/sessionRuntime.js";
 
-// In-memory state (empty by default; devices come from discovery or manual registration)
-let inventory: InventoryItem[] = [];
-
+// Inventory + topology live in `./runtime/serverMemory.ts` (hydrated from PostgreSQL).
 type DiscoveryProtocol = "snmp";
 type DiscoveryScanInput = {
   subnets: string;
@@ -280,35 +288,6 @@ function normalizeSshErrorForClient(err: unknown): string {
   return message;
 }
 
-type TopologyLink = {
-  id?: string;
-  source: string;
-  target: string;
-  portA: string;
-  portB: string;
-  manual?: boolean; // created by user
-  renamed?: boolean; // ports were edited by user
-};
-type TopologyMode = "ip" | "fc";
-type TopologyLayout = Record<string, { x: number; y: number }>;
-type TopologyZoneLabelOverrides = Record<string, string>;
-let topologyLinks: TopologyLink[] = [];
-let topologyLayout: TopologyLayout = {};
-let topologyLayoutScopes: Record<TopologyMode, Record<string, TopologyLayout>> = { ip: {}, fc: {} };
-let topologyZoneLabelOverridesScopes: Record<TopologyMode, Record<string, TopologyZoneLabelOverrides>> = { ip: {}, fc: {} };
-type TopologySnapshot = {
-  id: string;
-  createdAt: string;
-  actor: string;
-  reason: string;
-  branch?: string;
-  links: TopologyLink[];
-  layout: TopologyLayout;
-  layoutScopes?: Record<TopologyMode, Record<string, TopologyLayout>>;
-  zoneLabelOverridesScopes?: Record<TopologyMode, Record<string, TopologyZoneLabelOverrides>>;
-};
-let topologySnapshots: TopologySnapshot[] = [];
-
 function cloneTopologyLinks(links: TopologyLink[]): TopologyLink[] {
   return links.map((l) => ({ ...l }));
 }
@@ -367,14 +346,14 @@ function scopedTopologyLayout(
 
 function getTopologyLayoutForScope(mode: TopologyMode, branch?: string): TopologyLayout {
   const key = topologyLayoutBranchKey(branch);
-  const scoped = topologyLayoutScopes[mode]?.[key];
+  const scoped = serverMemory.topologyLayoutScopes[mode]?.[key];
   if (scoped) return cloneTopologyLayout(scoped);
-  return scopedTopologyLayout(topologyLayout, branch);
+  return scopedTopologyLayout(serverMemory.topologyLayout, branch);
 }
 
 function getTopologyZoneLabelOverridesForScope(mode: TopologyMode, branch?: string): TopologyZoneLabelOverrides {
   const key = topologyLayoutBranchKey(branch);
-  return cloneTopologyZoneLabelOverrides(topologyZoneLabelOverridesScopes[mode]?.[key] || {});
+  return cloneTopologyZoneLabelOverrides(serverMemory.topologyZoneLabelOverridesScopes[mode]?.[key] || {});
 }
 
 function getSnapshotLayoutForScope(snapshot: TopologySnapshot, mode: TopologyMode, branch?: string): TopologyLayout {
@@ -386,7 +365,7 @@ function getSnapshotLayoutForScope(snapshot: TopologySnapshot, mode: TopologyMod
 
 function setTopologyLayoutForScope(mode: TopologyMode, branch: string | undefined, layout: TopologyLayout) {
   const key = topologyLayoutBranchKey(branch);
-  topologyLayoutScopes[mode][key] = cloneTopologyLayout(layout);
+  serverMemory.topologyLayoutScopes[mode][key] = cloneTopologyLayout(layout);
 }
 
 function mergeTopologyLayoutForScope(mode: TopologyMode, branch: string | undefined, positions: TopologyLayout, replace = false) {
@@ -397,16 +376,16 @@ function mergeTopologyLayoutForScope(mode: TopologyMode, branch: string | undefi
       next[id] = { x: Number(pos.x), y: Number(pos.y) };
     }
   });
-  topologyLayoutScopes[mode][key] = next;
+  serverMemory.topologyLayoutScopes[mode][key] = next;
   return cloneTopologyLayout(next);
 }
 
 function deleteTopologyLayoutIds(ids: string[]) {
-  Object.keys(topologyLayout).forEach((id) => {
-    if (ids.includes(id)) delete topologyLayout[id];
+  Object.keys(serverMemory.topologyLayout).forEach((id) => {
+    if (ids.includes(id)) delete serverMemory.topologyLayout[id];
   });
-  (Object.keys(topologyLayoutScopes) as TopologyMode[]).forEach((mode) => {
-    Object.values(topologyLayoutScopes[mode]).forEach((layout) => {
+  (Object.keys(serverMemory.topologyLayoutScopes) as TopologyMode[]).forEach((mode) => {
+    Object.values(serverMemory.topologyLayoutScopes[mode]).forEach((layout) => {
       Object.keys(layout).forEach((id) => {
         if (ids.includes(id)) delete layout[id];
       });
@@ -415,8 +394,8 @@ function deleteTopologyLayoutIds(ids: string[]) {
 }
 
 function renameTopologyLayoutBranchScopes(from: string, to: string) {
-  (Object.keys(topologyLayoutScopes) as TopologyMode[]).forEach((mode) => {
-    const scoped = topologyLayoutScopes[mode];
+  (Object.keys(serverMemory.topologyLayoutScopes) as TopologyMode[]).forEach((mode) => {
+    const scoped = serverMemory.topologyLayoutScopes[mode];
     if (!scoped[from]) return;
     scoped[to] = { ...cloneTopologyLayout(scoped[to] || {}), ...cloneTopologyLayout(scoped[from]) };
     delete scoped[from];
@@ -424,8 +403,8 @@ function renameTopologyLayoutBranchScopes(from: string, to: string) {
 }
 
 function renameTopologyZoneLabelBranchScopes(from: string, to: string) {
-  (Object.keys(topologyZoneLabelOverridesScopes) as TopologyMode[]).forEach((mode) => {
-    const scoped = topologyZoneLabelOverridesScopes[mode];
+  (Object.keys(serverMemory.topologyZoneLabelOverridesScopes) as TopologyMode[]).forEach((mode) => {
+    const scoped = serverMemory.topologyZoneLabelOverridesScopes[mode];
     if (!scoped[from]) return;
     scoped[to] = { ...cloneTopologyZoneLabelOverrides(scoped[to] || {}), ...cloneTopologyZoneLabelOverrides(scoped[from]) };
     delete scoped[from];
@@ -439,14 +418,14 @@ function saveTopologySnapshot(actor: string, reason: string, branch?: string) {
     actor,
     reason,
     branch: branch || undefined,
-    links: cloneTopologyLinks(topologyLinks),
-    layout: cloneTopologyLayout(topologyLayout),
-    layoutScopes: cloneTopologyLayoutScopes(topologyLayoutScopes),
-    zoneLabelOverridesScopes: cloneTopologyZoneLabelOverrideScopes(topologyZoneLabelOverridesScopes),
+    links: cloneTopologyLinks(serverMemory.topologyLinks),
+    layout: cloneTopologyLayout(serverMemory.topologyLayout),
+    layoutScopes: cloneTopologyLayoutScopes(serverMemory.topologyLayoutScopes),
+    zoneLabelOverridesScopes: cloneTopologyZoneLabelOverrideScopes(serverMemory.topologyZoneLabelOverridesScopes),
   };
-  topologySnapshots.push(snapshot);
-  if (topologySnapshots.length > 60) {
-    topologySnapshots = topologySnapshots.slice(topologySnapshots.length - 60);
+  serverMemory.topologySnapshots.push(snapshot);
+  if (serverMemory.topologySnapshots.length > 60) {
+    serverMemory.topologySnapshots = serverMemory.topologySnapshots.slice(serverMemory.topologySnapshots.length - 60);
   }
 }
 
@@ -460,7 +439,7 @@ function topologyLinkSignature(link: TopologyLink): string {
 
 function branchDeviceIdSet(branch: string): Set<string> {
   return new Set(
-    inventory
+    serverMemory.inventory
       .filter((item) => String(item.branch || "").trim() === branch)
       .map((item) => item.id)
   );
@@ -699,7 +678,7 @@ type BackupConfig = {
   intervalHours: number;
   networkSharePath: string;
   scope: BackupScope;
-  credentials?: BackupCredentials;
+  credentials: BackupCredentials;
 };
 
 type BackupHistoryItem = {
@@ -792,7 +771,7 @@ function hydrateBackupConfigFromKv(raw: unknown): BackupConfig {
 }
 
 function backupConfigApiConfigPayload(): Record<string, unknown> {
-  const cred = backupConfig.credentials ?? defaultBackupCredentials();
+  const cred = backupConfig.credentials;
   return {
     enabled: backupConfig.enabled,
     intervalHours: backupConfig.intervalHours,
@@ -810,7 +789,7 @@ function backupConfigApiConfigPayload(): Record<string, unknown> {
 async function mergeBackupCredentialsFromBody(
   body: Partial<BackupConfig> & { credentials?: { username?: string; domain?: string; password?: string } }
 ) {
-  const prev = backupConfig.credentials ?? defaultBackupCredentials();
+  const prev = backupConfig.credentials;
   const inc = body.credentials;
   const domain = String(inc?.domain ?? prev.domain ?? "").trim();
   let passwordMaterial = prev.passwordMaterial;
@@ -829,12 +808,17 @@ async function mergeBackupCredentialsFromBody(
 }
 
 let sealVolatileCredentialsMutex: Promise<void> = Promise.resolve();
+let sealVolatileCredentialsCoalesce = false;
 
 async function sealVolatileCredentialMaterialsAfterHydrate() {
+  if (sealVolatileCredentialsCoalesce) return sealVolatileCredentialsMutex;
+  sealVolatileCredentialsCoalesce = true;
   const run = async () => {
+    try {
     const upgrade = async (m: PasswordMaterial): Promise<PasswordMaterial> => {
-      if (m.kind !== "plain") return m;
-      return materialFromUserPassword(m.value);
+      const migrated = await reSealCredentialMaterialIfLegacyG1(m);
+      if (migrated.kind !== "plain") return migrated;
+      return materialFromUserPassword(migrated.value);
     };
     snmpConfig.communityMaterial = await upgrade(snmpConfig.communityMaterial);
     snmpConfig.communitiesMaterials = await Promise.all(snmpConfig.communitiesMaterials.map(upgrade));
@@ -849,15 +833,16 @@ async function sealVolatileCredentialMaterialsAfterHydrate() {
       };
     }
     const cred = backupConfig.credentials;
-    if (cred) {
-      backupConfig = {
-        ...backupConfig,
-        credentials: {
-          ...cred,
-          usernameMaterial: await upgrade(cred.usernameMaterial),
-          passwordMaterial: await upgrade(cred.passwordMaterial),
-        },
-      };
+    backupConfig = {
+      ...backupConfig,
+      credentials: {
+        ...cred,
+        usernameMaterial: await upgrade(cred.usernameMaterial),
+        passwordMaterial: await upgrade(cred.passwordMaterial),
+      },
+    };
+    } finally {
+      sealVolatileCredentialsCoalesce = false;
     }
   };
   sealVolatileCredentialsMutex = sealVolatileCredentialsMutex.then(run, run);
@@ -1352,7 +1337,7 @@ async function getTrunkPortCountFromSnmp(host: string): Promise<number> {
 
 async function classifyInventorySubcategoriesBySnmp(branch?: string) {
   const filterBranch = String(branch || "").trim();
-  const targets = filterBranch ? inventory.filter((i) => String(i.branch || "").trim() === filterBranch) : inventory;
+  const targets = filterBranch ? serverMemory.inventory.filter((i) => String(i.branch || "").trim() === filterBranch) : serverMemory.inventory;
   const touched: Array<{ id: string; trunkCount: number; subcategory: string }> = [];
   await forEachWithLimit(targets, 16, async (item) => {
     const category = String(item.category || "").toLowerCase();
@@ -1832,7 +1817,7 @@ async function runDiscoveryScan(input: DiscoveryScanInput): Promise<DiscoverySca
   }
 
   const snmpEnabled = true;
-  const existingIps = new Set(inventory.map((s) => s.ip));
+  const existingIps = new Set(serverMemory.inventory.map((s) => s.ip));
   const toScan = ips.filter((ip) => !existingIps.has(ip));
   const foundIps: string[] = [];
   let sshOpen = 0;
@@ -1879,7 +1864,7 @@ async function runDiscoveryScan(input: DiscoveryScanInput): Promise<DiscoverySca
 
   await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
   discovered.forEach((d) => upsertInventoryMetaFromItem(d));
-  inventory.push(...discovered);
+  serverMemory.inventory.push(...discovered);
   rebuildTopologyFromInventory();
   // Keep discovery fast: run expensive SNMP trunk-role classification in background.
   void classifyInventorySubcategoriesBySnmp(branch).catch(() => {
@@ -2516,11 +2501,11 @@ function backupCommandsForVendor(vendor: string): string[] {
 }
 
 function resolveBackupTargets(config: BackupConfig): InventoryItem[] {
-  if (config.scope.mode !== "filtered") return [...inventory];
+  if (config.scope.mode !== "filtered") return [...serverMemory.inventory];
   const ids = new Set((config.scope.deviceIds || []).map((x) => String(x)));
   const vendors = new Set((config.scope.vendors || []).map((x) => String(x).toLowerCase()));
   const branches = new Set((config.scope.branches || []).map((x) => String(x).toLowerCase()));
-  return inventory.filter((d) => {
+  return serverMemory.inventory.filter((d) => {
     if (ids.size && !ids.has(d.id)) return false;
     if (vendors.size && !vendors.has(String(d.vendor || "").toLowerCase())) return false;
     if (branches.size && !branches.has(String(d.branch || "").toLowerCase())) return false;
@@ -2730,11 +2715,11 @@ async function resolveAutomationTargets(plan: AutomationPlan): Promise<Array<{ d
   let devices: InventoryItem[] = [];
   if (target.scope === "selectedIds") {
     const set = new Set((target.selectedIds || target.selectedDeviceIds || []).map((v) => String(v)));
-    devices = inventory.filter((d) => set.has(d.id));
+    devices = serverMemory.inventory.filter((d) => set.has(d.id));
   } else if (target.scope === "filters") {
     const f = target.filters || {};
     const inList = (v: string | undefined, list?: string[]) => !list?.length || list.map((x) => String(x).toLowerCase()).includes(String(v || "").toLowerCase());
-    devices = inventory.filter((d) =>
+    devices = serverMemory.inventory.filter((d) =>
       inList(d.vendor, f.vendor) &&
       inList(d.model, f.model) &&
       inList(d.branch, f.branch) &&
@@ -2742,7 +2727,7 @@ async function resolveAutomationTargets(plan: AutomationPlan): Promise<Array<{ d
       inList(d.subcategory, f.subcategory)
     );
   } else {
-    devices = [...inventory];
+    devices = [...serverMemory.inventory];
   }
   devices = uniqueById(devices);
   if (plan.scenario === "create-vlan") {
@@ -2833,7 +2818,7 @@ async function runSshCommandBatch(device: InventoryItem, commands: string[], tim
 }
 
 async function executeAutomationStep(job: AutomationJob, step: AutomationStepResult, retryLimit: number): Promise<void> {
-  const device = inventory.find((d) => d.id === step.deviceId);
+  const device = serverMemory.inventory.find((d) => d.id === step.deviceId);
   if (!device) {
     step.status = "error";
     step.message = "Device not found";
@@ -2881,8 +2866,8 @@ async function executeAutomationStep(job: AutomationJob, step: AutomationStepRes
 async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise<TopologyLink[]> {
   const branchFilter = String(branch || "").trim();
   const devices = branchFilter
-    ? inventory.filter((item) => String(item.branch || "").trim() === branchFilter)
-    : inventory;
+    ? serverMemory.inventory.filter((item) => String(item.branch || "").trim() === branchFilter)
+    : serverMemory.inventory;
   if (devices.length < 2) {
     lastTopologyTrunkDiagnostics = {
       generatedAt: new Date().toISOString(),
@@ -3463,8 +3448,8 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
 }
 
 function rebuildTopologyFromInventory() {
-  const existing = new Set(inventory.map((i) => i.id));
-  topologyLinks = topologyLinks
+  const existing = new Set(serverMemory.inventory.map((i) => i.id));
+  serverMemory.topologyLinks = serverMemory.topologyLinks
     .filter((l) => existing.has(l.source) && existing.has(l.target))
     .map((l) => ensureTopologyLinkId(l));
 }
@@ -3579,11 +3564,11 @@ function actorRole(req: express.Request): string {
 
 function buildTopologyDoc() {
   return {
-    links: topologyLinks,
-    layout: topologyLayout,
-    layoutScopes: topologyLayoutScopes,
-    zoneLabelOverridesScopes: topologyZoneLabelOverridesScopes,
-    snapshots: topologySnapshots,
+    links: serverMemory.topologyLinks,
+    layout: serverMemory.topologyLayout,
+    layoutScopes: serverMemory.topologyLayoutScopes,
+    zoneLabelOverridesScopes: serverMemory.topologyZoneLabelOverridesScopes,
+    snapshots: serverMemory.topologySnapshots,
   };
 }
 
@@ -3599,16 +3584,16 @@ function applyPgKv(key: string, value: unknown) {
           zoneLabelOverridesScopes?: Record<TopologyMode, Record<string, TopologyZoneLabelOverrides>>;
           snapshots?: TopologySnapshot[];
         };
-        if (Array.isArray(doc.links)) topologyLinks = doc.links;
-        if (doc.layout && typeof doc.layout === "object") topologyLayout = doc.layout;
+        if (Array.isArray(doc.links)) serverMemory.topologyLinks = doc.links;
+        if (doc.layout && typeof doc.layout === "object") serverMemory.topologyLayout = doc.layout;
         if (doc.layoutScopes && typeof doc.layoutScopes === "object")
-          topologyLayoutScopes = doc.layoutScopes as Record<TopologyMode, Record<string, TopologyLayout>>;
+          serverMemory.topologyLayoutScopes = doc.layoutScopes as Record<TopologyMode, Record<string, TopologyLayout>>;
         if (doc.zoneLabelOverridesScopes && typeof doc.zoneLabelOverridesScopes === "object")
-          topologyZoneLabelOverridesScopes = doc.zoneLabelOverridesScopes as Record<
+          serverMemory.topologyZoneLabelOverridesScopes = doc.zoneLabelOverridesScopes as Record<
             TopologyMode,
             Record<string, TopologyZoneLabelOverrides>
           >;
-        if (Array.isArray(doc.snapshots)) topologySnapshots = doc.snapshots as TopologySnapshot[];
+        if (Array.isArray(doc.snapshots)) serverMemory.topologySnapshots = doc.snapshots as TopologySnapshot[];
         break;
       }
       case APP_KV_KEYS.system_config:
@@ -3693,12 +3678,12 @@ function applyPgKv(key: string, value: unknown) {
 async function persistPgInventoryAndTopology(reason: string) {
   if (!pgPool) return;
   try {
-    await persistInventoryDevices(pgPool, inventory as InventoryRowPayload[]);
+    await persistInventoryDevices(pgPool, serverMemory.inventory as InventoryRowPayload[]);
     await upsertAppKvMany(pgPool, [
       { key: APP_KV_KEYS.inventory_meta, value: inventoryMeta },
       { key: APP_KV_KEYS.topology, value: buildTopologyDoc() },
     ]);
-    await publishAmqpJson("inventory.persisted", { reason, deviceCount: inventory.length });
+    await publishAmqpJson("inventory.persisted", { reason, deviceCount: serverMemory.inventory.length });
   } catch (e) {
     console.error("[db] persist inventory/topology failed:", e instanceof Error ? e.message : e);
   }
@@ -3796,11 +3781,11 @@ async function persistPgAutomationMaps() {
 }
 
 async function refreshInventorySnmpMetrics(): Promise<void> {
-  if (!inventory.length || inventoryMetricsRunLock) return;
+  if (!serverMemory.inventory.length || inventoryMetricsRunLock) return;
   inventoryMetricsRunLock = true;
   try {
     const conc = Math.max(1, Math.min(64, Number(process.env.NETNODE_INVENTORY_SNMP_CONCURRENCY) || 16));
-    const next = await mapWithConcurrency(inventory, conc, async (item) => {
+    const next = await mapWithConcurrency(serverMemory.inventory, conc, async (item) => {
         const probe = await getSnmpProbe(item.ip, 900);
         if (!probe.ok) {
           const warning = evaluateInventoryWarnings({
@@ -3876,7 +3861,7 @@ async function refreshInventorySnmpMetrics(): Promise<void> {
           trunkDownCount,
         };
     });
-    const prev = inventory;
+    const prev = serverMemory.inventory;
     let dirty = next.length !== prev.length;
     if (!dirty) {
       for (let i = 0; i < next.length; i++) {
@@ -3898,7 +3883,7 @@ async function refreshInventorySnmpMetrics(): Promise<void> {
         }
       }
     }
-    inventory = next;
+    serverMemory.inventory = next;
     if (dirty) await persistPgInventoryAndTopology("inventory-snmp-refresh");
   } catch (e) {
     console.warn("[inventory] SNMP metrics refresh failed:", e instanceof Error ? e.message : e);
@@ -3909,11 +3894,14 @@ async function refreshInventorySnmpMetrics(): Promise<void> {
 
 async function connectAndHydratePostgres() {
   pgPool = await connectPostgres();
-  if (!pgPool) return;
+  if (!pgPool) {
+    warnIfSubProductionCredentialsKey();
+    return;
+  }
   await ensureSchema(pgPool);
   await hydrateFromDatabase(pgPool, {
     onInventory: (rows) => {
-      inventory = rows as InventoryItem[];
+      serverMemory.inventory = rows as InventoryItem[];
     },
     onKv: (key, value) => applyPgKv(key, value),
     onAuditLogs: (logs) => {
@@ -3921,6 +3909,7 @@ async function connectAndHydratePostgres() {
     },
   });
   await sealVolatileCredentialMaterialsAfterHydrate();
+  warnIfSubProductionCredentialsKey();
 }
 
 async function reloadPersistenceAfterSetup() {
@@ -4482,7 +4471,7 @@ type MacSearchEvent = {
     const localNorm = normalizeIfToken(ifName);
     if (!localNorm) return [];
     const neighbors: Array<{ neighborId: string; localPort: string; remotePort: string }> = [];
-    for (const link of topologyLinks) {
+    for (const link of serverMemory.topologyLinks) {
       const src = String(link.source || "").trim();
       const dst = String(link.target || "").trim();
       const portA = String(link.portA || "").trim();
@@ -4665,7 +4654,7 @@ type MacSearchEvent = {
       baseHop.reason = `Transit via ${portType} toward neighbor interface ${nextLink.remotePort || "unknown"}.`;
       hops.push(baseHop);
 
-      const neighbor = inventory.find((d) => d.id === nextLink.neighborId);
+      const neighbor = serverMemory.inventory.find((d) => d.id === nextLink.neighborId);
       if (!neighbor) {
         finalStatus = "transit_last_seen";
         ambiguityNotes.push(`Neighbor device ${nextLink.neighborId} is missing from inventory.`);
@@ -4734,7 +4723,7 @@ type MacSearchEvent = {
     const requestedIds = Array.isArray(req.body?.deviceIds)
       ? new Set<string>(req.body.deviceIds.map((x: unknown) => String(x)))
       : null;
-    const baseTargets = requestedIds ? inventory.filter((d) => requestedIds.has(d.id)) : [...inventory];
+    const baseTargets = requestedIds ? serverMemory.inventory.filter((d) => requestedIds.has(d.id)) : [...serverMemory.inventory];
     const branchCode = normalizeBranchCode(req.body?.branch || req.body?.regionPrefix);
     const isStrictSingleSelected = Boolean(requestedIds && requestedIds.size === 1 && baseTargets.length === 1);
     const targets = branchCode && !isStrictSingleSelected
@@ -4889,7 +4878,7 @@ type MacSearchEvent = {
 
   app.get("/api/automation/voice-vlan/:deviceId", checkRole(["admin", "operator", "viewer"]), async (req, res) => {
     const deviceId = String(req.params.deviceId || "");
-    const device = inventory.find((d) => d.id === deviceId);
+    const device = serverMemory.inventory.find((d) => d.id === deviceId);
     if (!device) return res.status(404).json({ error: "Device not found" });
     const map = await collectVoiceVlanMap(device.ip);
     return res.json({
@@ -5011,9 +5000,9 @@ type MacSearchEvent = {
     actorName,
     actorRole,
     logAction,
-    getInventory: () => inventory,
+    getInventory: () => serverMemory.inventory,
     setInventory: (next) => {
-      inventory = next;
+      serverMemory.inventory = next;
     },
     inventoryMeta,
     deriveZoneKeyFromDeviceName,
@@ -5493,9 +5482,9 @@ type MacSearchEvent = {
   app.get("/api/topology/links", checkRole(["admin", "operator", "viewer"]), (req, res) => {
     const branch = String(req.query.branch || "").trim();
     const topologyMode = normalizeTopologyMode(req.query.topologyMode);
-    topologyLinks = topologyLinks.map((l) => ensureTopologyLinkId(l));
+    serverMemory.topologyLinks = serverMemory.topologyLinks.map((l) => ensureTopologyLinkId(l));
     res.json({
-      links: topologyLinks,
+      links: serverMemory.topologyLinks,
       layout: getTopologyLayoutForScope(topologyMode, branch || undefined),
       zoneLabelOverrides: getTopologyZoneLabelOverridesForScope(topologyMode, branch || undefined),
     });
@@ -5517,7 +5506,7 @@ type MacSearchEvent = {
   });
 
   app.get("/api/topology/versions", checkRole(["admin", "operator", "viewer"]), (_req, res) => {
-    const versions = topologySnapshots
+    const versions = serverMemory.topologySnapshots
       .slice()
       .reverse()
       .map((v) => ({
@@ -5534,9 +5523,9 @@ type MacSearchEvent = {
     const id = String(req.params.id || "").trim();
     const branch = String(req.query.branch || "").trim();
     const topologyMode = normalizeTopologyMode(req.query.topologyMode);
-    const snapshot = topologySnapshots.find((v) => v.id === id);
+    const snapshot = serverMemory.topologySnapshots.find((v) => v.id === id);
     if (!snapshot) return res.status(404).json({ success: false, error: "Topology version not found" });
-    const currentScoped = filterTopologyByBranch(topologyLinks, getTopologyLayoutForScope(topologyMode, branch || undefined), branch || undefined);
+    const currentScoped = filterTopologyByBranch(serverMemory.topologyLinks, getTopologyLayoutForScope(topologyMode, branch || undefined), branch || undefined);
     const targetScoped = filterTopologyByBranch(snapshot.links, getSnapshotLayoutForScope(snapshot, topologyMode, branch || undefined), branch || undefined);
     const summary = diffTopologyState(currentScoped, targetScoped);
     return res.json({
@@ -5559,22 +5548,22 @@ type MacSearchEvent = {
     const topologyMode = normalizeTopologyMode(req.body?.topologyMode);
     const actor = actorName(req);
     if (!id) return res.status(400).json({ success: false, error: "versionId is required" });
-    const snapshot = topologySnapshots.find((v) => v.id === id);
+    const snapshot = serverMemory.topologySnapshots.find((v) => v.id === id);
     if (!snapshot) return res.status(404).json({ success: false, error: "Topology version not found" });
 
     saveTopologySnapshot(actor, "topology.restore.pre", branch || undefined);
     if (!branch) {
-      topologyLinks = cloneTopologyLinks(snapshot.links).map((l) => ensureTopologyLinkId(l));
+      serverMemory.topologyLinks = cloneTopologyLinks(snapshot.links).map((l) => ensureTopologyLinkId(l));
       setTopologyLayoutForScope(topologyMode, undefined, getSnapshotLayoutForScope(snapshot, topologyMode));
-      topologyZoneLabelOverridesScopes = cloneTopologyZoneLabelOverrideScopes(snapshot.zoneLabelOverridesScopes || { ip: {}, fc: {} });
+      serverMemory.topologyZoneLabelOverridesScopes = cloneTopologyZoneLabelOverrideScopes(snapshot.zoneLabelOverridesScopes || { ip: {}, fc: {} });
     } else {
       const ids = branchDeviceIdSet(branch);
-      const currentExternalLinks = topologyLinks.filter((l) => !(ids.has(l.source) && ids.has(l.target)));
+      const currentExternalLinks = serverMemory.topologyLinks.filter((l) => !(ids.has(l.source) && ids.has(l.target)));
       const targetBranchLinks = snapshot.links.filter((l) => ids.has(l.source) && ids.has(l.target));
-      topologyLinks = [...currentExternalLinks, ...cloneTopologyLinks(targetBranchLinks).map((l) => ensureTopologyLinkId(l))];
+      serverMemory.topologyLinks = [...currentExternalLinks, ...cloneTopologyLinks(targetBranchLinks).map((l) => ensureTopologyLinkId(l))];
       setTopologyLayoutForScope(topologyMode, branch, getSnapshotLayoutForScope(snapshot, topologyMode, branch));
       const key = topologyLayoutBranchKey(branch);
-      topologyZoneLabelOverridesScopes[topologyMode][key] = cloneTopologyZoneLabelOverrides(
+      serverMemory.topologyZoneLabelOverridesScopes[topologyMode][key] = cloneTopologyZoneLabelOverrides(
         snapshot.zoneLabelOverridesScopes?.[topologyMode]?.[key] || {}
       );
     }
@@ -5583,7 +5572,7 @@ type MacSearchEvent = {
     return res.json({
       success: true,
       restored: { id: snapshot.id, createdAt: snapshot.createdAt, reason: snapshot.reason },
-      links: topologyLinks,
+      links: serverMemory.topologyLinks,
       layout: getTopologyLayoutForScope(topologyMode, branch || undefined),
       zoneLabelOverrides: getTopologyZoneLabelOverridesForScope(topologyMode, branch || undefined),
     });
@@ -5593,28 +5582,28 @@ type MacSearchEvent = {
     const branch = String(req.body?.branch || "").trim();
     const topologyMode = normalizeTopologyMode(req.body?.topologyMode);
     const actor = actorName(req);
-    if (!topologySnapshots.length) {
+    if (!serverMemory.topologySnapshots.length) {
       return res.status(404).json({ success: false, error: "No topology versions available" });
     }
     const idx = branch
       ? (() => {
-          for (let i = topologySnapshots.length - 1; i >= 0; i--) {
-            const v = topologySnapshots[i];
+          for (let i = serverMemory.topologySnapshots.length - 1; i >= 0; i--) {
+            const v = serverMemory.topologySnapshots[i];
             if (!v.branch || v.branch === branch) return i;
           }
           return -1;
         })()
-      : topologySnapshots.length - 1;
+      : serverMemory.topologySnapshots.length - 1;
     if (idx < 0) return res.status(404).json({ success: false, error: "No matching topology version found" });
-    const snapshot = topologySnapshots[idx];
-    topologySnapshots.splice(idx, 1);
-    topologyLinks = cloneTopologyLinks(snapshot.links).map((l) => ensureTopologyLinkId(l));
+    const snapshot = serverMemory.topologySnapshots[idx];
+    serverMemory.topologySnapshots.splice(idx, 1);
+    serverMemory.topologyLinks = cloneTopologyLinks(snapshot.links).map((l) => ensureTopologyLinkId(l));
     setTopologyLayoutForScope(topologyMode, branch || undefined, getSnapshotLayoutForScope(snapshot, topologyMode, branch || undefined));
     if (!branch) {
-      topologyZoneLabelOverridesScopes = cloneTopologyZoneLabelOverrideScopes(snapshot.zoneLabelOverridesScopes || { ip: {}, fc: {} });
+      serverMemory.topologyZoneLabelOverridesScopes = cloneTopologyZoneLabelOverrideScopes(snapshot.zoneLabelOverridesScopes || { ip: {}, fc: {} });
     } else {
       const key = topologyLayoutBranchKey(branch);
-      topologyZoneLabelOverridesScopes[topologyMode][key] = cloneTopologyZoneLabelOverrides(
+      serverMemory.topologyZoneLabelOverridesScopes[topologyMode][key] = cloneTopologyZoneLabelOverrides(
         snapshot.zoneLabelOverridesScopes?.[topologyMode]?.[key] || {}
       );
     }
@@ -5623,7 +5612,7 @@ type MacSearchEvent = {
     return res.json({
       success: true,
       restored: { id: snapshot.id, createdAt: snapshot.createdAt, reason: snapshot.reason },
-      links: topologyLinks,
+      links: serverMemory.topologyLinks,
       layout: getTopologyLayoutForScope(topologyMode, branch || undefined),
       zoneLabelOverrides: getTopologyZoneLabelOverridesForScope(topologyMode, branch || undefined),
     });
@@ -5635,18 +5624,18 @@ type MacSearchEvent = {
       const topologyMode = normalizeTopologyMode(req.body?.topologyMode);
       const actor = actorName(req);
       if (topologyMode === "fc") {
-        return res.json({ success: true, links: topologyLinks, layout: getTopologyLayoutForScope(topologyMode, branch || undefined) });
+        return res.json({ success: true, links: serverMemory.topologyLinks, layout: getTopologyLayoutForScope(topologyMode, branch || undefined) });
       }
       saveTopologySnapshot(actor, "topology.rebuild", branch || undefined);
       const links = await inferTopologyLinksFromTrunkDescriptions(branch || undefined);
       if (branch) {
         const branchDeviceIds = new Set(
-          inventory
+          serverMemory.inventory
             .filter((item) => String(item.branch || "").trim() === branch)
             .map((item) => item.id)
         );
-        const externalLinks = topologyLinks.filter((l) => !branchDeviceIds.has(l.source) || !branchDeviceIds.has(l.target));
-        const existingBranchLinks = topologyLinks.filter((l) => branchDeviceIds.has(l.source) && branchDeviceIds.has(l.target));
+        const externalLinks = serverMemory.topologyLinks.filter((l) => !branchDeviceIds.has(l.source) || !branchDeviceIds.has(l.target));
+        const existingBranchLinks = serverMemory.topologyLinks.filter((l) => branchDeviceIds.has(l.source) && branchDeviceIds.has(l.target));
 
         const keyOf = (l: { source: string; target: string }) => [l.source, l.target].sort().join("::");
 
@@ -5684,21 +5673,21 @@ type MacSearchEvent = {
           outBranch.push(l);
         });
 
-        topologyLinks = [...externalLinks, ...outBranch];
+        serverMemory.topologyLinks = [...externalLinks, ...outBranch];
       } else {
         // Global rebuild: keep all manual links + keep renamed labels where possible.
         const keyOf = (l: { source: string; target: string }) => [l.source, l.target].sort().join("::");
         const inferredByPair = new Map<string, TopologyLink>();
         (links || []).forEach((l) => inferredByPair.set(keyOf(l), { ...l, manual: false }));
 
-        topologyLinks
+        serverMemory.topologyLinks
           .filter((l) => l.renamed)
           .forEach((l) => {
             const inf = inferredByPair.get(keyOf(l));
             if (inf) inferredByPair.set(keyOf(l), { ...inf, portA: l.portA, portB: l.portB, renamed: true });
           });
 
-        const manualLinks = topologyLinks.filter((l) => l.manual);
+        const manualLinks = serverMemory.topologyLinks.filter((l) => l.manual);
         const dedupe = new Set<string>();
         const out: TopologyLink[] = [];
         Array.from(inferredByPair.values()).forEach((l) => {
@@ -5713,7 +5702,7 @@ type MacSearchEvent = {
           dedupe.add(dk);
           out.push(l);
         });
-        topologyLinks = out;
+        serverMemory.topologyLinks = out;
       }
       rebuildTopologyFromInventory();
       logAction(
@@ -5725,7 +5714,7 @@ type MacSearchEvent = {
       await persistPgTopologyOnly("topology-rebuild");
       return res.json({
         success: true,
-        links: topologyLinks,
+        links: serverMemory.topologyLinks,
         layout: getTopologyLayoutForScope(topologyMode, branch || undefined),
         trunkDiagnostics: lastTopologyTrunkDiagnostics,
       });
@@ -5761,7 +5750,7 @@ type MacSearchEvent = {
     if (from === to) return res.json({ success: true, renamed: 0 });
 
     let renamed = 0;
-    inventory = inventory.map((item) => {
+    serverMemory.inventory = serverMemory.inventory.map((item) => {
       if (String(item.branch || "").trim() !== from) return item;
       renamed += 1;
       return { ...item, branch: to };
@@ -5797,7 +5786,7 @@ type MacSearchEvent = {
     if (!zoneKey) return res.status(400).json({ error: "zoneKey is required" });
 
     const scopeKey = topologyLayoutBranchKey(branch || undefined);
-    const current = topologyZoneLabelOverridesScopes[topologyMode][scopeKey] || {};
+    const current = serverMemory.topologyZoneLabelOverridesScopes[topologyMode][scopeKey] || {};
     const currentLabel = String(current[zoneKey] || "").trim();
     if (currentLabel === label) {
       return res.json({
@@ -5812,7 +5801,7 @@ type MacSearchEvent = {
     const next = cloneTopologyZoneLabelOverrides(current);
     if (label) next[zoneKey] = label;
     else delete next[zoneKey];
-    topologyZoneLabelOverridesScopes[topologyMode][scopeKey] = next;
+    serverMemory.topologyZoneLabelOverridesScopes[topologyMode][scopeKey] = next;
 
     logAction(
       actorName(req),
@@ -5858,17 +5847,17 @@ type MacSearchEvent = {
         return res.status(400).json({ error: "Link endpoints must belong to active branch" });
       }
     }
-    const exists = !allowDuplicate && topologyLinks.some(
+    const exists = !allowDuplicate && serverMemory.topologyLinks.some(
       (l) =>
         (l.source === source && l.target === target && l.portA === portA && l.portB === portB) ||
         (l.source === target && l.target === source && l.portA === portB && l.portB === portA)
     );
     if (!exists) {
       saveTopologySnapshot(actorName(req), "topology.link.add", branch || undefined);
-      topologyLinks.push(ensureTopologyLinkId({ source, target, portA: portA || "N/A", portB: portB || "N/A", manual: true }));
+      serverMemory.topologyLinks.push(ensureTopologyLinkId({ source, target, portA: portA || "N/A", portB: portB || "N/A", manual: true }));
     }
     await persistPgTopologyOnly("topology-link-add");
-    res.json({ success: true, links: topologyLinks });
+    res.json({ success: true, links: serverMemory.topologyLinks });
   });
 
   app.post("/api/topology/links/rename", checkRole(["admin", "operator"]), async (req, res) => {
@@ -5894,35 +5883,35 @@ type MacSearchEvent = {
     if (!newPortA && !newPortB) return res.status(400).json({ error: "newPortA/newPortB required" });
 
     const idx = id
-      ? topologyLinks.findIndex((l) => l.id === id)
-      : topologyLinks.findIndex(
+      ? serverMemory.topologyLinks.findIndex((l) => l.id === id)
+      : serverMemory.topologyLinks.findIndex(
           (l) => l.source === source && l.target === target && l.portA === portA && l.portB === portB
         );
     const revIdx = idx >= 0 || id
       ? -1
-      : topologyLinks.findIndex(
+      : serverMemory.topologyLinks.findIndex(
           (l) => l.source === target && l.target === source && l.portA === portB && l.portB === portA
         );
     const pick = idx >= 0 ? idx : revIdx;
     if (pick < 0) return res.status(404).json({ error: "Link not found" });
     if (branch) {
       const branchIds = branchDeviceIdSet(branch);
-      const link = topologyLinks[pick];
+      const link = serverMemory.topologyLinks[pick];
       if (!branchIds.has(link.source) || !branchIds.has(link.target)) {
         return res.status(400).json({ error: "Link is outside active branch" });
       }
     }
 
     saveTopologySnapshot(actorName(req), "topology.link.rename", branch || undefined);
-    const cur = topologyLinks[pick];
-    topologyLinks[pick] = ensureTopologyLinkId({
+    const cur = serverMemory.topologyLinks[pick];
+    serverMemory.topologyLinks[pick] = ensureTopologyLinkId({
       ...cur,
       portA: newPortA || cur.portA,
       portB: newPortB || cur.portB,
       renamed: true,
     });
     await persistPgTopologyOnly("topology-link-rename");
-    return res.json({ success: true, links: topologyLinks });
+    return res.json({ success: true, links: serverMemory.topologyLinks });
   });
 
   app.delete("/api/topology/links", checkRole(["admin", "operator"]), async (req, res) => {
@@ -5934,8 +5923,8 @@ type MacSearchEvent = {
     const portB = String(body.portB || "").trim();
     const branch = String(body.branch || "").trim();
     const branchIds = branch ? branchDeviceIdSet(branch) : null;
-    const before = topologyLinks.length;
-    const nextLinks = topologyLinks.filter((l) => {
+    const before = serverMemory.topologyLinks.length;
+    const nextLinks = serverMemory.topologyLinks.filter((l) => {
       if (branchIds && (!branchIds.has(l.source) || !branchIds.has(l.target))) return true;
       if (id) return l.id !== id;
       return !(
@@ -5947,9 +5936,9 @@ type MacSearchEvent = {
     });
     const removed = before - nextLinks.length;
     if (removed > 0) saveTopologySnapshot(actorName(req), "topology.link.delete", branch || undefined);
-    topologyLinks = nextLinks;
+    serverMemory.topologyLinks = nextLinks;
     await persistPgTopologyOnly("topology-link-delete");
-    res.json({ success: true, removed, links: topologyLinks });
+    res.json({ success: true, removed, links: serverMemory.topologyLinks });
   });
 
   app.post("/api/topology/layout", checkRole(["admin", "operator"]), async (req, res) => {
@@ -6078,7 +6067,7 @@ type MacSearchEvent = {
     if (snmpTemplates.length === before) {
       return res.status(404).json({ success: false, error: "Template not found" });
     }
-    inventory = inventory.map((item) =>
+    serverMemory.inventory = serverMemory.inventory.map((item) =>
       item.snmpTemplateId === id ? { ...item, snmpTemplateId: undefined } : item
     );
     await persistPgSnmpTemplates();
@@ -6088,7 +6077,7 @@ type MacSearchEvent = {
 
   app.get("/api/metrics/dashboard", checkRole(['admin', 'operator', 'viewer']), async (_req, res) => {
     const sample = await Promise.all(
-      inventory.map(async (item) => {
+      serverMemory.inventory.map(async (item) => {
         const template = pickTemplate(item);
         const metricOids = (template?.metrics || []).map((m) => m.oid);
         const customDefs = (item.customOids || []).map((o, i) => ({ key: `custom_${i + 1}`, oid: o, scale: 1 }));
