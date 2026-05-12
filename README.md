@@ -99,6 +99,187 @@ There is **one application** (Node.js + the built SPA). What differs is only **h
 
 So: **not two products**—**on-prem / self-hosted always**; Docker Compose is an **optional shortcut** to spin up only the database and broker.
 
+## Full installation (end-to-end)
+
+This section is the **happy path** for a clean server: what to install, **why**, in what order, and **which settings** avoid the most common failures (auth, networking, permissions).
+
+### 0. Order of work
+
+1. **PostgreSQL** (required for production-grade persistence)—install, open the port only to the NETNODE host, create database and role.
+2. **RabbitMQ** (optional)—only if you want AMQP integration events; install or use Docker; create a dedicated user and vhost for NETNODE.
+3. **NETNODE**—Node.js, clone repo, `npm install` / `npm run build`, configure `.env` or use the **first-run wizard**.
+4. **Reverse proxy** (optional)—Nginx in front of the Node listener.
+
+Firewall between the NETNODE host and PostgreSQL: allow **TCP 5432** (or your custom port) from the app to the DB only—not from the whole internet unless you know why.
+
+---
+
+### 1. PostgreSQL — why and what version
+
+- **Why**: NETNODE stores inventory, topology, users, SNMP templates, discovery profiles, audit rows, and JSON bundles in PostgreSQL. Without it (and without completing the wizard toward a live DB), state is not durable across restarts.
+- **Version**: use **PostgreSQL 14+** in production. **16** is what the bundled `docker-compose.yml` uses. **12+** often works; if schema creation fails, upgrade the server.
+
+#### 1a. Install PostgreSQL (packages)
+
+Pick **one** source of truth for binaries so upgrades stay predictable:
+
+| OS / style | Where to install from | Notes |
+|------------|------------------------|--------|
+| **Debian / Ubuntu** | `apt install postgresql` (distro) or [PostgreSQL APT](https://wiki.postgresql.org/wiki/Apt) for a specific major | Distro packages are fine if the major is **≥ 14**. |
+| **RHEL / Rocky / Alma** | `dnf install postgresql-server postgresql-contrib` then `postgresql-setup --initdb` | Enable `postgresql` systemd unit. |
+| **Windows** | [EDB installer](https://www.postgresql.org/download/windows/) or supported corporate image | Use **Services** + **pgAdmin** or `psql` for SQL below. |
+| **Docker only** | Skip native install; use **§ 3** (`docker compose`) for Postgres. | Same SQL ideas apply if you create users manually inside the container. |
+
+#### 1b. PostgreSQL settings that usually matter for NETNODE
+
+Edit `postgresql.conf` (location varies: e.g. `/etc/postgresql/16/main/` on Debian):
+
+- **`listen_addresses`**: `'localhost'` if the app is on the same machine; `'*'` or a specific interface IP if NETNODE runs on another host (then tighten with firewall).
+- **`max_connections`**: default **100** is enough for small/medium installs; raise if you run many parallel workers against the same instance.
+- **Locale / encoding**: create the database with **UTF8** (default on modern installs).
+
+Edit **`pg_hba.conf`** (same directory as above) so the NETNODE host can authenticate:
+
+```text
+# TYPE  DATABASE        USER            ADDRESS                 METHOD
+host    netnode         netnode         10.0.0.0/24             scram-sha-256
+```
+
+Replace `10.0.0.0/24` with the subnet of your application server (or `127.0.0.1/32` for local-only). Reload PostgreSQL after edits (`systemctl reload postgresql` or `pg_ctl reload`).
+
+**Why failures happen here**: `listen_addresses` still `localhost` while the app is remote; `pg_hba.conf` missing a line for your client IP; password auth method mismatch (`scram-sha-256` vs older `md5`).
+
+#### 1c. Create database and role (SQL)
+
+Connect as a superuser (e.g. `postgres`) and run:
+
+```sql
+CREATE USER netnode WITH PASSWORD 'choose-a-long-random-secret';
+CREATE DATABASE netnode OWNER netnode ENCODING 'UTF8' TEMPLATE template0;
+\c netnode
+GRANT ALL ON SCHEMA public TO netnode;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO netnode;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO netnode;
+```
+
+**Why**: NETNODE runs DDL on first connection (`ensureSchema`) and expects the role to own or be able to create objects in **`public`**. The wizard can point at an **empty** database with a user that has **`CONNECT`** and **`CREATE`** on that database—if in doubt, use the grants above.
+
+**Connection string** for `.env` or the wizard (URL-encode special characters in the password):
+
+```text
+postgres://netnode:choose-a-long-random-secret@db-host.example.com:5432/netnode
+```
+
+---
+
+### 2. RabbitMQ — why, when to skip, and how to install
+
+- **Why**: optional. When `AMQP_URL` or `RABBITMQ_URL` is set, NETNODE publishes JSON messages to a **durable topic exchange** named `netnode.events` (routing keys such as `inventory.persisted`, `audit.*`). **No queues are created** by NETNODE—you bind your own queues for integrations.
+- **When to skip**: leave `AMQP_URL` / `RABBITMQ_URL` unset; the server runs normally without a broker.
+
+#### 2a. Install RabbitMQ (packages)
+
+| OS | Where / how |
+|----|-------------|
+| **Debian / Ubuntu** | [Team RabbitMQ install guides](https://www.rabbitmq.com/docs/install-debian) — Erlang + `rabbitmq-server` package. |
+| **RHEL family** | [RPM install](https://www.rabbitmq.com/docs/install-rpm) |
+| **Windows** | [Windows installer](https://www.rabbitmq.com/docs/install-windows) |
+| **Docker only** | Use **§ 3**; no separate Erlang install on the host. |
+
+Enable and start the service (`systemctl enable --now rabbitmq-server` on Linux). Open **TCP 5672** (AMQP) from the NETNODE host to the broker; **15672** is the management UI (optional, restrict by firewall).
+
+#### 2b. RabbitMQ user, vhost, and permissions (recommended)
+
+Avoid using **`guest`** except on localhost. Create a dedicated vhost and user:
+
+```bash
+sudo rabbitmqctl add_vhost netnode
+sudo rabbitmqctl add_user netnode 'another-long-secret'
+sudo rabbitmqctl set_permissions -p netnode netnode ".*" ".*" ".*"
+sudo rabbitmqctl set_user_tags netnode management
+```
+
+**Why `"." "." "."`**: NETNODE must be able to **declare** exchanges and **publish**; these permissions on a **dedicated vhost** are the usual dev/prod pattern. Narrower ACLs are possible but require custom operator policy.
+
+**AMQP URL** (note the trailing slash and URL-encoded password if needed):
+
+```text
+amqp://netnode:another-long-secret@rabbit-host.example.com:5672/netnode
+```
+
+The path segment **`netnode`** is the **vhost** (not the username). For default vhost `/`, use:
+
+```text
+amqp://netnode:another-long-secret@rabbit-host.example.com:5672/%2F
+```
+
+(`%2F` is URL-encoded `/`.)
+
+Optional: enable management UI plugin if not already on:
+
+```bash
+sudo rabbitmq-plugins enable rabbitmq_management
+```
+
+---
+
+### 3. PostgreSQL + RabbitMQ with Docker Compose (from this repo)
+
+**Why**: fastest way to get matching versions (**Postgres 16**, **RabbitMQ 3 with management**) without OS-specific package steps. **Not** a full production hardening guide—the default credentials are for **local development**.
+
+From the repository root:
+
+```bash
+docker compose up -d
+```
+
+| Service | Image | Host ports | Default credentials (change for real deployments) |
+|---------|-------|------------|-----------------------------------------------------|
+| PostgreSQL | `postgres:16-alpine` | `5432` | user / password / DB: **`netnode` / `netnode` / `netnode`** |
+| RabbitMQ | `rabbitmq:3-management-alpine` | `5672` (AMQP), `15672` (UI) | **`netnode` / `netnode`** |
+
+Example URLs when NETNODE runs **on the same machine** as Docker:
+
+```text
+postgres://netnode:netnode@localhost:5432/netnode
+amqp://netnode:netnode@localhost:5672/
+```
+
+**Why things break**: another service already bound to **5432** or **5672**; Docker not running; on Linux, SELinux/firewall blocking localhost (rare). If NETNODE runs **inside another container**, use the compose **service name** as hostname (e.g. `postgres`) on the Docker network, or `host.docker.internal` when reaching the host—**not** `localhost` unless you use host networking.
+
+Data volume: Postgres data is stored in the named volume `netnode_pgdata` (see `docker-compose.yml`).
+
+---
+
+### 4. Install and run NETNODE
+
+```bash
+git clone <your-fork-or-repo-url>
+cd <repository-directory>
+npm install
+```
+
+- **Development**: `npm run dev` — serves API + SPA; if `DATABASE_URL` is unset, open the **setup wizard** in the browser.
+- **Production**: copy `.env.example` to `.env`, set at least `PORT` / `NODE_ENV`, set **`DATABASE_URL`** (or complete the wizard once), optionally **`AMQP_URL`**, then:
+
+```bash
+npm run build
+npm start
+```
+
+Ensure the process user can create **`data/`** and write **`data/netnode-instance.json`** when using the wizard (see **Environment and deployment notes**).
+
+---
+
+### 5. Verification checklist
+
+| Step | Check |
+|------|--------|
+| PostgreSQL | From the NETNODE host: `psql "$DATABASE_URL" -c 'select 1'` succeeds. |
+| Wizard | With `DATABASE_URL` unset, UI shows wizard; **Test DB** passes; **Apply** completes; reload shows login. |
+| RabbitMQ (if used) | Management UI (e.g. `http://localhost:15672`) shows connections; after NETNODE runs, exchange **`netnode.events`** appears when the first event is published. |
+| App | Login works; inventory changes survive a **process** restart (DB still up). |
+
 ## Runtime persistence and messaging
 
 - **PostgreSQL** stores inventory rows, key-value bundles (system/SNMP/LDAP/backup/topology JSON, users, automation maps, discovery profiles, etc.), and audit log rows. Tables are created automatically on first successful DB connection (`ensureSchema`).
@@ -127,17 +308,18 @@ After success, the page reloads—sign in with the administrator you created.
 - Set **`DATABASE_URL`** in `.env` or the process environment before start (wizard is skipped), **or**
 - Set **`NETNODE_SKIP_SETUP=1`** to force in-memory mode without the wizard (not recommended for production).
 
-**Pre-create PostgreSQL** (typical):
+**Pre-create PostgreSQL**: prefer the full UTF-8 role/database script in **[Full installation](#full-installation-end-to-end)** (subsection **1c**). Minimal variant:
 
 ```sql
-CREATE DATABASE netnode;
 CREATE USER netnode WITH PASSWORD 'your-secret';
-GRANT ALL PRIVILEGES ON DATABASE netnode TO netnode;
--- connect to netnode DB, then:
+CREATE DATABASE netnode OWNER netnode;
+\c netnode
 GRANT ALL ON SCHEMA public TO netnode;
 ```
 
 ## Quick stack with Docker (optional)
+
+Short path for dependencies only; networking, security, and remote hosts are covered in **[Full installation (end-to-end)](#full-installation-end-to-end)** (section **3**).
 
 From the repository root:
 
