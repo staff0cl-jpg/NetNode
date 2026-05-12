@@ -10,9 +10,25 @@ import * as dotenv from "dotenv";
 import ldap from "ldapjs";
 import snmp from "net-snmp";
 import crypto from "crypto";
+import type { Pool } from "pg";
+import type { InventoryRowPayload } from "./server/persistence/postgres.js";
+import {
+  APP_KV_KEYS,
+  appendAuditLog as pgAppendAuditLog,
+  connectPostgres,
+  ensureSchema,
+  hydrateFromDatabase,
+  persistInventoryDevices,
+  shutdownPool,
+  upsertAppKv,
+} from "./server/persistence/postgres.js";
+import { closeAmqp, publishAmqpJson } from "./server/messaging/broker.js";
+import { hydrateProcessEnvFromInstanceFileSync } from "./server/setup/instanceFile.js";
+import { registerFirstRunSetupRoutes } from "./server/setup/setupRoutes.js";
 
 // Load environment variables
 dotenv.config();
+hydrateProcessEnvFromInstanceFileSync();
 
 type InventoryItem = {
   id: string;
@@ -622,6 +638,13 @@ function createInitialUsers(): LocalUser[] {
       lastLogin: "-",
       passwordHash: hashPassword(initialAdminPassword),
     });
+    return users;
+  }
+
+  if (!process.env.DATABASE_URL?.trim()) {
+    console.warn(
+      "[Security] No DATABASE_URL: complete the web first-run setup wizard, or set DATABASE_URL / NETNODE_INITIAL_ADMIN_PASSWORD."
+    );
     return users;
   }
 
@@ -1244,6 +1267,7 @@ async function classifyInventorySubcategoriesBySnmp(branch?: string) {
   });
   // ensure dictionary contains the expected values
   inventoryMeta.subcategories = Array.from(new Set([...(inventoryMeta.subcategories || []), "Core", "Distribution", "Access"]));
+  await persistPgInventoryAndTopology("snmp-subcategory-classify");
   return { updated: touched.length, devices: touched };
 }
 
@@ -1397,6 +1421,8 @@ type AutomationJob = {
 const automationPlans = new Map<string, { id: string; createdAt: string; actor: string; plan: AutomationPlan }>();
 const automationJobs = new Map<string, AutomationJob>();
 const automationCancellation = new Set<string>();
+
+let pgPool: Pool | null = null;
 
 interface LdapRoleProfile {
   enabled: boolean;
@@ -1721,6 +1747,7 @@ async function runDiscoveryScan(input: DiscoveryScanInput): Promise<DiscoverySca
     `Проверено: ${ips.length}, SNMP найдено: ${foundIps.length}, новых в инвентаре: ${summary.added}`,
     "inventory"
   );
+  await persistPgInventoryAndTopology("discovery-scan");
   return summary;
 }
 
@@ -2592,6 +2619,7 @@ async function runBackupJob(actor: string): Promise<BackupHistoryItem> {
     logAction(actor, "Backup Run Failed", entry.error, "system");
     return entry;
   } finally {
+    await persistPgBackupHistory();
     backupRunLock = false;
   }
 }
@@ -3488,6 +3516,23 @@ const logAction = (
   if (auditLogs.length > 500) auditLogs.pop(); // Keep last 500 logs
   const suffix = ipAddress ? ` [ip=${ipAddress}]` : "";
   console.log(`[Audit] [${category.toUpperCase()}] ${user}: ${action} - ${details}${suffix}`);
+  if (pgPool) {
+    void pgAppendAuditLog(pgPool, {
+      id: log.id,
+      timestamp: log.timestamp,
+      user: log.user,
+      action: log.action,
+      details: log.details,
+      category: log.category,
+      ipAddress: log.ipAddress,
+    }).catch((err) => console.error("[db] audit insert failed:", err instanceof Error ? err.message : err));
+  }
+  void publishAmqpJson(`audit.${log.category}`, {
+    id: log.id,
+    user: log.user,
+    action: log.action,
+    category: log.category,
+  }).catch(() => {});
 };
 
 function parseCookieHeader(src = ""): Record<string, string> {
@@ -3568,6 +3613,231 @@ function actorRole(req: express.Request): string {
   return authFromRequest(req)?.role || "viewer";
 }
 
+function buildTopologyDoc() {
+  return {
+    links: topologyLinks,
+    layout: topologyLayout,
+    layoutScopes: topologyLayoutScopes,
+    zoneLabelOverridesScopes: topologyZoneLabelOverridesScopes,
+    snapshots: topologySnapshots,
+  };
+}
+
+function applyPgKv(key: string, value: unknown) {
+  if (value === undefined || value === null) return;
+  try {
+    switch (key) {
+      case APP_KV_KEYS.topology: {
+        const doc = value as {
+          links?: TopologyLink[];
+          layout?: TopologyLayout;
+          layoutScopes?: Record<TopologyMode, Record<string, TopologyLayout>>;
+          zoneLabelOverridesScopes?: Record<TopologyMode, Record<string, TopologyZoneLabelOverrides>>;
+          snapshots?: TopologySnapshot[];
+        };
+        if (Array.isArray(doc.links)) topologyLinks = doc.links;
+        if (doc.layout && typeof doc.layout === "object") topologyLayout = doc.layout;
+        if (doc.layoutScopes && typeof doc.layoutScopes === "object")
+          topologyLayoutScopes = doc.layoutScopes as Record<TopologyMode, Record<string, TopologyLayout>>;
+        if (doc.zoneLabelOverridesScopes && typeof doc.zoneLabelOverridesScopes === "object")
+          topologyZoneLabelOverridesScopes = doc.zoneLabelOverridesScopes as Record<
+            TopologyMode,
+            Record<string, TopologyZoneLabelOverrides>
+          >;
+        if (Array.isArray(doc.snapshots)) topologySnapshots = doc.snapshots as TopologySnapshot[];
+        break;
+      }
+      case APP_KV_KEYS.system_config:
+        if (typeof value === "object") systemConfig = { ...systemConfig, ...(value as typeof systemConfig) };
+        break;
+      case APP_KV_KEYS.snmp_config:
+        if (typeof value === "object") snmpConfig = { ...snmpConfig, ...(value as typeof snmpConfig) };
+        break;
+      case APP_KV_KEYS.ldap_config:
+        if (typeof value === "object" && value && "admin" in value && "operator" in value) {
+          ldapConfig = { ...(value as typeof ldapConfig) };
+        }
+        break;
+      case APP_KV_KEYS.backup_config:
+        if (typeof value === "object") backupConfig = { ...backupConfig, ...(value as typeof backupConfig) };
+        break;
+      case APP_KV_KEYS.backup_history:
+        if (Array.isArray(value)) backupHistory = value as BackupHistoryItem[];
+        break;
+      case APP_KV_KEYS.discovery_profiles:
+        if (Array.isArray(value) && value.length) discoveryWatchProfiles = value as DiscoveryWatchProfile[];
+        break;
+      case APP_KV_KEYS.snmp_templates:
+        if (Array.isArray(value) && value.length) snmpTemplates = value as SnmpTemplate[];
+        break;
+      case APP_KV_KEYS.users:
+        if (Array.isArray(value) && value.length) {
+          users = value as LocalUser[];
+          migratePlaintextPasswords();
+        }
+        break;
+      case APP_KV_KEYS.inventory_meta:
+        if (typeof value === "object" && value) Object.assign(inventoryMeta, value as typeof inventoryMeta);
+        break;
+      case APP_KV_KEYS.automation_plans:
+        if (value && typeof value === "object") {
+          automationPlans.clear();
+          for (const [k, v] of Object.entries(value as Record<string, { id: string; createdAt: string; actor: string; plan: AutomationPlan }>)) {
+            automationPlans.set(k, v);
+          }
+        }
+        break;
+      case APP_KV_KEYS.automation_jobs:
+        if (value && typeof value === "object") {
+          automationJobs.clear();
+          for (const [k, v] of Object.entries(value as Record<string, AutomationJob>)) {
+            automationJobs.set(k, v);
+          }
+        }
+        break;
+      case APP_KV_KEYS.manual_discovery_jobs:
+        if (value && typeof value === "object") {
+          manualDiscoveryJobs.clear();
+          for (const [k, v] of Object.entries(value as Record<string, ManualDiscoveryJob>)) {
+            manualDiscoveryJobs.set(k, v);
+          }
+        }
+        break;
+      case APP_KV_KEYS.discovery_watch_run_jobs:
+        if (value && typeof value === "object") {
+          discoveryWatchRunJobs.clear();
+          for (const [k, v] of Object.entries(value as Record<string, DiscoveryWatchRunJob>)) {
+            discoveryWatchRunJobs.set(k, v);
+          }
+        }
+        break;
+      default:
+        break;
+    }
+  } catch (e) {
+    console.error(`[db] hydrate key=${key} failed:`, e instanceof Error ? e.message : e);
+  }
+}
+
+async function persistPgInventoryAndTopology(reason: string) {
+  if (!pgPool) return;
+  try {
+    await persistInventoryDevices(pgPool, inventory as InventoryRowPayload[]);
+    await upsertAppKv(pgPool, APP_KV_KEYS.inventory_meta, inventoryMeta);
+    await upsertAppKv(pgPool, APP_KV_KEYS.topology, buildTopologyDoc());
+    await publishAmqpJson("inventory.persisted", { reason, deviceCount: inventory.length });
+  } catch (e) {
+    console.error("[db] persist inventory/topology failed:", e instanceof Error ? e.message : e);
+  }
+}
+
+async function persistPgTopologyOnly(reason: string) {
+  if (!pgPool) return;
+  try {
+    await upsertAppKv(pgPool, APP_KV_KEYS.topology, buildTopologyDoc());
+    await publishAmqpJson("topology.persisted", { reason });
+  } catch (e) {
+    console.error("[db] persist topology failed:", e instanceof Error ? e.message : e);
+  }
+}
+
+async function persistPgConfigs(reason: string) {
+  if (!pgPool) return;
+  try {
+    await upsertAppKv(pgPool, APP_KV_KEYS.system_config, systemConfig);
+    await upsertAppKv(pgPool, APP_KV_KEYS.snmp_config, snmpConfig);
+    await upsertAppKv(pgPool, APP_KV_KEYS.ldap_config, ldapConfig);
+    await upsertAppKv(pgPool, APP_KV_KEYS.backup_config, backupConfig);
+    await publishAmqpJson("config.persisted", { reason });
+  } catch (e) {
+    console.error("[db] persist config bundle failed:", e instanceof Error ? e.message : e);
+  }
+}
+
+async function persistPgBackupHistory() {
+  if (!pgPool) return;
+  try {
+    await upsertAppKv(pgPool, APP_KV_KEYS.backup_history, backupHistory);
+  } catch (e) {
+    console.error("[db] persist backup history failed:", e instanceof Error ? e.message : e);
+  }
+}
+
+async function persistPgDiscoveryProfiles(reason: string) {
+  if (!pgPool) return;
+  try {
+    await upsertAppKv(pgPool, APP_KV_KEYS.discovery_profiles, discoveryWatchProfiles);
+    await publishAmqpJson("discovery.profiles.persisted", { reason });
+  } catch (e) {
+    console.error("[db] persist discovery profiles failed:", e instanceof Error ? e.message : e);
+  }
+}
+
+async function persistPgDiscoveryJobMaps() {
+  if (!pgPool) return;
+  try {
+    await upsertAppKv(pgPool, APP_KV_KEYS.manual_discovery_jobs, Object.fromEntries(manualDiscoveryJobs));
+    await upsertAppKv(pgPool, APP_KV_KEYS.discovery_watch_run_jobs, Object.fromEntries(discoveryWatchRunJobs));
+  } catch (e) {
+    console.error("[db] persist discovery job maps failed:", e instanceof Error ? e.message : e);
+  }
+}
+
+async function persistPgSnmpTemplates() {
+  if (!pgPool) return;
+  try {
+    await upsertAppKv(pgPool, APP_KV_KEYS.snmp_templates, snmpTemplates);
+  } catch (e) {
+    console.error("[db] persist snmp templates failed:", e instanceof Error ? e.message : e);
+  }
+}
+
+async function persistPgUsers() {
+  if (!pgPool) return;
+  try {
+    const safe = users.map(({ password, ...rest }) => {
+      void password;
+      return rest;
+    });
+    await upsertAppKv(pgPool, APP_KV_KEYS.users, safe);
+  } catch (e) {
+    console.error("[db] persist users failed:", e instanceof Error ? e.message : e);
+  }
+}
+
+async function persistPgAutomationMaps() {
+  if (!pgPool) return;
+  try {
+    await upsertAppKv(pgPool, APP_KV_KEYS.automation_plans, Object.fromEntries(automationPlans));
+    await upsertAppKv(pgPool, APP_KV_KEYS.automation_jobs, Object.fromEntries(automationJobs));
+    await publishAmqpJson("automation.state.persisted", { plans: automationPlans.size, jobs: automationJobs.size });
+  } catch (e) {
+    console.error("[db] persist automation maps failed:", e instanceof Error ? e.message : e);
+  }
+}
+
+async function connectAndHydratePostgres() {
+  pgPool = await connectPostgres();
+  if (!pgPool) return;
+  await ensureSchema(pgPool);
+  await hydrateFromDatabase(pgPool, {
+    onInventory: (rows) => {
+      inventory = rows as InventoryItem[];
+    },
+    onKv: (key, value) => applyPgKv(key, value),
+    onAuditLogs: (logs) => {
+      auditLogs = logs as AuditLog[];
+    },
+  });
+}
+
+async function reloadPersistenceAfterSetup() {
+  hydrateProcessEnvFromInstanceFileSync();
+  await shutdownPool(pgPool);
+  pgPool = null;
+  await connectAndHydratePostgres();
+}
+
 async function startServer() {
   const app = express();
   const server = http.createServer(app);
@@ -3575,9 +3845,13 @@ async function startServer() {
   const PORT = process.env.PORT || 3000;
   const isProd = process.env.NODE_ENV === "production";
 
+  await connectAndHydratePostgres();
+
   console.log(`Starting server on port ${PORT} (NODE_ENV=${process.env.NODE_ENV})`);
 
   app.use(express.json());
+
+  registerFirstRunSetupRoutes(app, { reloadPersistenceAfterSetup });
   
   // Helper: Role Check Middleware (server-side session only)
   const checkRole = (roles: string[]) => (req: express.Request, res: express.Response, next: express.NextFunction) => {
@@ -3636,6 +3910,7 @@ async function startServer() {
         if (processed > 0) {
           discoverySchedulerLastProcessed = processed;
           logAction(actor, "Discovery Watch Scheduled Run", `Profiles processed: ${processed}`, "inventory");
+          await persistPgDiscoveryProfiles("scheduler-tick");
         }
       } finally {
         discoveryRunLock = false;
@@ -3715,6 +3990,7 @@ async function startServer() {
     }
     const planId = `plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     automationPlans.set(planId, { id: planId, createdAt: new Date().toISOString(), actor, plan });
+    await persistPgAutomationMaps();
     logAction(actor, "AUTOMATION_PLAN", `Dry-run prepared ${previewSteps.length} step(s) for ${plan.scenario}`, "system");
     return res.json({ success: true, planId, summary: { total: previewSteps.length, unsupported: previewSteps.filter((s) => s.status === "unsupported").length }, steps: previewSteps });
   });
@@ -3790,44 +4066,49 @@ async function startServer() {
     };
     automationJobs.set(jobId, job);
     logAction(actor, "AUTOMATION_APPLY", `Job ${jobId} created (${steps.length} step(s))`, "system");
+    await persistPgAutomationMaps();
 
     void (async () => {
-      let index = 0;
-      while (index < job.steps.length) {
-        if (automationCancellation.has(job.id)) {
-          job.status = "cancelled";
-          job.cancelledAt = new Date().toISOString();
-          job.finishedAt = new Date().toISOString();
-          for (let i = index; i < job.steps.length; i += 1) {
-            if (job.steps[i].status === "pending") {
-              job.steps[i].status = "cancelled";
-              job.steps[i].message = "Cancelled by user";
-              job.steps[i].updatedAt = new Date().toISOString();
-              job.summary.cancelled += 1;
+      try {
+        let index = 0;
+        while (index < job.steps.length) {
+          if (automationCancellation.has(job.id)) {
+            job.status = "cancelled";
+            job.cancelledAt = new Date().toISOString();
+            job.finishedAt = new Date().toISOString();
+            for (let i = index; i < job.steps.length; i += 1) {
+              if (job.steps[i].status === "pending") {
+                job.steps[i].status = "cancelled";
+                job.steps[i].message = "Cancelled by user";
+                job.steps[i].updatedAt = new Date().toISOString();
+                job.summary.cancelled += 1;
+              }
             }
+            break;
           }
-          break;
+          const chunk = job.steps.slice(index, index + Math.max(1, Math.min(batchSize, concurrency)));
+          await Promise.all(chunk.map(async (s) => executeAutomationStep(job, s, retry)));
+          index += chunk.length;
+          job.summary.applied = job.steps.filter((s) => s.status === "applied").length;
+          job.summary.noop = job.steps.filter((s) => s.status === "noop").length;
+          job.summary.errors = job.steps.filter((s) => s.status === "error").length;
+          job.summary.unsupported = job.steps.filter((s) => s.status === "unsupported").length;
+          job.progress.done = job.steps.filter((s) => s.status !== "pending").length;
+          if (job.summary.errors >= errorThreshold) {
+            job.status = "failed";
+            job.error = `Error threshold exceeded (${job.summary.errors})`;
+            job.finishedAt = new Date().toISOString();
+            break;
+          }
         }
-        const chunk = job.steps.slice(index, index + Math.max(1, Math.min(batchSize, concurrency)));
-        await Promise.all(chunk.map(async (s) => executeAutomationStep(job, s, retry)));
-        index += chunk.length;
-        job.summary.applied = job.steps.filter((s) => s.status === "applied").length;
-        job.summary.noop = job.steps.filter((s) => s.status === "noop").length;
-        job.summary.errors = job.steps.filter((s) => s.status === "error").length;
-        job.summary.unsupported = job.steps.filter((s) => s.status === "unsupported").length;
-        job.progress.done = job.steps.filter((s) => s.status !== "pending").length;
-        if (job.summary.errors >= errorThreshold) {
-          job.status = "failed";
-          job.error = `Error threshold exceeded (${job.summary.errors})`;
+        if (!job.finishedAt) {
           job.finishedAt = new Date().toISOString();
-          break;
+          if (job.status === "running") {
+            job.status = job.summary.errors > 0 ? "failed" : "completed";
+          }
         }
-      }
-      if (!job.finishedAt) {
-        job.finishedAt = new Date().toISOString();
-        if (job.status === "running") {
-          job.status = job.summary.errors > 0 ? "failed" : "completed";
-        }
+      } finally {
+        await persistPgAutomationMaps();
       }
     })();
 
@@ -3846,13 +4127,14 @@ async function startServer() {
     return res.json({ job });
   });
 
-  app.post("/api/automation/jobs/:id/cancel", checkRole(["admin", "operator"]), (req, res) => {
+  app.post("/api/automation/jobs/:id/cancel", checkRole(["admin", "operator"]), async (req, res) => {
     const id = String(req.params.id || "");
     const job = automationJobs.get(id);
     if (!job) return res.status(404).json({ error: "Job not found" });
     if (job.status !== "running") return res.json({ success: true, status: job.status });
     automationCancellation.add(id);
     logAction(actorName(req), "AUTOMATION_CANCEL", `Cancel requested for ${id}`, "system");
+    await persistPgAutomationMaps();
     return res.json({ success: true });
   });
 
@@ -4522,7 +4804,7 @@ type MacSearchEvent = {
     });
   });
 
-  app.post("/api/config/system", checkRole(['admin']), (req, res) => {
+  app.post("/api/config/system", checkRole(['admin']), async (req, res) => {
     const actor = actorName(req);
     const incoming = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
     const patch: Record<string, unknown> = { ...incoming };
@@ -4539,6 +4821,7 @@ type MacSearchEvent = {
     }
     systemConfig = { ...systemConfig, ...patch };
     logAction(actor, 'System Config Update', `Updated system settings`, 'config');
+    await persistPgConfigs("system");
     res.json({ success: true, config: systemConfig });
   });
 
@@ -4556,11 +4839,12 @@ type MacSearchEvent = {
     res.json({ ldap: maskLdapForClient() });
   });
 
-  app.post("/api/config/ldap", checkRole(['admin']), (req, res) => {
+  app.post("/api/config/ldap", checkRole(['admin']), async (req, res) => {
     const actor = actorName(req);
     const body = req.body as { admin?: Partial<LdapRoleProfile>; operator?: Partial<LdapRoleProfile> };
     mergeLdapPasswords(body || {});
     logAction(actor, 'LDAP Config Update', 'Updated LDAP authentication profiles', 'config');
+    await persistPgConfigs("ldap");
     res.json({ success: true, ldap: maskLdapForClient() });
   });
 
@@ -4606,7 +4890,7 @@ type MacSearchEvent = {
     res.json(inventoryMeta);
   });
 
-  app.post("/api/inventory/meta", checkRole(['admin', 'operator']), (req, res) => {
+  app.post("/api/inventory/meta", checkRole(['admin', 'operator']), async (req, res) => {
     const body = req.body as {
       categories?: string[];
       subcategories?: string[];
@@ -4641,10 +4925,11 @@ type MacSearchEvent = {
       }
       inventoryMeta.models = next;
     }
+    await persistPgInventoryAndTopology("inventory-meta");
     res.json({ success: true, meta: inventoryMeta });
   });
 
-  app.post("/api/inventory/bulk", checkRole(['admin', 'operator']), (req, res) => {
+  app.post("/api/inventory/bulk", checkRole(['admin', 'operator']), async (req, res) => {
     const { ids, action, value } = req.body;
     const actor = actorName(req);
 
@@ -4666,6 +4951,7 @@ type MacSearchEvent = {
     }
 
     logAction(actor, 'Bulk Action', `Performed ${action} on ${ids.length} devices`, 'inventory');
+    await persistPgInventoryAndTopology("inventory-bulk");
     res.json({ success: true, count: ids.length });
   });
 
@@ -4772,7 +5058,7 @@ type MacSearchEvent = {
       );
   });
 
-  app.post("/api/inventory", checkRole(['admin', 'operator']), (req, res) => {
+  app.post("/api/inventory", checkRole(['admin', 'operator']), async (req, res) => {
     const sw = req.body;
     const actor = actorName(req);
     const category = String(sw.category || "Switch");
@@ -4796,10 +5082,11 @@ type MacSearchEvent = {
     inventory.push(newSwitch);
     rebuildTopologyFromInventory();
     logAction(actor, 'Add Device', `Registered new switch: ${newSwitch.name} (${newSwitch.ip})`, 'inventory');
+    await persistPgInventoryAndTopology("inventory-add");
     res.json(newSwitch);
   });
 
-  app.patch("/api/inventory/:id", checkRole(['admin', 'operator']), (req, res) => {
+  app.patch("/api/inventory/:id", checkRole(['admin', 'operator']), async (req, res) => {
     const actor = actorName(req);
     const index = inventory.findIndex(s => s.id === req.params.id);
     if (index === -1) return res.status(404).json({ error: "Device not found" });
@@ -4815,16 +5102,18 @@ type MacSearchEvent = {
     upsertInventoryMetaFromItem(inventory[index]);
     rebuildTopologyFromInventory();
     logAction(actor, 'Update Device', `Updated device configurations for: ${oldName}`, 'inventory');
+    await persistPgInventoryAndTopology("inventory-patch");
     res.json(inventory[index]);
   });
 
-  app.delete("/api/inventory/:id", checkRole(['admin']), (req, res) => {
+  app.delete("/api/inventory/:id", checkRole(['admin']), async (req, res) => {
     const actor = actorName(req);
     const sw = inventory.find(s => s.id === req.params.id);
     if (sw) {
       logAction(actor, 'Remove Device', `Deleted switch: ${sw.name} (${sw.ip})`, 'inventory');
       inventory = inventory.filter(s => s.id !== req.params.id);
       rebuildTopologyFromInventory();
+      await persistPgInventoryAndTopology("inventory-delete");
       res.json({ success: true });
     } else {
       res.status(404).json({ error: "Device not found" });
@@ -4848,6 +5137,7 @@ type MacSearchEvent = {
       const sid = makeSession(authUser);
       writeSessionCookie(res, sid, shouldUseSecureCookie(req, isProd));
       logAction(username || "unknown", "Login Success", "User authenticated successfully", "auth", requestIp);
+      await persistPgUsers();
       return res.json({ success: true, user: authUser });
     }
 
@@ -4901,7 +5191,7 @@ type MacSearchEvent = {
     return res.json({ success: true });
   });
 
-  app.post("/api/users", checkRole(['admin']), (req, res) => {
+  app.post("/api/users", checkRole(['admin']), async (req, res) => {
     const { username, password, role } = req.body;
     const actor = actorName(req);
     if (!username || !password) return res.status(400).json({ error: "Missing fields" });
@@ -4915,11 +5205,12 @@ type MacSearchEvent = {
     };
     users.push(newUser);
     logAction(actor, 'Create User', `Created new user: ${username} with role ${role}`, 'user_mgmt');
+    await persistPgUsers();
     const { passwordHash, ...safeUser } = newUser;
     res.json({ success: true, user: safeUser });
   });
 
-  app.patch("/api/users/:id", checkRole(['admin']), (req, res) => {
+  app.patch("/api/users/:id", checkRole(['admin']), async (req, res) => {
     const { role } = req.body;
     const actor = actorName(req);
     const user = users.find(u => u.id === req.params.id);
@@ -4928,10 +5219,11 @@ type MacSearchEvent = {
     const oldRole = user.role;
     if (role) user.role = role;
     logAction(actor, 'Update User Role', `Updated user ${user.username} role from ${oldRole} to ${role}`, 'user_mgmt');
+    await persistPgUsers();
     res.json({ success: true });
   });
 
-  app.post("/api/users/:id/password", checkRole(['admin']), (req, res) => {
+  app.post("/api/users/:id/password", checkRole(['admin']), async (req, res) => {
     const { password } = req.body;
     const actor = actorName(req);
     const user = users.find(u => u.id === req.params.id);
@@ -4942,16 +5234,18 @@ type MacSearchEvent = {
       delete user.password;
     }
     logAction(actor, 'Reset Password', `Reset password for user: ${user.username}`, 'user_mgmt');
+    await persistPgUsers();
     res.json({ success: true, message: "Password updated successfully" });
   });
 
-  app.delete("/api/users/:id", checkRole(['admin']), (req, res) => {
+  app.delete("/api/users/:id", checkRole(['admin']), async (req, res) => {
     const actor = actorName(req);
     const user = users.find(u => u.id === req.params.id);
     if (user) {
       logAction(actor, 'Delete User', `Deleted user: ${user.username}`, 'user_mgmt');
     }
     users = users.filter(u => u.id !== req.params.id);
+    await persistPgUsers();
     res.json({ success: true });
   });
 
@@ -5005,6 +5299,7 @@ type MacSearchEvent = {
         }
       }
       logAction(actor, trigger === "manual" ? "Discovery Watch Manual Run" : "Discovery Watch Scheduled Run", `Profiles processed: ${runs.length}`, "inventory");
+      await persistPgDiscoveryProfiles(trigger === "manual" ? "watch-manual" : "watch-batch");
       return { started: true, runs };
     } finally {
       discoveryRunLock = false;
@@ -5040,6 +5335,7 @@ type MacSearchEvent = {
     manualDiscoveryJobs.set(jobId, job);
     trimManualDiscoveryJobs();
     activeManualDiscoveryJobId = jobId;
+    void persistPgDiscoveryJobMaps();
 
     // Non-blocking run to avoid reverse-proxy timeouts on long subnets.
     (async () => {
@@ -5067,6 +5363,7 @@ type MacSearchEvent = {
       } finally {
         discoveryRunLock = false;
         if (activeManualDiscoveryJobId === jobId) activeManualDiscoveryJobId = null;
+        await persistPgDiscoveryJobMaps();
       }
     })();
 
@@ -5126,7 +5423,7 @@ type MacSearchEvent = {
     });
   });
 
-  app.post("/api/discovery/watch", checkRole(["admin", "operator"]), (req, res) => {
+  app.post("/api/discovery/watch", checkRole(["admin", "operator"]), async (req, res) => {
     const incoming = (req.body?.profiles || []) as Partial<DiscoveryWatchProfile>[];
     if (!Array.isArray(incoming)) return res.status(400).json({ error: "profiles must be an array" });
     discoveryWatchProfiles = incoming
@@ -5151,6 +5448,7 @@ type MacSearchEvent = {
       .filter(Boolean) as DiscoveryWatchProfile[];
     const actor = actorName(req);
     logAction(actor, "Discovery Watch Update", `Profiles saved: ${discoveryWatchProfiles.length}`, "inventory");
+    await persistPgDiscoveryProfiles("api-watch-save");
     res.json({ success: true, profiles: discoveryWatchProfiles });
   });
 
@@ -5180,6 +5478,7 @@ type MacSearchEvent = {
     discoveryWatchRunJobs.set(jobId, job);
     trimDiscoveryWatchRunJobs();
     activeManualWatchRunJobId = jobId;
+    void persistPgDiscoveryJobMaps();
 
     (async () => {
       try {
@@ -5220,6 +5519,7 @@ type MacSearchEvent = {
         }
       } finally {
         if (activeManualWatchRunJobId === jobId) activeManualWatchRunJobId = null;
+        await persistPgDiscoveryJobMaps();
       }
     })();
 
@@ -5314,7 +5614,7 @@ type MacSearchEvent = {
     });
   });
 
-  app.post("/api/topology/restore", checkRole(["admin", "operator"]), (req, res) => {
+  app.post("/api/topology/restore", checkRole(["admin", "operator"]), async (req, res) => {
     const id = String(req.body?.versionId || "").trim();
     const branch = String(req.body?.branch || "").trim();
     const topologyMode = normalizeTopologyMode(req.body?.topologyMode);
@@ -5340,6 +5640,7 @@ type MacSearchEvent = {
       );
     }
     logAction(actor, "Topology Restore", `Restored version ${snapshot.id}${branch ? ` (branch: ${branch})` : ""}`, "inventory");
+    await persistPgTopologyOnly("topology-restore");
     return res.json({
       success: true,
       restored: { id: snapshot.id, createdAt: snapshot.createdAt, reason: snapshot.reason },
@@ -5349,7 +5650,7 @@ type MacSearchEvent = {
     });
   });
 
-  app.post("/api/topology/undo", checkRole(["admin", "operator"]), (req, res) => {
+  app.post("/api/topology/undo", checkRole(["admin", "operator"]), async (req, res) => {
     const branch = String(req.body?.branch || "").trim();
     const topologyMode = normalizeTopologyMode(req.body?.topologyMode);
     const actor = actorName(req);
@@ -5379,6 +5680,7 @@ type MacSearchEvent = {
       );
     }
     logAction(actor, "Topology Undo", `Restored version ${snapshot.id}${branch ? ` (branch: ${branch})` : ""}`, "inventory");
+    await persistPgTopologyOnly("topology-undo");
     return res.json({
       success: true,
       restored: { id: snapshot.id, createdAt: snapshot.createdAt, reason: snapshot.reason },
@@ -5481,6 +5783,7 @@ type MacSearchEvent = {
         `Auto-built ${links.length} links from Trunk descriptions${branch ? ` (branch: ${branch})` : ""}`,
         "inventory"
       );
+      await persistPgTopologyOnly("topology-rebuild");
       return res.json({
         success: true,
         links: topologyLinks,
@@ -5512,7 +5815,7 @@ type MacSearchEvent = {
     }
   });
 
-  app.post("/api/inventory/branches/rename", checkRole(["admin", "operator"]), (req, res) => {
+  app.post("/api/inventory/branches/rename", checkRole(["admin", "operator"]), async (req, res) => {
     const from = String(req.body?.from || "").trim();
     const to = String(req.body?.to || "").trim();
     if (!from || !to) return res.status(400).json({ error: "from/to are required" });
@@ -5541,10 +5844,12 @@ type MacSearchEvent = {
 
     const actor = actorName(req);
     logAction(actor, "Rename Branch", `${from} -> ${to}, affected: ${renamed}`, "inventory");
+    await persistPgInventoryAndTopology("branch-rename");
+    await persistPgDiscoveryProfiles("branch-rename");
     return res.json({ success: true, renamed, from, to, branches: inventoryMeta.branches });
   });
 
-  app.post("/api/topology/zones/label", checkRole(["admin", "operator"]), (req, res) => {
+  app.post("/api/topology/zones/label", checkRole(["admin", "operator"]), async (req, res) => {
     const body = req.body as { zoneKey?: string; label?: string; branch?: string; topologyMode?: string };
     const zoneKey = String(body.zoneKey || "").trim();
     const label = String(body.label || "").trim();
@@ -5579,6 +5884,7 @@ type MacSearchEvent = {
       "inventory"
     );
 
+    await persistPgTopologyOnly("topology-zone-label");
     return res.json({
       success: true,
       zoneKey,
@@ -5587,7 +5893,7 @@ type MacSearchEvent = {
     });
   });
 
-  app.post("/api/topology/links", checkRole(["admin", "operator"]), (req, res) => {
+  app.post("/api/topology/links", checkRole(["admin", "operator"]), async (req, res) => {
     const body = req.body as {
       source?: string;
       target?: string;
@@ -5622,10 +5928,11 @@ type MacSearchEvent = {
       saveTopologySnapshot(actorName(req), "topology.link.add", branch || undefined);
       topologyLinks.push(ensureTopologyLinkId({ source, target, portA: portA || "N/A", portB: portB || "N/A", manual: true }));
     }
+    await persistPgTopologyOnly("topology-link-add");
     res.json({ success: true, links: topologyLinks });
   });
 
-  app.post("/api/topology/links/rename", checkRole(["admin", "operator"]), (req, res) => {
+  app.post("/api/topology/links/rename", checkRole(["admin", "operator"]), async (req, res) => {
     const body = req.body as {
       id?: string;
       source?: string;
@@ -5675,10 +5982,11 @@ type MacSearchEvent = {
       portB: newPortB || cur.portB,
       renamed: true,
     });
+    await persistPgTopologyOnly("topology-link-rename");
     return res.json({ success: true, links: topologyLinks });
   });
 
-  app.delete("/api/topology/links", checkRole(["admin", "operator"]), (req, res) => {
+  app.delete("/api/topology/links", checkRole(["admin", "operator"]), async (req, res) => {
     const body = req.body as { id?: string; source?: string; target?: string; portA?: string; portB?: string; branch?: string };
     const id = String(body.id || "").trim();
     const source = String(body.source || "").trim();
@@ -5701,10 +6009,11 @@ type MacSearchEvent = {
     const removed = before - nextLinks.length;
     if (removed > 0) saveTopologySnapshot(actorName(req), "topology.link.delete", branch || undefined);
     topologyLinks = nextLinks;
+    await persistPgTopologyOnly("topology-link-delete");
     res.json({ success: true, removed, links: topologyLinks });
   });
 
-  app.post("/api/topology/layout", checkRole(["admin", "operator"]), (req, res) => {
+  app.post("/api/topology/layout", checkRole(["admin", "operator"]), async (req, res) => {
     const body = req.body as {
       positions?: TopologyLayout;
       branch?: string;
@@ -5726,6 +6035,7 @@ type MacSearchEvent = {
     const hasIncoming = Object.keys(scopedPositions).length > 0;
     if (hasIncoming) saveTopologySnapshot(actor, "topology.layout.update", branch || undefined);
     const layout = mergeTopologyLayoutForScope(topologyMode, branch || undefined, scopedPositions, Boolean(body?.replace));
+    await persistPgTopologyOnly("topology-layout");
     res.json({ success: true, layout });
   });
 
@@ -5751,7 +6061,7 @@ type MacSearchEvent = {
     });
   });
 
-  app.post("/api/backup/config", checkRole(["admin", "operator"]), (req, res) => {
+  app.post("/api/backup/config", checkRole(["admin", "operator"]), async (req, res) => {
     const body = req.body as Partial<BackupConfig>;
     backupConfig.enabled = body.enabled === true;
     backupConfig.intervalHours = Math.max(1, Math.min(168, Number(body.intervalHours || backupConfig.intervalHours || 6)));
@@ -5768,6 +6078,7 @@ type MacSearchEvent = {
       password: String(body.credentials?.password || backupConfig.credentials?.password || ""),
     };
     logAction(actorName(req), "Backup Config Update", `enabled=${backupConfig.enabled}, interval=${backupConfig.intervalHours}h`, "config");
+    await persistPgConfigs("backup");
     return res.json({ success: true, config: backupConfig });
   });
 
@@ -5820,16 +6131,17 @@ type MacSearchEvent = {
     res.json({ templates: snmpTemplates });
   });
 
-  app.post("/api/snmp/templates", checkRole(['admin']), (req, res) => {
+  app.post("/api/snmp/templates", checkRole(['admin']), async (req, res) => {
     const tpl = req.body as SnmpTemplate;
     if (!tpl?.id || !tpl?.name || !Array.isArray(tpl.metrics)) {
       return res.status(400).json({ error: "Invalid template payload" });
     }
     snmpTemplates = [...snmpTemplates.filter((t) => t.id !== tpl.id), tpl];
+    await persistPgSnmpTemplates();
     res.json({ success: true, templates: snmpTemplates });
   });
 
-  app.delete("/api/snmp/templates/:id", checkRole(['admin']), (req, res) => {
+  app.delete("/api/snmp/templates/:id", checkRole(['admin']), async (req, res) => {
     const id = String(req.params.id || "");
     const before = snmpTemplates.length;
     snmpTemplates = snmpTemplates.filter((t) => t.id !== id);
@@ -5839,6 +6151,8 @@ type MacSearchEvent = {
     inventory = inventory.map((item) =>
       item.snmpTemplateId === id ? { ...item, snmpTemplateId: undefined } : item
     );
+    await persistPgSnmpTemplates();
+    await persistPgInventoryAndTopology("snmp-template-delete");
     return res.json({ success: true, templates: snmpTemplates });
   });
 
@@ -5902,7 +6216,7 @@ type MacSearchEvent = {
   });
 
   // API: SNMP Configuration
-  app.post("/api/config/snmp", checkRole(['admin']), (req, res) => {
+  app.post("/api/config/snmp", checkRole(['admin']), async (req, res) => {
     const { community, version, communities, timeoutMs, retries, port, macSearch } = req.body;
     const actor = actorName(req);
     if (typeof community === "string" && community.trim()) snmpConfig.community = community.trim();
@@ -5929,6 +6243,7 @@ type MacSearchEvent = {
       };
     }
     logAction(actor, 'SNMP Config Update', `Changed SNMP settings (Version: ${version})`, 'config');
+    await persistPgConfigs("snmp");
     res.json({ success: true, message: "SNMP configuration saved.", snmp: snmpConfig });
   });
 
@@ -6113,6 +6428,21 @@ type MacSearchEvent = {
   }
 
   const listenPort = process.env.PORT || PORT;
+
+  const shutdown = async () => {
+    console.log("\n[shutdown] Closing HTTP server and background connections…");
+    try {
+      await shutdownPool(pgPool);
+    } catch {
+      /* ignore */
+    }
+    await closeAmqp();
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 4000).unref();
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+
   server.listen(Number(listenPort), "0.0.0.0", () => {
     console.log(`\n================================================`);
     console.log(`NETNODE Backend running on http://0.0.0.0:${listenPort}`);

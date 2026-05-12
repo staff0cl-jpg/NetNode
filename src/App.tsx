@@ -9,6 +9,7 @@ import Settings from './components/Settings';
 import UserManagement from './components/UserManagement';
 import AuditLogs from './components/AuditLogs';
 import Login from './components/Login';
+import SetupWizard from './components/SetupWizard';
 import { Switch } from './types';
 import { LanguageProvider, useTranslation } from './lib/i18n';
 import { NotificationsProvider } from './lib/notifications';
@@ -36,6 +37,7 @@ const DEFAULT_BANNER: PublicBanner = {
 
 function AppContent() {
   const { t } = useTranslation();
+  const [setupRequired, setSetupRequired] = useState<boolean | null>(null);
   const [user, setUser] = useState<{ id: string, username: string, role: string } | null>(null);
   const [authBootstrapping, setAuthBootstrapping] = useState(true);
   const [activeTab, setActiveTab] = useState('inventory');
@@ -44,6 +46,22 @@ function AppContent() {
   const [sshTarget, setSshTarget] = useState<Switch | null>(null);
   const [banner, setBanner] = useState<PublicBanner>(DEFAULT_BANNER);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await fetch("/api/setup/status");
+        const data = await response.json();
+        if (!cancelled) setSetupRequired(!!data.needsSetup);
+      } catch {
+        if (!cancelled) setSetupRequired(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const fetchInventory = async () => {
     try {
@@ -69,6 +87,13 @@ function AppContent() {
   };
 
   React.useEffect(() => {
+    if (setupRequired === true) {
+      setAuthBootstrapping(false);
+    }
+  }, [setupRequired]);
+
+  React.useEffect(() => {
+    if (setupRequired !== false) return;
     const restoreSession = async () => {
       try {
         const response = await fetch('/api/auth/session', { credentials: 'include' });
@@ -89,7 +114,7 @@ function AppContent() {
       }
     };
     restoreSession();
-  }, []);
+  }, [setupRequired]);
 
   React.useEffect(() => {
     const fetchPublicConfig = async () => {
@@ -189,6 +214,18 @@ function AppContent() {
   React.useEffect(() => {
     setMobileSidebarOpen(false);
   }, [activeTab]);
+
+  if (setupRequired === null) {
+    return (
+      <div className="min-h-screen w-full bg-[#1a1b1e] flex items-center justify-center text-[#909296] text-sm font-mono">
+        {t('setupLoading')}
+      </div>
+    );
+  }
+
+  if (setupRequired) {
+    return <SetupWizard />;
+  }
 
   if (authBootstrapping) {
     return (

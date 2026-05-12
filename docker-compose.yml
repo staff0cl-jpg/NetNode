@@ -1,0 +1,28 @@
+# Optional stack for local development: PostgreSQL + RabbitMQ.
+# Usage: docker compose up -d
+# Then set DATABASE_URL=postgres://netnode:netnode@localhost:5432/netnode
+# and AMQP_URL=amqp://netnode:netnode@localhost:5672/
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: netnode
+      POSTGRES_PASSWORD: netnode
+      POSTGRES_DB: netnode
+    ports:
+      - "5432:5432"
+    volumes:
+      - netnode_pgdata:/var/lib/postgresql/data
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: netnode
+      RABBITMQ_DEFAULT_PASS: netnode
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+volumes:
+  netnode_pgdata:
