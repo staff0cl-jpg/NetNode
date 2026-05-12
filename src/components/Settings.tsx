@@ -3,6 +3,7 @@ import { Key, Shield, HardDrive, Database } from 'lucide-react';
 import { useTranslation } from '../lib/i18n';
 import { useNotifications } from '../lib/notifications';
 import { cn } from '../lib/utils';
+import { netnodeFetch } from '../lib/netnodeFetch';
 import { MAX_LOGO_SIZE_BYTES, processLogoWhiteToTransparent, validatePngFile } from '../lib/logo';
 import { friendlyErrorMessage, logTechnicalError, readApiPayload } from '../lib/friendlyErrors';
 
@@ -152,7 +153,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
   React.useEffect(() => {
     const fetchConfig = async () => {
       try {
-        const response = await fetch('/api/config/system', {
+        const response = await netnodeFetch('/api/config/system', {
           credentials: 'include',
         });
         const data = await response.json();
@@ -179,7 +180,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             errorThreshold: Number(data.config.automationDefaults.errorThreshold || 20),
           });
         }
-        const snmpResp = await fetch('/api/config/snmp', {
+        const snmpResp = await netnodeFetch('/api/config/snmp', {
           credentials: 'include',
         });
         if (snmpResp.ok) {
@@ -195,7 +196,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             });
           }
         }
-        const sshReadonlyResp = await fetch('/api/config/ssh-readonly', {
+        const sshReadonlyResp = await netnodeFetch('/api/config/ssh-readonly', {
           credentials: 'include',
         });
         if (sshReadonlyResp.ok) {
@@ -211,7 +212,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             password: '',
           }));
         }
-        const templateResp = await fetch('/api/snmp/templates', {
+        const templateResp = await netnodeFetch('/api/snmp/templates', {
           credentials: 'include',
         });
         if (templateResp.ok) {
@@ -220,7 +221,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             setSnmpTemplates(templateData.templates);
           }
         }
-        const invMetaResp = await fetch('/api/inventory/meta', {
+        const invMetaResp = await netnodeFetch('/api/inventory/meta', {
           credentials: 'include',
         });
         if (invMetaResp.ok) {
@@ -234,7 +235,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             modelsJson: JSON.stringify(inv.models || {}, null, 2)
           });
         }
-        const watchResp = await fetch('/api/discovery/watch', {
+        const watchResp = await netnodeFetch('/api/discovery/watch', {
           credentials: 'include',
         });
         if (watchResp.ok) {
@@ -243,7 +244,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
             setWatchProfiles(watchData.profiles);
           }
         }
-        const watchStatusResp = await fetch('/api/discovery/watch/status', {
+        const watchStatusResp = await netnodeFetch('/api/discovery/watch/status', {
           credentials: 'include',
         });
         if (watchStatusResp.ok) {
@@ -262,10 +263,10 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
     const timer = window.setInterval(async () => {
       try {
         const [watchResp, statusResp] = await Promise.all([
-          fetch('/api/discovery/watch', {
+          netnodeFetch('/api/discovery/watch', {
             credentials: 'include',
           }),
-          fetch('/api/discovery/watch/status', {
+          netnodeFetch('/api/discovery/watch/status', {
             credentials: 'include',
           })
         ]);
@@ -288,7 +289,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
     if (!isAdmin) return;
     const loadLdap = async () => {
       try {
-        const response = await fetch('/api/config/ldap', {
+        const response = await netnodeFetch('/api/config/ldap', {
           credentials: 'include',
         });
         const data = await response.json();
@@ -307,7 +308,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
 
   const saveLdapProfiles = async () => {
     try {
-      const response = await fetch('/api/config/ldap', {
+      const response = await netnodeFetch('/api/config/ldap', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -335,7 +336,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
     automationDefaults?: any;
   }) => {
     try {
-      await fetch('/api/config/system', {
+      await netnodeFetch('/api/config/system', {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -420,7 +421,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         body.testUsername = ldapTestUser.trim();
         body.testPassword = ldapTestPassword;
       }
-      const response = await fetch('/api/config/ldap/test', {
+      const response = await netnodeFetch('/api/config/ldap/test', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -446,7 +447,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       branch: String(discoveryConfig.branch || '').trim() || 'ULN',
     };
     try {
-      const response = await fetch('/api/discovery/start', {
+      const response = await netnodeFetch('/api/discovery/start', {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -470,7 +471,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       const maxAttempts = 180; // ~6 minutes at 2s polling
       const poll = async () => {
         attempts += 1;
-        const statusResp = await fetch(`/api/discovery/start/status/${encodeURIComponent(jobId)}`, {
+        const statusResp = await netnodeFetch(`/api/discovery/start/status/${encodeURIComponent(jobId)}`, {
           credentials: 'include',
         });
         const statusData = await readApiPayload(statusResp, 'Discovery status check failed');
@@ -516,7 +517,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
 
   const saveWatchProfiles = async () => {
     try {
-      const response = await fetch('/api/discovery/watch', {
+      const response = await netnodeFetch('/api/discovery/watch', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -537,7 +538,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
 
   const runWatchNow = async (profileId?: string) => {
     try {
-      const response = await fetch('/api/discovery/watch/run', {
+      const response = await netnodeFetch('/api/discovery/watch/run', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -562,7 +563,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
       const maxAttempts = 180; // ~6 minutes at 2s polling
       const poll = async () => {
         attempts += 1;
-        const statusResp = await fetch(`/api/discovery/watch/run/status/${encodeURIComponent(jobId)}`, {
+        const statusResp = await netnodeFetch(`/api/discovery/watch/run/status/${encodeURIComponent(jobId)}`, {
           credentials: 'include',
         });
         const statusData = await readApiPayload(statusResp, 'Discovery watch status check failed');
@@ -572,7 +573,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
 
         if (Array.isArray(statusData.profiles)) setWatchProfiles(statusData.profiles);
         try {
-          const watchResp = await fetch('/api/discovery/watch/status', {
+          const watchResp = await netnodeFetch('/api/discovery/watch/status', {
             credentials: 'include',
           });
           if (watchResp.ok) setWatchStatus(await watchResp.json());
@@ -625,7 +626,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
         .split(',')
         .map((v) => v.trim())
         .filter(Boolean);
-      const response = await fetch('/api/config/snmp', {
+      const response = await netnodeFetch('/api/config/snmp', {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -652,7 +653,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
 
   const handleSaveSshReadonly = async () => {
     try {
-      const response = await fetch('/api/config/ssh-readonly', {
+      const response = await netnodeFetch('/api/config/ssh-readonly', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -686,7 +687,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
   const handleDeleteTemplate = async (id: string) => {
     if (!confirm(`Delete template ${id}?`)) return;
     try {
-      const response = await fetch(`/api/snmp/templates/${id}`, {
+      const response = await netnodeFetch(`/api/snmp/templates/${id}`, {
         method: 'DELETE',
       });
       const data = await response.json();
@@ -709,7 +710,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
   const handleSaveInventoryMeta = async () => {
     try {
       const models = JSON.parse(inventoryMetaEditor.modelsJson || '{}');
-      const response = await fetch('/api/inventory/meta', {
+      const response = await netnodeFetch('/api/inventory/meta', {
         method: 'POST',
         credentials: 'include',
         headers: {
@@ -766,7 +767,7 @@ const Settings: React.FC<SettingsProps> = ({ role, username }) => {
     }
 
     try {
-      const response = await fetch('/api/snmp/templates', {
+      const response = await netnodeFetch('/api/snmp/templates', {
         method: 'POST',
         credentials: 'include',
         headers: {

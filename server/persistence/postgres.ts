@@ -58,6 +58,8 @@ export async function ensureSchema(pool: Pool): Promise<void> {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
 
+    CREATE INDEX IF NOT EXISTS inventory_device_updated_at_idx ON inventory_device (updated_at DESC);
+
     CREATE TABLE IF NOT EXISTS app_kv (
       key TEXT PRIMARY KEY,
       value JSONB NOT NULL,
@@ -116,6 +118,32 @@ export async function upsertAppKv(pool: Pool, key: string, value: unknown): Prom
      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
     [key, JSON.stringify(value ?? null)]
   );
+}
+
+/** Atomically persist multiple app_kv rows (single BEGIN/COMMIT). */
+export async function upsertAppKvMany(pool: Pool, entries: { key: string; value: unknown }[]): Promise<void> {
+  if (entries.length === 0) return;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    for (const { key, value } of entries) {
+      await client.query(
+        `INSERT INTO app_kv (key, value, updated_at) VALUES ($1, $2::jsonb, now())
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+        [key, JSON.stringify(value ?? null)]
+      );
+    }
+    await client.query("COMMIT");
+  } catch (e) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      /* ignore */
+    }
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 export async function readAppKv(pool: Pool, key: string): Promise<unknown | null> {

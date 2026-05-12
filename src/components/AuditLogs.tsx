@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useTranslation } from '../lib/i18n';
 import { History, Shield, User, Database, Settings, LogIn, Search, Filter } from 'lucide-react';
 import { cn } from '../lib/utils';
+import { netnodeFetch } from '../lib/netnodeFetch';
 
 interface AuditLog {
   id: string;
@@ -34,7 +35,7 @@ const AuditLogs: React.FC<{ role?: string, username?: string }> = ({ role, usern
 
   const fetchLogs = async () => {
     try {
-      const response = await fetch('/api/audit-logs', {
+      const response = await netnodeFetch('/api/audit-logs', {
         headers: { 
         }
       });

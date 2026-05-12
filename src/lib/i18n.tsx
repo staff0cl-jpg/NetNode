@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState } from 'react';
+import { netnodeFetch } from './netnodeFetch';
 
 type Language = 'ru' | 'en';
 
@@ -758,7 +759,7 @@ export const LanguageProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     // Only fetch server default if user hasn't set an explicit preference
     const userPref = localStorage.getItem('netnode_lang');
     if (!userPref) {
-      fetch('/api/config/public')
+      netnodeFetch('/api/config/public')
         .then(res => res.json())
         .then(data => {
           if (data && data.defaultLanguage) {

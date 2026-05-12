@@ -5,6 +5,7 @@ import { Switch } from '../types';
 import { useTranslation } from '../lib/i18n';
 import { deriveZoneKey } from '../lib/zoneKey';
 import { useNotifications } from '../lib/notifications';
+import { netnodeFetch } from '../lib/netnodeFetch';
 
 const safeErrorText = (value: unknown, fallback = 'Unknown error') =>
   String(value || fallback)
@@ -581,7 +582,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     let cancelled = false;
     (async () => {
       try {
-        const response = await fetch(`/api/topology/links${topologyScopeQuery(topologyMode, selectedRegion || undefined)}`, {
+        const response = await netnodeFetch(`/api/topology/links${topologyScopeQuery(topologyMode, selectedRegion || undefined)}`, {
           credentials: 'include',
         });
         const data: {
@@ -605,7 +606,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
 
   const refreshTopologyVersions = React.useCallback(async () => {
     try {
-      const response = await fetch('/api/topology/versions', {
+      const response = await netnodeFetch('/api/topology/versions', {
         credentials: 'include',
       });
       if (!response.ok) return;
@@ -628,7 +629,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     try {
       setPreviewLoading(true);
       const query = topologyScopeQuery(topologyMode, selectedRegion || undefined);
-      const response = await fetch(`/api/topology/versions/${encodeURIComponent(versionId)}/preview${query}`, {
+      const response = await netnodeFetch(`/api/topology/versions/${encodeURIComponent(versionId)}/preview${query}`, {
         credentials: 'include',
       });
       const data = await response.json().catch(() => null);
@@ -649,7 +650,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     }
     try {
       setRestoreLoading(true);
-      const response = await fetch('/api/topology/restore', {
+      const response = await netnodeFetch('/api/topology/restore', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -690,7 +691,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       const controller = new AbortController();
       const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
       try {
-        return await fetch(input, { credentials: "include", ...init, signal: controller.signal });
+        return await netnodeFetch(input, { ...init, signal: controller.signal });
       } finally {
         window.clearTimeout(timeoutId);
       }
@@ -746,7 +747,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     } catch (error) {
       const isTimeout = error instanceof DOMException && error.name === 'AbortError';
       if (!isTimeout) throw error;
-      const response = await fetch(`/api/topology/links${topologyScopeQuery(topologyMode, selectedRegion || undefined)}`, {
+      const response = await netnodeFetch(`/api/topology/links${topologyScopeQuery(topologyMode, selectedRegion || undefined)}`, {
         credentials: 'include',
       });
       const data: {
@@ -854,7 +855,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     const currentLabel = String(zoneLabelOverrides[zoneKey] || '').trim();
     if (currentLabel === nextLabel) return;
     try {
-      const response = await fetch('/api/topology/zones/label', {
+      const response = await netnodeFetch('/api/topology/zones/label', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -883,7 +884,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       return;
     }
     try {
-      const response = await fetch('/api/topology/undo', {
+      const response = await netnodeFetch('/api/topology/undo', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -942,7 +943,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     );
     setSavedLayout((prev) => ({ ...prev, [id]: { x, y } }));
     try {
-      await fetch('/api/topology/layout', {
+      await netnodeFetch('/api/topology/layout', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -958,7 +959,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     async (positions: Record<string, { x: number; y: number }>) => {
       if (!Object.keys(positions).length) return;
       try {
-        await fetch('/api/topology/layout', {
+        await netnodeFetch('/api/topology/layout', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -1005,7 +1006,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     if (!source || !target || source === target) return;
     try {
       const isFcMode = topologyMode === 'fc';
-      const res = await fetch('/api/topology/links', {
+      const res = await netnodeFetch('/api/topology/links', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1031,7 +1032,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   const handleDeleteLink = async (link: TopoLink) => {
     if (!canEditTopology) return;
     try {
-      const res = await fetch('/api/topology/links', {
+      const res = await netnodeFetch('/api/topology/links', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...link, branch: selectedRegion || undefined }),
@@ -1050,7 +1051,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     if (!canEditTopology) return;
     const nextPortA = String(nextComment || '').trim();
     try {
-      const res = await fetch('/api/topology/links/rename', {
+      const res = await netnodeFetch('/api/topology/links/rename', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1347,7 +1348,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
       return;
     }
     try {
-      const resp = await fetch('/api/inventory/branches/rename', {
+      const resp = await netnodeFetch('/api/inventory/branches/rename', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

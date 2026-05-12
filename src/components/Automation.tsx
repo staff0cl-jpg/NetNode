@@ -3,6 +3,7 @@ import { Bot, PlayCircle, CheckCircle2, ListChecks, RefreshCw, Square, Shield, H
 import { useTranslation } from '../lib/i18n';
 import { useNotifications } from '../lib/notifications';
 import { cn } from '../lib/utils';
+import { netnodeFetch } from '../lib/netnodeFetch';
 import { friendlyErrorMessage, logTechnicalError, readApiPayload as readFriendlyApiPayload } from '../lib/friendlyErrors';
 
 const safeErrorText = (value: unknown, fallback = 'Unknown error') =>
@@ -351,7 +352,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
 
   const fetchInventory = React.useCallback(async () => {
     try {
-      const response = await fetch('/api/inventory', { headers });
+      const response = await netnodeFetch('/api/inventory', { headers });
       if (!response.ok) return;
       const data = await response.json();
       setInventory(Array.isArray(data) ? data : []);
@@ -362,7 +363,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
 
   const fetchInventoryMeta = React.useCallback(async () => {
     try {
-      const response = await fetch('/api/inventory/meta', { headers });
+      const response = await netnodeFetch('/api/inventory/meta', { headers });
       if (!response.ok) return;
       const data = await response.json();
       setInventoryMeta(data && typeof data === 'object' ? data : {});
@@ -374,7 +375,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
   const fetchJobs = React.useCallback(async () => {
     setJobsLoading(true);
     try {
-      const response = await fetch('/api/automation/jobs', { headers });
+      const response = await netnodeFetch('/api/automation/jobs', { headers });
       const data = await response.json();
       if (!response.ok) {
         setErrorText(data?.error || t('automationLoadJobsFailed'));
@@ -392,7 +393,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
     async (jobId: string) => {
       if (!jobId) return;
       try {
-        const response = await fetch(`/api/automation/jobs/${encodeURIComponent(jobId)}`, { headers });
+        const response = await netnodeFetch(`/api/automation/jobs/${encodeURIComponent(jobId)}`, { headers });
         const data = await response.json();
         if (!response.ok) {
           setErrorText(data?.error || t('automationLoadJobDetailsFailed'));
@@ -435,7 +436,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
     setErrorText('');
     setDryRunLoading(true);
     try {
-      const response = await fetch('/api/automation/plans/dry-run', {
+      const response = await netnodeFetch('/api/automation/plans/dry-run', {
         method: 'POST',
         headers,
         body: JSON.stringify(buildPlan()),
@@ -459,7 +460,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
     setErrorText('');
     setApplyLoading(true);
     try {
-      const response = await fetch('/api/automation/plans/apply', {
+      const response = await netnodeFetch('/api/automation/plans/apply', {
         method: 'POST',
         headers,
         body: JSON.stringify(dryRunPlanId ? { planId: dryRunPlanId } : { plan: buildPlan() }),
@@ -483,7 +484,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
 
   const cancelJob = async (jobId: string) => {
     try {
-      await fetch(`/api/automation/jobs/${encodeURIComponent(jobId)}/cancel`, {
+      await netnodeFetch(`/api/automation/jobs/${encodeURIComponent(jobId)}/cancel`, {
         method: 'POST',
         headers,
       });
@@ -510,7 +511,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
                 .filter((d) => String(d.branch || '').trim().toLowerCase() === normalizedBranch)
                 .map((d) => d.id)
             : undefined;
-      const response = await fetch('/api/automation/mac-search', {
+      const response = await netnodeFetch('/api/automation/mac-search', {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -573,7 +574,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
   React.useEffect(() => {
     const loadEnterpriseConfig = async () => {
       try {
-        const snmpResp = await fetch('/api/config/snmp', { headers });
+        const snmpResp = await netnodeFetch('/api/config/snmp', { headers });
         if (snmpResp.ok) {
           const snmpData = await snmpResp.json();
           if (snmpData.snmp) {
@@ -612,8 +613,8 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
           }
         }
         const [backupConfigResp, backupHistoryResp] = await Promise.all([
-          fetch('/api/backup/config', { headers }),
-          fetch('/api/backup/history', { headers }),
+          netnodeFetch('/api/backup/config', { headers }),
+          netnodeFetch('/api/backup/history', { headers }),
         ]);
         if (backupConfigResp.ok) {
           const backupData = await backupConfigResp.json();
@@ -643,12 +644,12 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
 
   const handleSaveMacOidConfig = async () => {
     try {
-      const currentSnmpResp = await fetch('/api/config/snmp', { headers });
+      const currentSnmpResp = await netnodeFetch('/api/config/snmp', { headers });
       const currentData = currentSnmpResp.ok ? await currentSnmpResp.json() : {};
       const currentSnmp = currentData.snmp || {};
       const voiceOuiEntries = snmpConfig.macSearch.voiceOuiEntries;
       const voiceOuiPrefixes = voiceOuiEntries.map((entry) => entry.ouiAddress);
-      const response = await fetch('/api/config/snmp', {
+      const response = await netnodeFetch('/api/config/snmp', {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -719,7 +720,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
 
   const saveBackupConfig = async () => {
     try {
-      const response = await fetch('/api/backup/config', {
+      const response = await netnodeFetch('/api/backup/config', {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -752,7 +753,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
 
   const runBackupNow = async () => {
     try {
-      const response = await fetch('/api/backup/run', {
+      const response = await netnodeFetch('/api/backup/run', {
         method: 'POST',
         headers,
       });
@@ -763,7 +764,7 @@ const Automation: React.FC<AutomationProps> = ({ role, username }) => {
         return;
       }
       notifyInfo(t('automationBackupJobStarted'));
-      const historyResp = await fetch('/api/backup/history', { headers });
+      const historyResp = await netnodeFetch('/api/backup/history', { headers });
       if (historyResp.ok) {
         const historyData = await historyResp.json();
         setBackupRuns(Array.isArray(historyData.runs) ? historyData.runs : []);

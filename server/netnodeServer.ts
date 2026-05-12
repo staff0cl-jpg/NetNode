@@ -1,4 +1,5 @@
 import express from "express";
+/// <reference path="./types/express-netnode.d.ts" />
 import { createServer as createViteServer } from "vite";
 import { Server } from "socket.io";
 import http from "http";
@@ -20,6 +21,7 @@ import {
   persistInventoryDevices,
   shutdownPool,
   upsertAppKv,
+  upsertAppKvMany,
 } from "./persistence/postgres.js";
 import { closeAmqp, publishAmqpJson } from "./messaging/broker.js";
 import { hydrateProcessEnvFromInstanceFileSync } from "./setup/instanceFile.js";
@@ -31,10 +33,13 @@ import { materialFromUserPassword, readPasswordMaterial, type PasswordMaterial }
 import type { InventoryItem } from "./inventory/inventoryTypes.js";
 import { evaluateInventoryWarnings } from "./inventory/warnings.js";
 import { applySecurityMiddleware, createLoginRateLimiter } from "./middleware/security.js";
+import { csrfProtectionMiddleware } from "./middleware/csrf.js";
 import { registerInventoryHttpRoutes } from "./routes/inventoryHttp.js";
+import { discoveryStartBodySchema, discoveryWatchSaveBodySchema } from "./validation/discovery.js";
+import { createUserBodySchema, loginBodySchema, patchUserBodySchema, resetPasswordBodySchema } from "./validation/auth.js";
 import {
   clearSessionCookie,
-  makeSession,
+  createSession,
   pruneExpiredSessions,
   readSession,
   readSessionFromCookieHeader,
@@ -42,6 +47,8 @@ import {
   shouldUseSecureCookie,
   writeSessionCookie,
 } from "./session/cookieSession.js";
+import { attachNetnodeSession } from "./session/sessionMiddleware.js";
+import { initSessionRuntime, shutdownSessionRuntime } from "./session/sessionRuntime.js";
 
 // In-memory state (empty by default; devices come from discovery or manual registration)
 let inventory: InventoryItem[] = [];
@@ -656,6 +663,20 @@ async function forEachWithLimit<T>(items: T[], limit: number, worker: (item: T, 
     }
   });
   await Promise.all(jobs);
+}
+
+async function mapWithConcurrency<T, R>(items: T[], limit: number, mapper: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let cursor = 0;
+  const safeLimit = Math.max(1, Math.min(limit, items.length || 1));
+  const jobs = Array.from({ length: safeLimit }, async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await mapper(items[index]!, index);
+    }
+  });
+  await Promise.all(jobs);
+  return results;
 }
 
 function safeErrorDetail(error: unknown, fallback = "Unknown error"): string {
@@ -1506,8 +1527,8 @@ function checkTcpPort(host: string, port: number, timeoutMs: number): Promise<bo
 }
 
 async function runDiscoveryScan(input: DiscoveryScanInput): Promise<DiscoveryScanSummary> {
-  const MAX_TOTAL = 1024;
-  const CONCURRENCY = 32;
+  const MAX_TOTAL = Math.max(64, Math.min(16_384, Number(process.env.NETNODE_DISCOVERY_MAX_IPS) || 1024));
+  const CONCURRENCY = Math.max(4, Math.min(128, Number(process.env.NETNODE_DISCOVERY_CONCURRENCY) || 32));
   const protocol = normalizeProtocol(input.protocol);
   const city = String(input.city || "Ульяновск").trim() || "Ульяновск";
   const zone = String(input.zone || "Core").trim() || "Core";
@@ -3255,6 +3276,11 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
     const pb = String(b.portA || "");
     return pa.localeCompare(pb);
   });
+  const directedEdgeBest = new Map<string, DirectedTopologyCandidate>();
+  for (const d of sortedDirected) {
+    const dk = `${d.source}::${d.target}`;
+    if (!directedEdgeBest.has(dk)) directedEdgeBest.set(dk, d);
+  }
   const used = new Set<string>();
   const out: TopologyLink[] = [];
   for (const d of sortedDirected) {
@@ -3263,8 +3289,7 @@ async function inferTopologyLinksFromTrunkDescriptions(branch?: string): Promise
     const targetDevice = byId.get(d.target);
     if (!sourceDevice || !targetDevice) continue;
     const isFcPair = d.isFc || (isFcSwitch(sourceDevice) && isFcSwitch(targetDevice));
-    const reverseCandidates = sortedDirected.filter((x) => x.source === d.target && x.target === d.source);
-    const reverse = reverseCandidates[0];
+    const reverse = directedEdgeBest.get(`${d.target}::${d.source}`);
     const portAForKey = d.source <= d.target ? d.portA : reverse?.portA || "";
     const portBForKey = d.source <= d.target ? reverse?.portA || "" : d.portA;
     // IP topology is intentionally one logical edge per pair; FC mode can keep real parallel port links.
@@ -3506,8 +3531,10 @@ async function persistPgInventoryAndTopology(reason: string) {
   if (!pgPool) return;
   try {
     await persistInventoryDevices(pgPool, inventory as InventoryRowPayload[]);
-    await upsertAppKv(pgPool, APP_KV_KEYS.inventory_meta, inventoryMeta);
-    await upsertAppKv(pgPool, APP_KV_KEYS.topology, buildTopologyDoc());
+    await upsertAppKvMany(pgPool, [
+      { key: APP_KV_KEYS.inventory_meta, value: inventoryMeta },
+      { key: APP_KV_KEYS.topology, value: buildTopologyDoc() },
+    ]);
     await publishAmqpJson("inventory.persisted", { reason, deviceCount: inventory.length });
   } catch (e) {
     console.error("[db] persist inventory/topology failed:", e instanceof Error ? e.message : e);
@@ -3527,10 +3554,12 @@ async function persistPgTopologyOnly(reason: string) {
 async function persistPgConfigs(reason: string) {
   if (!pgPool) return;
   try {
-    await upsertAppKv(pgPool, APP_KV_KEYS.system_config, systemConfig);
-    await upsertAppKv(pgPool, APP_KV_KEYS.snmp_config, snmpConfig);
-    await upsertAppKv(pgPool, APP_KV_KEYS.ldap_config, ldapConfig);
-    await upsertAppKv(pgPool, APP_KV_KEYS.backup_config, backupConfig);
+    await upsertAppKvMany(pgPool, [
+      { key: APP_KV_KEYS.system_config, value: systemConfig },
+      { key: APP_KV_KEYS.snmp_config, value: snmpConfig },
+      { key: APP_KV_KEYS.ldap_config, value: ldapConfig },
+      { key: APP_KV_KEYS.backup_config, value: backupConfig },
+    ]);
     await publishAmqpJson("config.persisted", { reason });
   } catch (e) {
     console.error("[db] persist config bundle failed:", e instanceof Error ? e.message : e);
@@ -3559,8 +3588,10 @@ async function persistPgDiscoveryProfiles(reason: string) {
 async function persistPgDiscoveryJobMaps() {
   if (!pgPool) return;
   try {
-    await upsertAppKv(pgPool, APP_KV_KEYS.manual_discovery_jobs, Object.fromEntries(manualDiscoveryJobs));
-    await upsertAppKv(pgPool, APP_KV_KEYS.discovery_watch_run_jobs, Object.fromEntries(discoveryWatchRunJobs));
+    await upsertAppKvMany(pgPool, [
+      { key: APP_KV_KEYS.manual_discovery_jobs, value: Object.fromEntries(manualDiscoveryJobs) },
+      { key: APP_KV_KEYS.discovery_watch_run_jobs, value: Object.fromEntries(discoveryWatchRunJobs) },
+    ]);
   } catch (e) {
     console.error("[db] persist discovery job maps failed:", e instanceof Error ? e.message : e);
   }
@@ -3591,8 +3622,10 @@ async function persistPgUsers() {
 async function persistPgAutomationMaps() {
   if (!pgPool) return;
   try {
-    await upsertAppKv(pgPool, APP_KV_KEYS.automation_plans, Object.fromEntries(automationPlans));
-    await upsertAppKv(pgPool, APP_KV_KEYS.automation_jobs, Object.fromEntries(automationJobs));
+    await upsertAppKvMany(pgPool, [
+      { key: APP_KV_KEYS.automation_plans, value: Object.fromEntries(automationPlans) },
+      { key: APP_KV_KEYS.automation_jobs, value: Object.fromEntries(automationJobs) },
+    ]);
     await publishAmqpJson("automation.state.persisted", { plans: automationPlans.size, jobs: automationJobs.size });
   } catch (e) {
     console.error("[db] persist automation maps failed:", e instanceof Error ? e.message : e);
@@ -3603,8 +3636,8 @@ async function refreshInventorySnmpMetrics(): Promise<void> {
   if (!inventory.length || inventoryMetricsRunLock) return;
   inventoryMetricsRunLock = true;
   try {
-    const next = await Promise.all(
-      inventory.map(async (item) => {
+    const conc = Math.max(1, Math.min(64, Number(process.env.NETNODE_INVENTORY_SNMP_CONCURRENCY) || 16));
+    const next = await mapWithConcurrency(inventory, conc, async (item) => {
         const probe = await getSnmpProbe(item.ip, 900);
         if (!probe.ok) {
           const warning = evaluateInventoryWarnings({
@@ -3679,8 +3712,7 @@ async function refreshInventorySnmpMetrics(): Promise<void> {
           cpuLoad,
           trunkDownCount,
         };
-      })
-    );
+    });
     const prev = inventory;
     let dirty = next.length !== prev.length;
     if (!dirty) {
@@ -3745,13 +3777,16 @@ export async function startServer() {
   const loginLimiter = createLoginRateLimiter();
 
   await connectAndHydratePostgres();
+  await initSessionRuntime();
 
   console.log(`Starting server on port ${PORT} (NODE_ENV=${process.env.NODE_ENV})`);
 
-  app.use(express.json());
+  const jsonBodyLimitMb = Math.max(0.25, Math.min(5, Number(process.env.NETNODE_JSON_BODY_LIMIT_MB) || 1));
+  app.use(express.json({ limit: `${jsonBodyLimitMb}mb` }));
 
   registerFirstRunSetupRoutes(app, { reloadPersistenceAfterSetup });
-  
+  app.use(attachNetnodeSession());
+  app.use(csrfProtectionMiddleware());
   // Helper: Role Check Middleware (server-side session only)
   const checkRole = (roles: string[]) => (req: express.Request, res: express.Response, next: express.NextFunction) => {
     const user = authFromRequest(req);
@@ -3843,8 +3878,9 @@ export async function startServer() {
   console.log(`[inventory] SNMP metrics background refresh every ${inventorySnmpIntervalMs}ms (NETNODE_INVENTORY_SNMP_INTERVAL_MS)`);
 
   setInterval(() => {
-    const n = pruneExpiredSessions();
-    if (n > 0) console.log(`[session] pruned ${n} expired session(s)`);
+    void pruneExpiredSessions().then((n) => {
+      if (n > 0) console.log(`[session] pruned ${n} expired session(s)`);
+    });
   }, 60_000);
 
   // API: Audit Logs
@@ -4827,36 +4863,41 @@ type MacSearchEvent = {
   });
 
   app.post("/api/auth/login", loginLimiter, async (req, res) => {
-    const { username, password } = req.body as { username?: string; password?: string };
+    const parsed = loginBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      const msg = parsed.error.issues.map((i) => i.message).join("; ");
+      return res.status(400).json({ success: false, message: msg || "Invalid request body" });
+    }
+    const { username, password } = parsed.data;
     const requestIp = getRequestIp(req);
 
     const user = users.find((u) => u.username === username && password && verifyLocalPassword(u, password));
     if (user) {
       const authUser = { id: user.id, username: user.username, role: user.role };
       user.lastLogin = new Date().toISOString();
-      const sid = makeSession(authUser);
+      const { sessionId: sid, csrfToken } = await createSession(authUser);
       writeSessionCookie(res, sid, shouldUseSecureCookie(req, isProd));
       logAction(username || "unknown", "Login Success", "User authenticated successfully", "auth", requestIp);
       await persistPgUsers();
-      return res.json({ success: true, user: authUser });
+      return res.json({ success: true, user: authUser, csrfToken });
     }
 
     if (username && password) {
       const adminOk = await verifyLdapLogin(ldapConfig.admin, username, password);
       if (adminOk) {
         const authUser = { id: `ldap-admin:${username}`, username, role: "admin" };
-        const sid = makeSession(authUser);
+        const { sessionId: sid, csrfToken } = await createSession(authUser);
         writeSessionCookie(res, sid, shouldUseSecureCookie(req, isProd));
         logAction(username, "Login Success", "LDAP (administrators profile)", "auth", requestIp);
-        return res.json({ success: true, user: authUser });
+        return res.json({ success: true, user: authUser, csrfToken });
       }
       const operatorOk = await verifyLdapLogin(ldapConfig.operator, username, password);
       if (operatorOk) {
         const authUser = { id: `ldap-operator:${username}`, username, role: "operator" };
-        const sid = makeSession(authUser);
+        const { sessionId: sid, csrfToken } = await createSession(authUser);
         writeSessionCookie(res, sid, shouldUseSecureCookie(req, isProd));
         logAction(username, "Login Success", "LDAP (operators profile)", "auth", requestIp);
-        return res.json({ success: true, user: authUser });
+        return res.json({ success: true, user: authUser, csrfToken });
       }
     }
 
@@ -4871,19 +4912,19 @@ type MacSearchEvent = {
   });
 
   app.get("/api/auth/session", (req, res) => {
-    const { sid, user } = readSession(req);
+    const { sid, user, csrfToken } = readSession(req);
     if (!user) {
       if (sid) clearSessionCookie(res, shouldUseSecureCookie(req, isProd));
       // Return 200 to avoid noisy expected 401 logs before login in browser console.
       return res.json({ success: false, message: "Session expired or invalid" });
     }
-    return res.json({ success: true, user });
+    return res.json({ success: true, user, csrfToken });
   });
 
-  app.post("/api/auth/logout", (req, res) => {
+  app.post("/api/auth/logout", async (req, res) => {
     const { sid, user } = readSession(req);
     const requestIp = getRequestIp(req);
-    if (sid) revokeSession(sid);
+    if (sid) await revokeSession(sid);
     clearSessionCookie(res, shouldUseSecureCookie(req, isProd));
     if (user?.username) {
       logAction(user.username, "Logout", "User logged out", "auth", requestIp);
@@ -4892,10 +4933,12 @@ type MacSearchEvent = {
   });
 
   app.post("/api/users", checkRole(['admin']), async (req, res) => {
-    const { username, password, role } = req.body;
+    const parsed = createUserBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.issues.map((i) => i.message).join("; ") });
+    }
+    const { username, password, role } = parsed.data;
     const actor = actorName(req);
-    if (!username || !password) return res.status(400).json({ error: "Missing fields" });
-    
     const newUser = {
       id: Date.now().toString(),
       username,
@@ -4911,7 +4954,11 @@ type MacSearchEvent = {
   });
 
   app.patch("/api/users/:id", checkRole(['admin']), async (req, res) => {
-    const { role } = req.body;
+    const parsed = patchUserBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.issues.map((i) => i.message).join("; ") });
+    }
+    const { role } = parsed.data;
     const actor = actorName(req);
     const user = users.find(u => u.id === req.params.id);
     if (!user) return res.status(404).json({ error: "User not found" });
@@ -4924,7 +4971,11 @@ type MacSearchEvent = {
   });
 
   app.post("/api/users/:id/password", checkRole(['admin']), async (req, res) => {
-    const { password } = req.body;
+    const parsed = resetPasswordBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.issues.map((i) => i.message).join("; ") });
+    }
+    const { password } = parsed.data;
     const actor = actorName(req);
     const user = users.find(u => u.id === req.params.id);
     if (!user) return res.status(404).json({ error: "User not found" });
@@ -5007,13 +5058,13 @@ type MacSearchEvent = {
   };
 
   app.post("/api/discovery/start", checkRole(["admin", "operator"]), async (req, res) => {
-    const { subnets, protocol, city, zone, branch } = req.body as {
-      subnets?: string; protocol?: string; city?: string; zone?: string; branch?: string;
-    };
-    const actor = actorName(req);
-    if (!subnets || typeof subnets !== "string") {
-      return res.status(400).json(clientErrorPayload("discovery.start.validation", "Укажите подсети, например 192.168.1.0/24"));
+    const parsed = discoveryStartBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      const msg = parsed.error.issues.map((i) => i.message).join("; ");
+      return res.status(400).json(clientErrorPayload("discovery.start.validation", msg || "Invalid request body"));
     }
+    const { subnets, protocol, city, zone, branch } = parsed.data;
+    const actor = actorName(req);
     if (discoveryRunLock) {
       return res.status(409).json({
         ...clientErrorPayload("discovery.start.lock", "Discovery run is already in progress"),
@@ -5124,8 +5175,11 @@ type MacSearchEvent = {
   });
 
   app.post("/api/discovery/watch", checkRole(["admin", "operator"]), async (req, res) => {
-    const incoming = (req.body?.profiles || []) as Partial<DiscoveryWatchProfile>[];
-    if (!Array.isArray(incoming)) return res.status(400).json({ error: "profiles must be an array" });
+    const parsed = discoveryWatchSaveBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.issues.map((i) => i.message).join("; ") });
+    }
+    const incoming = parsed.data.profiles;
     discoveryWatchProfiles = incoming
       .map((p, idx) => {
         const id = String(p.id || `dw-${Date.now()}-${idx}`).trim();
@@ -5998,22 +6052,33 @@ type MacSearchEvent = {
   });
 
   // Socket.io for Terminal (SSH)
+  io.use((socket, next) => {
+    void (async () => {
+      try {
+        const { user } = await readSessionFromCookieHeader(socket.handshake.headers.cookie || "");
+        if (!user) return next(new Error("unauthorized"));
+        (socket.data as { netnodeUser: AuthUser }).netnodeUser = user;
+        next();
+      } catch (e) {
+        next(e instanceof Error ? e : new Error("session load failed"));
+      }
+    })();
+  });
+
   io.on("connection", (socket) => {
-    const socketCookieHeader = socket.handshake.headers.cookie || "";
-    const authenticatedUser = readSessionFromCookieHeader(socketCookieHeader).user;
+    const authenticatedUser = (socket.data as { netnodeUser?: AuthUser }).netnodeUser;
     if (!authenticatedUser) {
       socket.emit("ssh:status", { sessionId: "auth", status: "unauthorized" });
       socket.disconnect(true);
       return;
     }
     const requireSocketUser = (sessionId = "auth") => {
-      const user = readSessionFromCookieHeader(socketCookieHeader).user;
-      if (!user) {
+      if (!authenticatedUser) {
         socket.emit("ssh:data", { sessionId, data: "\r\n*** Authentication required for SSH proxy. ***\r\n" });
         socket.disconnect(true);
         return null;
       }
-      return user;
+      return authenticatedUser;
     };
     const sessions = new Map<
       string,
@@ -6254,6 +6319,7 @@ type MacSearchEvent = {
       /* ignore */
     }
     await closeAmqp();
+    await shutdownSessionRuntime();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 4000).unref();
   };

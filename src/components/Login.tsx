@@ -4,7 +4,7 @@ import { useTranslation } from '../lib/i18n';
 import { cn } from '../lib/utils';
 
 interface LoginProps {
-  onLogin: (user: { id: string, username: string, role: string }) => void;
+  onLogin: (user: { id: string; username: string; role: string }, csrfToken?: string) => void;
   productName?: string;
   logoDataUrl?: string;
 }
@@ -26,7 +26,7 @@ const Login: React.FC<LoginProps> = ({ onLogin, productName = 'NETNODE', logoDat
       });
       const data = await response.json();
       if (data.success) {
-        onLogin(data.user);
+        onLogin(data.user, typeof data.csrfToken === "string" ? data.csrfToken : undefined);
       } else {
         setError(true);
         setTimeout(() => setError(false), 3000);

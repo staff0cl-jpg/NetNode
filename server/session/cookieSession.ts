@@ -1,48 +1,10 @@
-import crypto from "crypto";
 import type express from "express";
 import type { AuthUser } from "../auth/types.js";
+import { SESSION_COOKIE_NAME, SESSION_TTL_MS } from "./sessionConstants.js";
+import { getSessionBackend } from "./sessionRuntime.js";
 
-export const SESSION_COOKIE_NAME = "netnode_sid";
-export const SESSION_TTL_MS = 1000 * 60 * 60 * 8; // 8 hours
-
-type SessionRecord = { user: AuthUser; expiresAt: number };
-
-const sessionStore = new Map<string, SessionRecord>();
-
-const DEFAULT_SESSION_STORE_MAX = 10_000;
-
-function sessionStoreMax(): number {
-  const n = Number(process.env.NETNODE_SESSION_STORE_MAX);
-  if (!Number.isFinite(n)) return DEFAULT_SESSION_STORE_MAX;
-  return Math.max(100, Math.min(500_000, Math.floor(n)));
-}
-
-/** Drop oldest rows (Map insertion order) until under the cap — mitigates unbounded growth if prune lags. */
-function enforceSessionStoreCap(): void {
-  const cap = sessionStoreMax();
-  let guard = 0;
-  while (sessionStore.size >= cap && guard < cap + 100) {
-    const first = sessionStore.keys().next().value as string | undefined;
-    if (first === undefined) break;
-    sessionStore.delete(first);
-    guard += 1;
-  }
-}
-
-function parseCookieHeader(src = ""): Record<string, string> {
-  return src
-    .split(";")
-    .map((entry) => entry.trim())
-    .filter(Boolean)
-    .reduce<Record<string, string>>((acc, entry) => {
-      const idx = entry.indexOf("=");
-      if (idx <= 0) return acc;
-      const key = entry.slice(0, idx).trim();
-      const value = decodeURIComponent(entry.slice(idx + 1).trim());
-      acc[key] = value;
-      return acc;
-    }, {});
-}
+export { SESSION_COOKIE_NAME, SESSION_TTL_MS } from "./sessionConstants.js";
+export { parseCookieHeader } from "./cookieParse.js";
 
 export function writeSessionCookie(res: express.Response, sessionId: string, secure: boolean): void {
   res.cookie(SESSION_COOKIE_NAME, sessionId, {
@@ -73,43 +35,23 @@ export function shouldUseSecureCookie(req: express.Request, isProd: boolean): bo
   return proto === "https";
 }
 
-export function makeSession(user: AuthUser): string {
-  pruneExpiredSessions();
-  enforceSessionStoreCap();
-  const sid = crypto.randomBytes(32).toString("hex");
-  sessionStore.set(sid, { user, expiresAt: Date.now() + SESSION_TTL_MS });
-  return sid;
+export async function createSession(user: AuthUser): Promise<{ sessionId: string; csrfToken: string }> {
+  return getSessionBackend().create(user);
 }
 
-export function readSession(req: express.Request): { sid?: string; user: AuthUser | null } {
-  return readSessionFromCookieHeader(req.headers.cookie || "");
+/** Requires `attachNetnodeSession` to run first. */
+export function readSession(req: express.Request): { sid?: string; user: AuthUser | null; csrfToken?: string } {
+  return req.netnodeSession ?? { user: null };
 }
 
-export function readSessionFromCookieHeader(cookieHeader = ""): { sid?: string; user: AuthUser | null } {
-  const sid = parseCookieHeader(cookieHeader)[SESSION_COOKIE_NAME];
-  if (!sid) return { user: null };
-  const record = sessionStore.get(sid);
-  if (!record) return { sid, user: null };
-  if (record.expiresAt <= Date.now()) {
-    sessionStore.delete(sid);
-    return { sid, user: null };
-  }
-  return { sid, user: record.user };
+export async function readSessionFromCookieHeader(cookieHeader: string): Promise<{ sid?: string; user: AuthUser | null; csrfToken?: string }> {
+  return getSessionBackend().read(cookieHeader);
 }
 
-export function revokeSession(sessionId: string): void {
-  sessionStore.delete(sessionId);
+export async function revokeSession(sessionId: string): Promise<void> {
+  return getSessionBackend().revoke(sessionId);
 }
 
-/** Removes expired session rows so abandoned cookies do not grow the map without bound. */
-export function pruneExpiredSessions(now = Date.now()): number {
-  let removed = 0;
-  for (const [sid, rec] of sessionStore) {
-    if (rec.expiresAt <= now) {
-      sessionStore.delete(sid);
-      removed += 1;
-    }
-  }
-  enforceSessionStoreCap();
-  return removed;
+export async function pruneExpiredSessions(now = Date.now()): Promise<number> {
+  return getSessionBackend().pruneExpired(now);
 }

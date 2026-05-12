@@ -3,6 +3,7 @@ import { motion } from 'motion/react';
 import { UserPlus, Shield, User, Trash2, Edit2, Key, Check, X } from 'lucide-react';
 import { useTranslation } from '../lib/i18n';
 import { cn } from '../lib/utils';
+import { netnodeFetch } from '../lib/netnodeFetch';
 import { useNotifications } from '../lib/notifications';
 
 interface LocalUser {
@@ -32,7 +33,7 @@ const UserManagement: React.FC<UserManagementProps> = ({ role, username }) => {
 
   const fetchUsers = async () => {
     try {
-      const response = await fetch('/api/users', {
+      const response = await netnodeFetch('/api/users', {
         headers: { 
         }
       });
@@ -52,7 +53,7 @@ const UserManagement: React.FC<UserManagementProps> = ({ role, username }) => {
   const handleAdd = async () => {
     if (!newUser.username || !newUser.password) return;
     try {
-      const response = await fetch('/api/users', {
+      const response = await netnodeFetch('/api/users', {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -72,7 +73,7 @@ const UserManagement: React.FC<UserManagementProps> = ({ role, username }) => {
   const handleDelete = async (id: string) => {
     if (!confirm(t('confirmDelete'))) return;
     try {
-      await fetch('/api/users/' + id, { 
+      await netnodeFetch('/api/users/' + id, { 
         method: 'DELETE',
         headers: { 
         }
@@ -85,7 +86,7 @@ const UserManagement: React.FC<UserManagementProps> = ({ role, username }) => {
 
   const handleUpdateRole = async (id: string, newRole: string) => {
     try {
-      await fetch('/api/users/' + id, {
+      await netnodeFetch('/api/users/' + id, {
         method: 'PATCH',
         headers: { 
           'Content-Type': 'application/json',
@@ -103,7 +104,7 @@ const UserManagement: React.FC<UserManagementProps> = ({ role, username }) => {
   const handleChangePassword = async () => {
     if (!changingPasswordUser || !newPassword) return;
     try {
-      const response = await fetch(`/api/users/${changingPasswordUser.id}/password`, {
+      const response = await netnodeFetch(`/api/users/${changingPasswordUser.id}/password`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',

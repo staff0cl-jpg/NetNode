@@ -4,6 +4,7 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContaine
 import { Activity, ShieldCheck, Server, AlertTriangle, Settings, Plus, Trash2, ArrowUp, ArrowDown } from 'lucide-react';
 import { Switch } from '../types';
 import { useTranslation } from '../lib/i18n';
+import { netnodeFetch } from '../lib/netnodeFetch';
 
 interface DashboardProps {
   switches: Switch[];
@@ -68,7 +69,7 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
   React.useEffect(() => {
     const loadUi = async () => {
       try {
-        const r = await fetch('/api/config/system', {
+        const r = await netnodeFetch('/api/config/system', {
           credentials: 'include',
         });
         if (!r.ok) return;
@@ -87,7 +88,7 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
   React.useEffect(() => {
     const load = async () => {
       try {
-        const r = await fetch('/api/metrics/dashboard');
+        const r = await netnodeFetch('/api/metrics/dashboard');
         const data = await r.json();
         setDashboardMetrics(data);
       } catch {
@@ -201,7 +202,7 @@ const Dashboard: React.FC<DashboardProps> = ({ switches, role, username }) => {
   const savePanels = async (nextPanels: DashboardPanel[]) => {
     setIsSavingPanels(true);
     try {
-      await fetch('/api/config/system', {
+      await netnodeFetch('/api/config/system', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

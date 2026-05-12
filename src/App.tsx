@@ -16,6 +16,7 @@ import { NotificationsProvider } from './lib/notifications';
 import NotificationCenter from './components/NotificationCenter';
 import { APP_VERSION } from './lib/version';
 import { Menu } from 'lucide-react';
+import { netnodeFetch, setNetnodeCsrfToken } from './lib/netnodeFetch';
 
 type ThemeMode = 'dark' | 'light';
 const APP_CONFIG_UPDATED_EVENT = 'netnode:config-updated';
@@ -51,7 +52,7 @@ function AppContent() {
     let cancelled = false;
     (async () => {
       try {
-        const response = await fetch("/api/setup/status");
+        const response = await netnodeFetch("/api/setup/status");
         const data = await response.json();
         if (!cancelled) setSetupRequired(!!data.needsSetup);
       } catch {
@@ -65,9 +66,7 @@ function AppContent() {
 
   const fetchInventory = async () => {
     try {
-      const response = await fetch('/api/inventory', {
-        credentials: 'include',
-      });
+      const response = await netnodeFetch('/api/inventory');
       if (response.status === 401 || response.status === 403) {
         setUser(null);
         setSwitches([]);
@@ -92,16 +91,19 @@ function AppContent() {
     if (setupRequired !== false) return;
     const restoreSession = async () => {
       try {
-        const response = await fetch('/api/auth/session', { credentials: 'include' });
+        const response = await netnodeFetch('/api/auth/session');
         if (!response.ok) {
           setUser(null);
+          setNetnodeCsrfToken(null);
           return;
         }
         const data = await response.json();
         if (data?.success && data?.user) {
           setUser(data.user);
+          if (typeof data.csrfToken === 'string') setNetnodeCsrfToken(data.csrfToken);
         } else {
           setUser(null);
+          setNetnodeCsrfToken(null);
         }
       } catch {
         setUser(null);
@@ -115,7 +117,7 @@ function AppContent() {
   React.useEffect(() => {
     const fetchPublicConfig = async () => {
       try {
-        const response = await fetch('/api/config/public');
+        const response = await netnodeFetch('/api/config/public');
         if (!response.ok) return;
         const data = await response.json();
         setBanner((prev) => ({
@@ -146,9 +148,7 @@ function AppContent() {
     if (!user) return;
     const fetchBanner = async () => {
       try {
-        const response = await fetch('/api/system/banner', {
-          credentials: 'include',
-        });
+        const response = await netnodeFetch('/api/system/banner');
         if (response.status === 401 || response.status === 403) {
           setUser(null);
           return;
@@ -192,10 +192,11 @@ function AppContent() {
 
   const handleLogout = async () => {
     try {
-      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+      await netnodeFetch('/api/auth/logout', { method: 'POST' });
     } catch {
       /* ignore */
     } finally {
+      setNetnodeCsrfToken(null);
       setUser(null);
       setSwitches([]);
       setSshTarget(null);
@@ -230,7 +231,10 @@ function AppContent() {
   if (!user) {
     return (
       <Login
-        onLogin={(userData) => setUser(userData)}
+        onLogin={(userData, csrfToken) => {
+          setUser(userData);
+          if (typeof csrfToken === 'string') setNetnodeCsrfToken(csrfToken);
+        }}
         productName={banner.productName}
         logoDataUrl={banner.logoDataUrl}
       />

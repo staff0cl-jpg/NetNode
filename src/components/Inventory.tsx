@@ -1,16 +1,17 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import { Plus, Search, MoreVertical, Edit2, Trash2, Cpu, Download, ChevronUp, ChevronDown, RefreshCw, Terminal as TerminalIcon, Globe, CircleHelp } from 'lucide-react';
+import { Switch, Vendor, WarningReasonCode, WarningReasonDetail } from '../types';
+import { VENDORS } from '../constants';
+import { cn } from '../lib/utils';
+import { netnodeFetch } from '../lib/netnodeFetch';
+import { useTranslation } from '../lib/i18n';
+import { useNotifications } from '../lib/notifications';
 
 const SortIcon = ({ active, direction }: { active: boolean, direction?: 'asc' | 'desc' }) => {
   if (!active) return <div className="w-3" />;
   return direction === 'asc' ? <ChevronUp size={12} className="text-[#228be6]" /> : <ChevronDown size={12} className="text-[#228be6]" />;
 };
-import { Switch, Vendor, WarningReasonCode, WarningReasonDetail } from '../types';
-import { VENDORS } from '../constants';
-import { cn } from '../lib/utils';
-import { useTranslation } from '../lib/i18n';
-import { useNotifications } from '../lib/notifications';
 
 const parseIpv4 = (ip: string): number | null => {
   const parts = ip.split('.').map((x) => Number.parseInt(x, 10));
@@ -192,7 +193,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
   };
 
   React.useEffect(() => {
-    fetch('/api/inventory/meta', {
+    netnodeFetch('/api/inventory/meta', {
       credentials: 'include',
     })
       .then((r) => r.json())
@@ -202,7 +203,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
         }
       })
       .catch(() => {});
-    fetch('/api/snmp/templates', {
+    netnodeFetch('/api/snmp/templates', {
       credentials: 'include',
     })
       .then((r) => r.json())
@@ -245,7 +246,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
           .filter(Boolean)
       };
       if (editingId) {
-        const response = await fetch(`/api/inventory/${editingId}`, {
+        const response = await netnodeFetch(`/api/inventory/${editingId}`, {
           method: 'PATCH',
           credentials: 'include',
           headers: { 
@@ -258,7 +259,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
           throw new Error(errData?.error || 'Update failed');
         }
       } else {
-        const response = await fetch('/api/inventory', {
+        const response = await netnodeFetch('/api/inventory', {
           method: 'POST',
           credentials: 'include',
           headers: { 
@@ -288,7 +289,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
   const handleDelete = async (id: string) => {
     if (confirm(t('confirmRemoveNode'))) {
       try {
-        await fetch(`/api/inventory/${id}`, {
+        await netnodeFetch(`/api/inventory/${id}`, {
           method: 'DELETE',
           credentials: 'include',
         });
@@ -330,7 +331,7 @@ const Inventory: React.FC<InventoryProps> = ({ switches, setSwitches, role, user
     if (selectedIds.length === 0) return;
     setIsBulkProcessing(true);
     try {
-      const response = await fetch('/api/inventory/bulk', {
+      const response = await netnodeFetch('/api/inventory/bulk', {
         method: 'POST',
         credentials: 'include',
         headers: { 
