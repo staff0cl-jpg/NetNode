@@ -116,6 +116,8 @@ const TOPO_LOWER_LAYOUT_FIT_SCALE = 0.72;
 const TOPO_BARYCENTER_ITERATIONS = 6;
 const TOPO_AUTO_LAYOUT_TIMEOUT_MS = 30000;
 const TOPO_AUTO_LAYOUT_FOLLOWUP_TIMEOUT_MS = 12000;
+/** Right-button drag below this distance (screen px) counts as a click → SSH/Web menu, not a link. */
+const TOPO_LINK_DRAG_THRESHOLD_PX = 10;
 
 const TOPO_TRUNK_STROKE = '#ff922b';
 const TOPO_TRUNK_LABEL_FILL = 'rgba(255, 146, 43, 0.18)';
@@ -484,6 +486,9 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   const [isNodeDragging, setIsNodeDragging] = useState(false);
   const panLastPointRef = useRef<{ x: number; y: number } | null>(null);
   const linkDraftPointerStartRef = useRef<{ x: number; y: number } | null>(null);
+  const linkDraftRef = useRef<LinkDraft>(null);
+  const suppressContextMenuRef = useRef(false);
+  const linkPointerIdRef = useRef<number | null>(null);
   const [topologyMode, setTopologyMode] = useState<TopologyMode>('ip');
   const [selectedRegion, setSelectedRegion] = useState<string>('');
   const [selectedZone, setSelectedZone] = useState<string>('');
@@ -511,7 +516,6 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
   const [hoveredLinkId, setHoveredLinkId] = useState<string | null>(null);
   const [autoLayoutState, setAutoLayoutState] = useState<AutoLayoutState>('idle');
   const groupDragRef = useRef<GroupDragState>(null);
-  const nodeDragStartRef = useRef<Record<string, { x: number; y: number }>>({});
   const topologySwitches = React.useMemo(() => {
     const ipAllowed = new Set(['switch', 'router', 'коммутатор', 'маршрутизатор']);
     const fcAllowed = new Set(['fc switch', 'fibre channel switch', 'fiber channel switch', 'fc коммутатор']);
@@ -1299,6 +1303,73 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
     });
   }, []);
 
+  React.useEffect(() => {
+    linkDraftRef.current = linkDraft;
+  }, [linkDraft]);
+
+  const releaseLinkPointerCapture = React.useCallback(() => {
+    const pid = linkPointerIdRef.current;
+    const dom = stageRef.current?.container() as (HTMLElement & { releasePointerCapture?: (id: number) => void }) | undefined;
+    if (dom && pid != null && typeof dom.releasePointerCapture === 'function') {
+      try {
+        dom.releasePointerCapture(pid);
+      } catch {
+        // ignore
+      }
+    }
+    linkPointerIdRef.current = null;
+  }, []);
+
+  const finalizeRightLinkDraft = React.useCallback(
+    (clientX: number, clientY: number, button: number) => {
+      if (button !== 2) return;
+      const draft = linkDraftRef.current;
+      if (!draft) return;
+      const start = linkDraftPointerStartRef.current;
+      const movement = start ? Math.hypot(clientX - start.x, clientY - start.y) : 0;
+      const p = toStageCoords(clientX, clientY);
+      const target = nodes.find(
+        (n) =>
+          n.id !== draft.sourceId &&
+          p.x >= n.x &&
+          p.x <= n.x + TOPO_NODE_WIDTH &&
+          p.y >= n.y &&
+          p.y <= n.y + TOPO_NODE_HEIGHT
+      );
+      const source = nodes.find((n) => n.id === draft.sourceId);
+
+      if (movement < TOPO_LINK_DRAG_THRESHOLD_PX) {
+        if (source) {
+          openNodeActionMenu(source, clientX, clientY);
+          suppressContextMenuRef.current = true;
+        }
+      } else if (target) {
+        void createManualLink(draft.sourceId, target.id);
+        suppressContextMenuRef.current = true;
+      } else if (movement >= TOPO_LINK_DRAG_THRESHOLD_PX) {
+        suppressContextMenuRef.current = true;
+      }
+
+      setLinkDraft(null);
+      linkDraftPointerStartRef.current = null;
+      releaseLinkPointerCapture();
+    },
+    [createManualLink, nodes, openNodeActionMenu, releaseLinkPointerCapture, toStageCoords]
+  );
+
+  React.useEffect(() => {
+    if (!linkDraft) return;
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        setLinkDraft(null);
+        linkDraftPointerStartRef.current = null;
+        releaseLinkPointerCapture();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [linkDraft, releaseLinkPointerCapture]);
+
   const handleRenameRegionInline = async () => {
     const from = String(editingRegion || '').trim();
     const to = String(editingRegionValue || '').trim();
@@ -1545,8 +1616,15 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
           draggable={false}
           onMouseDown={(e) => {
             const evt = e.evt as MouseEvent;
-            if (linkDraft) return;
             const stage = e.target.getStage();
+            if (linkDraftRef.current && evt.button === 2 && stage && e.target === stage) {
+              evt.preventDefault();
+              setLinkDraft(null);
+              linkDraftPointerStartRef.current = null;
+              releaseLinkPointerCapture();
+              return;
+            }
+            if (linkDraftRef.current && evt.button === 0) return;
             if (evt.button === 0 && !isNodeDragging) {
               if (!stage || e.target !== stage) return;
               evt.preventDefault();
@@ -1557,6 +1635,7 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
               return;
             }
             if (evt.button !== 2 || isNodeDragging) return;
+            if (linkDraftRef.current) return;
             if (!stage || e.target !== stage) return;
             evt.preventDefault();
             setContextMenu(null);
@@ -1590,7 +1669,15 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
             panLastPointRef.current = { x: evt.clientX, y: evt.clientY };
             setStagePos((p) => ({ x: p.x + dx, y: p.y + dy }));
           }}
-          onMouseUp={() => {
+          onMouseUp={(e) => {
+            const evt = e.evt as MouseEvent;
+            if (linkDraftRef.current && evt.button === 2) {
+              finalizeRightLinkDraft(evt.clientX, evt.clientY, 2);
+            } else if (linkDraftRef.current && evt.button === 0) {
+              setLinkDraft(null);
+              linkDraftPointerStartRef.current = null;
+              releaseLinkPointerCapture();
+            }
             if (selectionDraft) {
               const x = Math.min(selectionDraft.x1, selectionDraft.x2);
               const y = Math.min(selectionDraft.y1, selectionDraft.y2);
@@ -1616,14 +1703,10 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
             }
             setIsRightPanning(false);
             panLastPointRef.current = null;
-            linkDraftPointerStartRef.current = null;
-            setLinkDraft(null);
           }}
           onMouseLeave={() => {
             setIsRightPanning(false);
             panLastPointRef.current = null;
-            linkDraftPointerStartRef.current = null;
-            setLinkDraft(null);
             setSelectionDraft(null);
           }}
           onWheel={handleWheelZoom}
@@ -1798,24 +1881,6 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                       groupDragRef.current = null;
                       return;
                     }
-                    const dragStart = nodeDragStartRef.current[node.id];
-                    if (dragStart) {
-                      delete nodeDragStartRef.current[node.id];
-                      const dropCenter = { x: e.target.x() + TOPO_NODE_WIDTH / 2, y: e.target.y() + TOPO_NODE_HEIGHT / 2 };
-                      const target = nodes.find((n) =>
-                        n.id !== node.id &&
-                        dropCenter.x >= n.x &&
-                        dropCenter.x <= n.x + TOPO_NODE_WIDTH &&
-                        dropCenter.y >= n.y &&
-                        dropCenter.y <= n.y + TOPO_NODE_HEIGHT
-                      );
-                      if (target) {
-                        e.target.position(dragStart);
-                        setNodes((prev) => prev.map((n) => (n.id === node.id ? { ...n, ...dragStart } : n)));
-                        createManualLink(node.id, target.id);
-                        return;
-                      }
-                    }
                     handleDragEnd(node.id, e);
                   }}
                   onDragMove={(e) => {
@@ -1847,26 +1912,41 @@ const Topology: React.FC<TopologyProps> = ({ switches, role, username, onOpenSSH
                     const evt = e.evt as MouseEvent;
                     if (canEditTopology && evt.button === 2) {
                       evt.preventDefault();
-                      openNodeActionMenu(node, evt.clientX, evt.clientY);
+                      const center = getNodeCenter(node.id);
+                      setLinkDraft({ sourceId: node.id, x1: center.x, y1: center.y, x2: center.x, y2: center.y });
+                      linkDraftPointerStartRef.current = { x: evt.clientX, y: evt.clientY };
+                      const pe = evt as PointerEvent;
+                      if (typeof pe.pointerId === 'number') {
+                        linkPointerIdRef.current = pe.pointerId;
+                        const dom = stageRef.current?.container();
+                        if (dom && typeof dom.setPointerCapture === 'function') {
+                          try {
+                            dom.setPointerCapture(pe.pointerId);
+                          } catch {
+                            // ignore
+                          }
+                        }
+                      }
                       return;
-                    }
-                    if (canEditTopology && evt.button === 0) {
-                      nodeDragStartRef.current[node.id] = { x: node.x, y: node.y };
                     }
                   }}
                   onMouseUp={(e) => {
-                    e.cancelBubble = true;
-                    setIsNodeDragging(false);
                     const evt = e.evt as MouseEvent;
-                    if (canEditTopology && evt.button === 2 && linkDraft?.sourceId && linkDraft.sourceId !== node.id) {
-                      createManualLink(linkDraft.sourceId, node.id);
-                      linkDraftPointerStartRef.current = null;
-                      setLinkDraft(null);
+                    if (linkDraftRef.current && evt.button === 2) {
+                      e.cancelBubble = true;
+                      finalizeRightLinkDraft(evt.clientX, evt.clientY, 2);
+                      setIsNodeDragging(false);
                       return;
                     }
+                    e.cancelBubble = true;
+                    setIsNodeDragging(false);
                   }}
                   onContextMenu={(e) => {
                     e.evt.preventDefault();
+                    if (suppressContextMenuRef.current) {
+                      suppressContextMenuRef.current = false;
+                      return;
+                    }
                     const evt = e.evt as MouseEvent;
                     openNodeActionMenu(node, evt.clientX, evt.clientY);
                   }}

@@ -266,8 +266,8 @@ export const translations: Translations = {
   ldapTestPasswordField: { ru: 'Пароль для проверки', en: 'Test account password' },
   autoLayout: { ru: 'Авторазметка', en: 'Auto layout' },
   topologyCanvasHint: {
-    ru: 'Авторазметка активной вкладки строит слои Gateway/Core/Distribution/Access, группирует узлы вокруг Core и выносит unknown/orphan отдельно. Средняя кнопка мыши на узле открывает SSH/Web меню, а ручная связь создается перетаскиванием правой кнопкой; подпись связи редактируется двойным кликом по линии.',
-    en: 'Auto layout for the active tab builds Gateway/Core/Distribution/Access layers, groups nodes around each core, and isolates unknown/orphan devices. Middle-click a node to open the SSH/Web menu, and create a manual link by right-button drag; edit a link label with double-click on the link.',
+    ru: 'Авторазметка активной вкладки упорядочивает узлы и связи. ПКМ на узле и протащите линию до другого узла — ручная связь. Короткий клик ПКМ без движения — меню SSH/Web. ЛКМ перетаскивание узла — перемещение. Подпись связи — двойной клик по линии. Esc отменяет черновик линии.',
+    en: 'Auto layout for the active tab arranges nodes and links. Right-drag from one node to another to create a manual link. A short right-click without movement opens the SSH/Web menu. Left-drag moves a node. Double-click a link to edit its label. Esc cancels the link draft.',
   },
   discoveryScanExplain: {
     ru: 'SNMP-сканирование по указанным IPv4-подсетям (до 1024 адресов за запуск). Уже известные IP пропускаются.',
