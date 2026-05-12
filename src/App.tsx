@@ -136,8 +136,8 @@ function AppContent() {
   React.useEffect(() => {
     if (user) {
       fetchInventory();
-      // Poll every 5 seconds to catch discovery results
-      const interval = setInterval(fetchInventory, 5000);
+      // Poll inventory list (GET is DB-backed; SNMP metrics refresh on the server on its own interval)
+      const interval = setInterval(fetchInventory, 10000);
       return () => clearInterval(interval);
     }
   }, [user]);

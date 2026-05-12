@@ -2,13 +2,13 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import { Server } from "socket.io";
 import http from "http";
+import type { Duplex } from "node:stream";
 import net from "net";
 import { promises as fs } from "fs";
 import path from "path";
 import { Client } from "ssh2";
 import ldap from "ldapjs";
 import snmp from "net-snmp";
-import crypto from "crypto";
 import type { Pool } from "pg";
 import type { InventoryRowPayload } from "./persistence/postgres.js";
 import {
@@ -27,34 +27,20 @@ import { registerFirstRunSetupRoutes } from "./setup/setupRoutes.js";
 import { createInitialUsers } from "./auth/initialUsers.js";
 import { hashPassword, verifyLocalPassword } from "./auth/password.js";
 import type { AuthUser, LocalUser } from "./auth/types.js";
-import type { InventoryWarningReasonDetail } from "./inventory/warnings.js";
+import type { InventoryItem } from "./inventory/inventoryTypes.js";
 import { evaluateInventoryWarnings } from "./inventory/warnings.js";
 import { applySecurityMiddleware, createLoginRateLimiter } from "./middleware/security.js";
-
-type InventoryItem = {
-  id: string;
-  name: string;
-  zoneKey?: string;
-  vendor: string;
-  model: string;
-  category?: string;
-  subcategory?: string;
-  branch?: string;
-  snmpTemplateId?: string;
-  customOids?: string[];
-  city: string;
-  zone: string;
-  ip: string;
-  status: "online" | "offline" | "warning";
-  uptime: string;
-  uptimeSeconds?: number;
-  warningScore?: number;
-  warningSeverity?: "none" | "warning" | "critical";
-  warningReasons?: string[];
-  warningReasonDetails?: InventoryWarningReasonDetail[];
-  cpuLoad?: number | null;
-  trunkDownCount?: number;
-};
+import { registerInventoryHttpRoutes } from "./routes/inventoryHttp.js";
+import {
+  clearSessionCookie,
+  makeSession,
+  pruneExpiredSessions,
+  readSession,
+  readSessionFromCookieHeader,
+  revokeSession,
+  shouldUseSecureCookie,
+  writeSessionCookie,
+} from "./session/cookieSession.js";
 
 // In-memory state (empty by default; devices come from discovery or manual registration)
 let inventory: InventoryItem[] = [];
@@ -116,6 +102,8 @@ let discoveryScheduler: NodeJS.Timeout | null = null;
 let discoveryRunLock = false;
 let discoverySchedulerLastTickAt: string | null = null;
 let discoverySchedulerLastProcessed = 0;
+let inventoryMetricsScheduler: NodeJS.Timeout | null = null;
+let inventoryMetricsRunLock = false;
 type ManualDiscoveryJob = {
   id: string;
   actor: string;
@@ -512,11 +500,6 @@ function diffTopologyState(
     totalTargetLinks: target.links.length,
   };
 }
-
-type SessionRecord = { user: AuthUser; expiresAt: number };
-const SESSION_COOKIE_NAME = "netnode_sid";
-const SESSION_TTL_MS = 1000 * 60 * 60 * 8; // 8 hours
-const sessionStore = new Map<string, SessionRecord>();
 
 let users: LocalUser[] = createInitialUsers();
 
@@ -3393,72 +3376,6 @@ const logAction = (
   }).catch(() => {});
 };
 
-function parseCookieHeader(src = ""): Record<string, string> {
-  return src
-    .split(";")
-    .map((entry) => entry.trim())
-    .filter(Boolean)
-    .reduce<Record<string, string>>((acc, entry) => {
-      const idx = entry.indexOf("=");
-      if (idx <= 0) return acc;
-      const key = entry.slice(0, idx).trim();
-      const value = decodeURIComponent(entry.slice(idx + 1).trim());
-      acc[key] = value;
-      return acc;
-    }, {});
-}
-
-function writeSessionCookie(res: express.Response, sessionId: string, secure: boolean) {
-  res.cookie(SESSION_COOKIE_NAME, sessionId, {
-    httpOnly: true,
-    secure,
-    sameSite: "lax",
-    maxAge: SESSION_TTL_MS,
-    path: "/",
-  });
-}
-
-function clearSessionCookie(res: express.Response, secure: boolean) {
-  res.clearCookie(SESSION_COOKIE_NAME, {
-    httpOnly: true,
-    secure,
-    sameSite: "lax",
-    path: "/",
-  });
-}
-
-function shouldUseSecureCookie(req: express.Request, isProd: boolean): boolean {
-  if (!isProd) return false;
-  if (req.secure) return true;
-  const proto = String(req.headers["x-forwarded-proto"] || "")
-    .split(",")[0]
-    .trim()
-    .toLowerCase();
-  return proto === "https";
-}
-
-function makeSession(user: AuthUser): string {
-  const sid = crypto.randomBytes(32).toString("hex");
-  sessionStore.set(sid, { user, expiresAt: Date.now() + SESSION_TTL_MS });
-  return sid;
-}
-
-function readSession(req: express.Request): { sid?: string; user: AuthUser | null } {
-  return readSessionFromCookieHeader(req.headers.cookie || "");
-}
-
-function readSessionFromCookieHeader(cookieHeader = ""): { sid?: string; user: AuthUser | null } {
-  const sid = parseCookieHeader(cookieHeader)[SESSION_COOKIE_NAME];
-  if (!sid) return { user: null };
-  const record = sessionStore.get(sid);
-  if (!record) return { sid, user: null };
-  if (record.expiresAt <= Date.now()) {
-    sessionStore.delete(sid);
-    return { sid, user: null };
-  }
-  return { sid, user: record.user };
-}
-
 function authFromRequest(req: express.Request): AuthUser | null {
   return readSession(req).user;
 }
@@ -3674,6 +3591,119 @@ async function persistPgAutomationMaps() {
   }
 }
 
+async function refreshInventorySnmpMetrics(): Promise<void> {
+  if (!inventory.length || inventoryMetricsRunLock) return;
+  inventoryMetricsRunLock = true;
+  try {
+    const next = await Promise.all(
+      inventory.map(async (item) => {
+        const probe = await getSnmpProbe(item.ip, 900);
+        if (!probe.ok) {
+          const warning = evaluateInventoryWarnings({
+            isReachable: false,
+            cpuLoad: null,
+            trunkDownCount: 0,
+          });
+          return {
+            ...item,
+            status: "offline" as const,
+            warningScore: warning.score,
+            warningSeverity: warning.severity,
+            warningReasons: warning.reasons,
+            warningReasonDetails: warning.reasonDetails,
+            cpuLoad: null,
+            trunkDownCount: 0,
+          };
+        }
+        const nextVendor = probe.sysDescr ? detectVendorFromSnmp(probe.sysDescr, probe.sysObjectId || "") : item.vendor;
+        const nextModel = detectModelFromSnmp(probe.sysDescr || "", probe.sysObjectId || "", probe.sysName || "") || item.model;
+        const nextName = probe.sysName?.trim() ? probe.sysName.trim() : item.name;
+        const nextCategory = detectCategoryFromSnmp(probe.sysDescr || "", probe.sysObjectId || "", probe.sysName || "");
+        const uptimeSeconds = probe.uptimeSeconds ?? item.uptimeSeconds ?? 0;
+        const template = pickTemplate(item);
+        const defs = template?.metrics || [];
+        let cpuLoad: number | null = null;
+        try {
+          if (defs.length > 0) {
+            const map = await snmpGetMap(item.ip, defs.map((d) => d.oid));
+            const cpuCandidates: number[] = [];
+            for (const def of defs) {
+              if (!isCpuMetricDef(def)) continue;
+              const value = await resolveMetricValue(item.ip, def, map);
+              const numeric = Number(value);
+              if (Number.isFinite(numeric)) cpuCandidates.push(numeric);
+            }
+            if (cpuCandidates.length > 0) {
+              cpuLoad = Math.round((cpuCandidates.reduce((a, b) => a + b, 0) / cpuCandidates.length) * 100) / 100;
+            }
+          }
+        } catch {
+          cpuLoad = null;
+        }
+        let trunkDownCount = 0;
+        try {
+          const trunks = await collectTrunkMetrics(item.ip);
+          trunkDownCount = trunks.filter((t) => t.isDown === true).length;
+        } catch {
+          trunkDownCount = 0;
+        }
+        const warning = evaluateInventoryWarnings({
+          isReachable: true,
+          cpuLoad,
+          trunkDownCount,
+        });
+        return {
+          ...item,
+          name: nextName,
+          zoneKey: deriveZoneKeyFromDeviceName(nextName),
+          vendor: nextVendor,
+          model: nextModel,
+          category: item.category || nextCategory,
+          branch: item.branch || "ULN",
+          zone: resolveDeviceZone(nextName, item.zone),
+          status: warning.severity === "warning" ? ("warning" as const) : ("online" as const),
+          uptimeSeconds,
+          uptime: formatDuration(uptimeSeconds),
+          warningScore: warning.score,
+          warningSeverity: warning.severity,
+          warningReasons: warning.reasons,
+          warningReasonDetails: warning.reasonDetails,
+          cpuLoad,
+          trunkDownCount,
+        };
+      })
+    );
+    const prev = inventory;
+    let dirty = next.length !== prev.length;
+    if (!dirty) {
+      for (let i = 0; i < next.length; i++) {
+        const a = prev[i];
+        const b = next[i];
+        if (
+          !a ||
+          !b ||
+          a.id !== b.id ||
+          a.status !== b.status ||
+          a.warningScore !== b.warningScore ||
+          a.warningSeverity !== b.warningSeverity ||
+          a.cpuLoad !== b.cpuLoad ||
+          a.trunkDownCount !== b.trunkDownCount ||
+          a.name !== b.name
+        ) {
+          dirty = true;
+          break;
+        }
+      }
+    }
+    inventory = next;
+    if (dirty) await persistPgInventoryAndTopology("inventory-snmp-refresh");
+  } catch (e) {
+    console.warn("[inventory] SNMP metrics refresh failed:", e instanceof Error ? e.message : e);
+  } finally {
+    inventoryMetricsRunLock = false;
+  }
+}
+
 async function connectAndHydratePostgres() {
   pgPool = await connectPostgres();
   if (!pgPool) return;
@@ -3797,6 +3827,21 @@ export async function startServer() {
     }
   }, 60 * 1000);
   logAction("system", "Backup Scheduler Start", "Scheduler initialized (1-minute tick)", "system");
+
+  const inventorySnmpIntervalMs = Math.max(
+    30_000,
+    Math.min(600_000, Number(process.env.NETNODE_INVENTORY_SNMP_INTERVAL_MS) || 90_000)
+  );
+  if (inventoryMetricsScheduler) clearInterval(inventoryMetricsScheduler);
+  inventoryMetricsScheduler = setInterval(() => {
+    void refreshInventorySnmpMetrics();
+  }, inventorySnmpIntervalMs);
+  console.log(`[inventory] SNMP metrics background refresh every ${inventorySnmpIntervalMs}ms (NETNODE_INVENTORY_SNMP_INTERVAL_MS)`);
+
+  setInterval(() => {
+    const n = pruneExpiredSessions();
+    if (n > 0) console.log(`[session] pruned ${n} expired session(s)`);
+  }, 60_000);
 
   // API: Audit Logs
   app.get("/api/audit-logs", checkRole(['admin']), (req, res) => {
@@ -4746,239 +4791,28 @@ type MacSearchEvent = {
     return res.json(bindRes);
   });
 
-  // API: Inventory Bulk Actions
-  app.get("/api/inventory/meta", checkRole(['admin', 'operator', 'viewer']), (_req, res) => {
-    res.json(inventoryMeta);
-  });
-
-  app.post("/api/inventory/meta", checkRole(['admin', 'operator']), async (req, res) => {
-    const body = req.body as {
-      categories?: string[];
-      subcategories?: string[];
-      branches?: string[];
-      cities?: string[];
-      zones?: string[];
-      vendors?: string[];
-      models?: Record<string, string[]>;
-    };
-    if (Array.isArray(body.categories)) {
-      inventoryMeta.categories = [...new Set(body.categories.map((v) => String(v).trim()).filter(Boolean))];
-    }
-    if (Array.isArray(body.subcategories)) {
-      inventoryMeta.subcategories = [...new Set(body.subcategories.map((v) => String(v).trim()).filter(Boolean))];
-    }
-    if (Array.isArray(body.branches)) {
-      inventoryMeta.branches = [...new Set(body.branches.map((v) => String(v).trim()).filter(Boolean))];
-    }
-    if (Array.isArray(body.cities)) {
-      inventoryMeta.cities = [...new Set(body.cities.map((v) => String(v).trim()).filter(Boolean))];
-    }
-    if (Array.isArray(body.zones)) {
-      inventoryMeta.zones = [...new Set(body.zones.map((v) => String(v).trim()).filter(Boolean))];
-    }
-    if (Array.isArray(body.vendors)) {
-      inventoryMeta.vendors = [...new Set(body.vendors.map((v) => String(v).trim()).filter(Boolean))];
-    }
-    if (body.models && typeof body.models === "object") {
-      const next: Record<string, string[]> = {};
-      for (const [vendor, list] of Object.entries(body.models)) {
-        next[vendor] = [...new Set((list || []).map((v) => String(v).trim()).filter(Boolean))];
-      }
-      inventoryMeta.models = next;
-    }
-    await persistPgInventoryAndTopology("inventory-meta");
-    res.json({ success: true, meta: inventoryMeta });
-  });
-
-  app.post("/api/inventory/bulk", checkRole(['admin', 'operator']), async (req, res) => {
-    const { ids, action, value } = req.body;
-    const actor = actorName(req);
-
-    if (!Array.isArray(ids)) return res.status(400).json({ error: 'Invalid IDs' });
-
-    if (action === "delete") {
-      if (actorRole(req) !== "admin") {
-        return res.status(403).json({ error: "Access Denied: Insufficient permissions." });
-      }
-      inventory = inventory.filter((item) => !ids.includes(item.id));
-      deleteTopologyLayoutIds(ids);
-    } else {
-      inventory = inventory.map(item => {
-        if (ids.includes(item.id)) {
-          if (action === 'reboot') return { ...item, status: 'offline', uptime: '0d 0h', uptimeSeconds: 0 };
-        }
-        return item;
-      });
-    }
-
-    logAction(actor, 'Bulk Action', `Performed ${action} on ${ids.length} devices`, 'inventory');
-    await persistPgInventoryAndTopology("inventory-bulk");
-    res.json({ success: true, count: ids.length });
+  registerInventoryHttpRoutes(app, {
+    checkRole,
+    actorName,
+    actorRole,
+    logAction,
+    getInventory: () => inventory,
+    setInventory: (next) => {
+      inventory = next;
+    },
+    inventoryMeta,
+    deriveZoneKeyFromDeviceName,
+    resolveDeviceZone,
+    deriveFcSubcategoryByName,
+    upsertInventoryMetaFromItem,
+    rebuildTopologyFromInventory,
+    deleteTopologyLayoutIds,
+    persistPgInventoryAndTopology,
   });
 
   // API: Health Check
   app.get("/api/health", (req, res) => {
     res.json({ status: "online", version: "pro", timestamp: new Date().toISOString() });
-  });
-
-  // API: Get Inventory
-  app.get("/api/inventory", checkRole(['admin', 'operator', 'viewer']), (_req, res) => {
-    Promise.all(
-      inventory.map(async (item) => {
-        const probe = await getSnmpProbe(item.ip, 900);
-        if (!probe.ok) {
-          const warning = evaluateInventoryWarnings({
-            isReachable: false,
-            cpuLoad: null,
-            trunkDownCount: 0,
-          });
-          return {
-            ...item,
-            status: "offline" as const,
-            warningScore: warning.score,
-            warningSeverity: warning.severity,
-            warningReasons: warning.reasons,
-            warningReasonDetails: warning.reasonDetails,
-            cpuLoad: null,
-            trunkDownCount: 0,
-          };
-        }
-        const nextVendor = probe.sysDescr ? detectVendorFromSnmp(probe.sysDescr, probe.sysObjectId || "") : item.vendor;
-        const nextModel = detectModelFromSnmp(probe.sysDescr || "", probe.sysObjectId || "", probe.sysName || "") || item.model;
-        const nextName = probe.sysName?.trim() ? probe.sysName.trim() : item.name;
-        const nextCategory = detectCategoryFromSnmp(probe.sysDescr || "", probe.sysObjectId || "", probe.sysName || "");
-        const uptimeSeconds = probe.uptimeSeconds ?? item.uptimeSeconds ?? 0;
-        const template = pickTemplate(item);
-        const defs = template?.metrics || [];
-        let cpuLoad: number | null = null;
-        try {
-          if (defs.length > 0) {
-            const map = await snmpGetMap(item.ip, defs.map((d) => d.oid));
-            const cpuCandidates: number[] = [];
-            for (const def of defs) {
-              if (!isCpuMetricDef(def)) continue;
-              const value = await resolveMetricValue(item.ip, def, map);
-              const numeric = Number(value);
-              if (Number.isFinite(numeric)) cpuCandidates.push(numeric);
-            }
-            if (cpuCandidates.length > 0) {
-              cpuLoad = Math.round((cpuCandidates.reduce((a, b) => a + b, 0) / cpuCandidates.length) * 100) / 100;
-            }
-          }
-        } catch {
-          cpuLoad = null;
-        }
-        let trunkDownCount = 0;
-        try {
-          const trunks = await collectTrunkMetrics(item.ip);
-          trunkDownCount = trunks.filter((t) => t.isDown === true).length;
-        } catch {
-          trunkDownCount = 0;
-        }
-        const warning = evaluateInventoryWarnings({
-          isReachable: true,
-          cpuLoad,
-          trunkDownCount,
-        });
-        return {
-          ...item,
-          name: nextName,
-          zoneKey: deriveZoneKeyFromDeviceName(nextName),
-          vendor: nextVendor,
-          model: nextModel,
-          category: item.category || nextCategory,
-          branch: item.branch || "ULN",
-          zone: resolveDeviceZone(nextName, item.zone),
-          status: warning.severity === "warning" ? ("warning" as const) : ("online" as const),
-          uptimeSeconds,
-          uptime: formatDuration(uptimeSeconds),
-          warningScore: warning.score,
-          warningSeverity: warning.severity,
-          warningReasons: warning.reasons,
-          warningReasonDetails: warning.reasonDetails,
-          cpuLoad,
-          trunkDownCount,
-        };
-      })
-    )
-      .then((next) => res.json(next))
-      .catch(() =>
-        res.json(
-          inventory.map((item) => ({
-            ...item,
-            zoneKey: deriveZoneKeyFromDeviceName(item.name || ""),
-            status: item.status ?? ("offline" as const),
-            warningScore: item.warningScore ?? 0,
-            warningSeverity: item.warningSeverity ?? "none",
-            warningReasons: item.warningReasons ?? [],
-            warningReasonDetails: item.warningReasonDetails ?? [],
-            cpuLoad: Number.isFinite(Number(item.cpuLoad)) ? Number(item.cpuLoad) : null,
-            trunkDownCount: Number.isFinite(Number(item.trunkDownCount)) ? Number(item.trunkDownCount) : 0,
-          }))
-        )
-      );
-  });
-
-  app.post("/api/inventory", checkRole(['admin', 'operator']), async (req, res) => {
-    const sw = req.body;
-    const actor = actorName(req);
-    const category = String(sw.category || "Switch");
-    const normalizedCategory = category.toLowerCase();
-    const fcSubcategory = (
-      normalizedCategory === "fc switch" ||
-      normalizedCategory === "fibre channel switch" ||
-      normalizedCategory === "fiber channel switch"
-    ) ? deriveFcSubcategoryByName(String(sw.name || "")) : undefined;
-    const newSwitch = {
-      ...sw,
-      id: Date.now().toString(),
-      zoneKey: deriveZoneKeyFromDeviceName(String(sw.name || "")),
-      category,
-      subcategory: fcSubcategory || sw.subcategory || "Core",
-      branch: sw.branch || "ULN",
-      city: sw.city || "Ульяновск",
-      zone: resolveDeviceZone(String(sw.name || ""), sw.zone || "Core"),
-    } as InventoryItem;
-    upsertInventoryMetaFromItem(newSwitch);
-    inventory.push(newSwitch);
-    rebuildTopologyFromInventory();
-    logAction(actor, 'Add Device', `Registered new switch: ${newSwitch.name} (${newSwitch.ip})`, 'inventory');
-    await persistPgInventoryAndTopology("inventory-add");
-    res.json(newSwitch);
-  });
-
-  app.patch("/api/inventory/:id", checkRole(['admin', 'operator']), async (req, res) => {
-    const actor = actorName(req);
-    const index = inventory.findIndex(s => s.id === req.params.id);
-    if (index === -1) return res.status(404).json({ error: "Device not found" });
-    
-    const oldName = inventory[index].name;
-    inventory[index] = { ...inventory[index], ...req.body } as InventoryItem;
-    inventory[index].zoneKey = deriveZoneKeyFromDeviceName(inventory[index].name || "");
-    inventory[index].zone = resolveDeviceZone(inventory[index].name || "", inventory[index].zone);
-    const category = String(inventory[index].category || "").toLowerCase();
-    if (category === "fc switch" || category === "fibre channel switch" || category === "fiber channel switch") {
-      inventory[index].subcategory = deriveFcSubcategoryByName(inventory[index].name || "");
-    }
-    upsertInventoryMetaFromItem(inventory[index]);
-    rebuildTopologyFromInventory();
-    logAction(actor, 'Update Device', `Updated device configurations for: ${oldName}`, 'inventory');
-    await persistPgInventoryAndTopology("inventory-patch");
-    res.json(inventory[index]);
-  });
-
-  app.delete("/api/inventory/:id", checkRole(['admin']), async (req, res) => {
-    const actor = actorName(req);
-    const sw = inventory.find(s => s.id === req.params.id);
-    if (sw) {
-      logAction(actor, 'Remove Device', `Deleted switch: ${sw.name} (${sw.ip})`, 'inventory');
-      inventory = inventory.filter(s => s.id !== req.params.id);
-      rebuildTopologyFromInventory();
-      await persistPgInventoryAndTopology("inventory-delete");
-      res.json({ success: true });
-    } else {
-      res.status(404).json({ error: "Device not found" });
-    }
   });
 
   // API: User Management
@@ -5044,7 +4878,7 @@ type MacSearchEvent = {
   app.post("/api/auth/logout", (req, res) => {
     const { sid, user } = readSession(req);
     const requestIp = getRequestIp(req);
-    if (sid) sessionStore.delete(sid);
+    if (sid) revokeSession(sid);
     clearSessionCookie(res, shouldUseSecureCookie(req, isProd));
     if (user?.username) {
       logAction(user.username, "Logout", "User logged out", "auth", requestIp);
@@ -6176,13 +6010,33 @@ type MacSearchEvent = {
       }
       return user;
     };
-    const sessions = new Map<string, { client: Client, stream?: any }>();
+    const sessions = new Map<
+      string,
+      {
+        client: Client;
+        stream?: Duplex;
+        idleTimer?: NodeJS.Timeout;
+        bumpIdle?: () => void;
+      }
+    >();
+    const SSH_MAX_SESSIONS_PER_TAB = Math.max(1, Math.min(32, Number(process.env.NETNODE_SSH_MAX_SESSIONS_PER_TAB) || 8));
+    const SSH_SHELL_IDLE_MS = Math.max(60_000, Math.min(4 * 60 * 60_000, Number(process.env.NETNODE_SSH_IDLE_MS) || 30 * 60 * 1000));
 
     socket.on("ssh:connect", ({ sessionId, host, username, password, port }) => {
       const socketUser = requireSocketUser(sessionId);
       if (!socketUser) return;
+      if (!sessions.has(sessionId) && sessions.size >= SSH_MAX_SESSIONS_PER_TAB) {
+        socket.emit("ssh:data", {
+          sessionId,
+          data: `\r\n*** Too many concurrent SSH sessions (${SSH_MAX_SESSIONS_PER_TAB}) for this browser tab. Close one first. ***\r\n`,
+        });
+        socket.emit("ssh:status", { sessionId, status: "disconnected" });
+        return;
+      }
       // Clean up existing session if it exists for this ID
       if (sessions.has(sessionId)) {
+        const prev = sessions.get(sessionId);
+        if (prev?.idleTimer) clearTimeout(prev.idleTimer);
         sessions.get(sessionId)?.client.end();
       }
 
@@ -6214,13 +6068,52 @@ type MacSearchEvent = {
             }
             
             const session = sessions.get(sessionId);
-            if (session) session.stream = stream;
+            if (!session) {
+              try {
+                stream.destroy?.();
+              } catch {
+                /* ignore */
+              }
+              sshClient.end();
+              return;
+            }
+            session.stream = stream;
+
+            let idleTimer: NodeJS.Timeout | undefined;
+            const clearShellIdle = () => {
+              if (idleTimer) clearTimeout(idleTimer);
+              idleTimer = undefined;
+              session.idleTimer = undefined;
+              session.bumpIdle = undefined;
+            };
+            const bumpShellIdle = () => {
+              clearShellIdle();
+              idleTimer = setTimeout(() => {
+                try {
+                  stream.destroy?.();
+                } catch {
+                  /* ignore */
+                }
+                try {
+                  sshClient.end();
+                } catch {
+                  /* ignore */
+                }
+                sessions.delete(sessionId);
+                socket.emit("ssh:status", { sessionId, status: "disconnected" });
+              }, SSH_SHELL_IDLE_MS);
+              session.idleTimer = idleTimer;
+            };
+            session.bumpIdle = bumpShellIdle;
+            bumpShellIdle();
 
             stream.on("data", (data: Buffer) => {
+              bumpShellIdle();
               socket.emit("ssh:data", { sessionId, data: data.toString() });
             });
             
             stream.on("close", () => {
+              clearShellIdle();
               sshClient.end();
               sessions.delete(sessionId);
               socket.emit("ssh:status", { sessionId, status: "disconnected" });
@@ -6229,6 +6122,12 @@ type MacSearchEvent = {
           );
         })
         .on("error", (err) => {
+          const sess = sessions.get(sessionId);
+          if (sess?.idleTimer) clearTimeout(sess.idleTimer);
+          if (sess) {
+            sess.idleTimer = undefined;
+            sess.bumpIdle = undefined;
+          }
           const message = normalizeSshErrorForClient(err);
           socket.emit("ssh:data", { sessionId, data: `\r\n*** SSH Error: ${message} ***\r\n` });
           socket.emit("ssh:status", { sessionId, status: "disconnected" });
@@ -6251,6 +6150,7 @@ type MacSearchEvent = {
     socket.on("ssh:input", ({ sessionId, input }) => {
       if (!requireSocketUser(sessionId)) return;
       const session = sessions.get(sessionId);
+      session?.bumpIdle?.();
       if (session && session.stream) {
         session.stream.write(input);
       }
@@ -6260,13 +6160,17 @@ type MacSearchEvent = {
       if (!requireSocketUser(sessionId)) return;
       const session = sessions.get(sessionId);
       if (session) {
+        if (session.idleTimer) clearTimeout(session.idleTimer);
         session.client.end();
         sessions.delete(sessionId);
       }
     });
 
     socket.on("disconnect", () => {
-      sessions.forEach(session => session.client.end());
+      sessions.forEach((session) => {
+        if (session.idleTimer) clearTimeout(session.idleTimer);
+        session.client.end();
+      });
       sessions.clear();
     });
   });
@@ -6299,6 +6203,10 @@ type MacSearchEvent = {
     if (backupScheduler) {
       clearInterval(backupScheduler);
       backupScheduler = null;
+    }
+    if (inventoryMetricsScheduler) {
+      clearInterval(inventoryMetricsScheduler);
+      inventoryMetricsScheduler = null;
     }
     const deadline = Date.now() + 8000;
     while ((discoveryRunLock || backupRunLock) && Date.now() < deadline) {
