@@ -30,7 +30,7 @@ export function materialHasValue(m: PasswordMaterial): boolean {
 /** Minimum UTF-8 length for NETNODE_CREDENTIALS_KEY to enable strong (g2) sealing. */
 const CREDENTIALS_KEY_MIN_STRONG_BYTES = 32;
 
-/** Legacy minimum for g1 decrypt/seal (deprecated). */
+/** Legacy minimum for g1 **decrypt only** (old sealed blobs). New credentials are never sealed with g1. */
 const CREDENTIALS_KEY_MIN_LEGACY_BYTES = 8;
 
 function keyMeetsStrong(): boolean {
@@ -53,17 +53,6 @@ async function deriveKeyG2(secret: string, salt: Buffer): Promise<Buffer> {
   return (await scryptAsync(secret, salt, 32, SCRYPT_PARAMS)) as Buffer;
 }
 
-function sealG1Sync(plain: string): PasswordMaterial {
-  const dk = deriveKeyG1Sync();
-  if (!dk) return { kind: "plain", value: plain };
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", dk, iv);
-  const enc = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  const payload = Buffer.concat([iv, tag, enc]).toString("base64");
-  return { kind: "sealed", payload: `g1:${payload}` };
-}
-
 async function sealG2(plain: string): Promise<PasswordMaterial> {
   const secret = envCredentialsKey();
   if (!keyMeetsStrong()) return { kind: "plain", value: plain };
@@ -77,14 +66,16 @@ async function sealG2(plain: string): Promise<PasswordMaterial> {
   return { kind: "sealed", payload: `g2:${raw.toString("base64")}` };
 }
 
-/** Preferred: per-payload salt + async scrypt when key is strong (≥32 UTF-8 bytes); else legacy g1 or plain. */
+/**
+ * Seals with per-payload scrypt salt + AES-GCM only when NETNODE_CREDENTIALS_KEY is ≥32 UTF-8 bytes (g2).
+ * Shorter keys leave plaintext in RAM (no new fixed-salt g1 wrapping).
+ */
 export async function materialFromUserPassword(plain: string): Promise<PasswordMaterial> {
   if (keyMeetsStrong()) return sealG2(plain);
-  if (keyMeetsLegacy()) return sealG1Sync(plain);
   return { kind: "plain", value: plain };
 }
 
-/** Sync seal for startup paths that cannot await (same rules as {@link materialFromUserPassword}). */
+/** Sync seal for startup paths that cannot await (g2 only when key is strong). */
 export function materialFromUserPasswordSync(plain: string): PasswordMaterial {
   if (keyMeetsStrong()) {
     const secret = envCredentialsKey();
@@ -97,7 +88,6 @@ export function materialFromUserPasswordSync(plain: string): PasswordMaterial {
     const raw = Buffer.concat([salt, iv, tag, enc]);
     return { kind: "sealed", payload: `g2:${raw.toString("base64")}` };
   }
-  if (keyMeetsLegacy()) return sealG1Sync(plain);
   return { kind: "plain", value: plain };
 }
 

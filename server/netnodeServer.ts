@@ -674,25 +674,6 @@ async function mergeSnmpCredentialsFromBody(
   return { communityMaterial, communitiesMaterials };
 }
 
-async function sealVolatileCredentialMaterialsAfterHydrate() {
-  const upgrade = async (m: PasswordMaterial): Promise<PasswordMaterial> => {
-    if (m.kind !== "plain") return m;
-    return materialFromUserPassword(m.value);
-  };
-  snmpConfig.communityMaterial = await upgrade(snmpConfig.communityMaterial);
-  snmpConfig.communitiesMaterials = await Promise.all(snmpConfig.communitiesMaterials.map(upgrade));
-  ldapConfig = {
-    admin: { ...ldapConfig.admin, bindPasswordMaterial: await upgrade(ldapConfig.admin.bindPasswordMaterial) },
-    operator: { ...ldapConfig.operator, bindPasswordMaterial: await upgrade(ldapConfig.operator.bindPasswordMaterial) },
-  };
-  if (sshReadonlyProfile) {
-    sshReadonlyProfile = {
-      ...sshReadonlyProfile,
-      passwordMaterial: await upgrade(sshReadonlyProfile.passwordMaterial),
-    };
-  }
-}
-
 type BackupScope = {
   mode: "all" | "filtered";
   deviceIds?: string[];
@@ -700,16 +681,18 @@ type BackupScope = {
   branches?: string[];
 };
 
+type BackupCredentials = {
+  username?: string;
+  domain?: string;
+  passwordMaterial: PasswordMaterial;
+};
+
 type BackupConfig = {
   enabled: boolean;
   intervalHours: number;
   networkSharePath: string;
   scope: BackupScope;
-  credentials?: {
-    username?: string;
-    password?: string;
-    domain?: string;
-  };
+  credentials?: BackupCredentials;
 };
 
 type BackupHistoryItem = {
@@ -739,8 +722,117 @@ let backupConfig: BackupConfig = {
   intervalHours: 6,
   networkSharePath: "",
   scope: { mode: "all" },
-  credentials: { username: "", password: "", domain: "" },
+  credentials: { username: "", domain: "", passwordMaterial: { kind: "plain", value: "" } },
 };
+
+function defaultBackupCredentials(): BackupCredentials {
+  return { username: "", domain: "", passwordMaterial: { kind: "plain", value: "" } };
+}
+
+function hydrateBackupConfigFromKv(raw: unknown): BackupConfig {
+  const defaults: BackupConfig = {
+    enabled: false,
+    intervalHours: 6,
+    networkSharePath: "",
+    scope: { mode: "all" },
+    credentials: defaultBackupCredentials(),
+  };
+  if (!raw || typeof raw !== "object") return defaults;
+  const v = raw as Record<string, unknown>;
+  const scopeIn = v.scope && typeof v.scope === "object" ? (v.scope as BackupScope) : undefined;
+  const c = v.credentials as Record<string, unknown> | undefined;
+  let passwordMaterial = defaultBackupCredentials().passwordMaterial;
+  if (c && typeof c === "object") {
+    const pm = c.passwordMaterial;
+    if (pm && typeof pm === "object" && pm !== null && "kind" in pm) {
+      passwordMaterial = pm as PasswordMaterial;
+    } else if (typeof c.password === "string") {
+      passwordMaterial = { kind: "plain", value: c.password };
+    }
+  }
+  return {
+    enabled: typeof v.enabled === "boolean" ? v.enabled : defaults.enabled,
+    intervalHours:
+      typeof v.intervalHours === "number" && Number.isFinite(v.intervalHours) ? Number(v.intervalHours) : defaults.intervalHours,
+    networkSharePath: typeof v.networkSharePath === "string" ? v.networkSharePath : defaults.networkSharePath,
+    scope: {
+      mode: scopeIn?.mode === "filtered" ? "filtered" : "all",
+      deviceIds: Array.isArray(scopeIn?.deviceIds) ? scopeIn!.deviceIds!.map((x) => String(x)) : defaults.scope.deviceIds,
+      vendors: Array.isArray(scopeIn?.vendors) ? scopeIn!.vendors!.map((x) => String(x)) : defaults.scope.vendors,
+      branches: Array.isArray(scopeIn?.branches) ? scopeIn!.branches!.map((x) => String(x)) : defaults.scope.branches,
+    },
+    credentials: {
+      username: String(c?.username ?? "").trim(),
+      domain: String(c?.domain ?? "").trim(),
+      passwordMaterial,
+    },
+  };
+}
+
+function backupConfigApiConfigPayload(): Record<string, unknown> {
+  const cred = backupConfig.credentials ?? defaultBackupCredentials();
+  return {
+    enabled: backupConfig.enabled,
+    intervalHours: backupConfig.intervalHours,
+    networkSharePath: backupConfig.networkSharePath,
+    scope: backupConfig.scope,
+    credentials: {
+      username: cred.username || "",
+      domain: cred.domain || "",
+      hasPassword: materialHasValue(cred.passwordMaterial),
+    },
+  };
+}
+
+async function mergeBackupCredentialsFromBody(body: Partial<BackupConfig> & { credentials?: { username?: string; domain?: string; password?: string } }) {
+  const prev = backupConfig.credentials ?? defaultBackupCredentials();
+  const inc = body.credentials;
+  const username = String(inc?.username ?? prev.username ?? "").trim();
+  const domain = String(inc?.domain ?? prev.domain ?? "").trim();
+  let passwordMaterial = prev.passwordMaterial;
+  if (inc && "password" in inc && typeof inc.password === "string") {
+    const p = inc.password.trim();
+    if (p === "") passwordMaterial = { kind: "plain", value: "" };
+    else if (p !== SNMP_SECRET_MASK) passwordMaterial = await materialFromUserPassword(p);
+  }
+  backupConfig.credentials = { username, domain, passwordMaterial };
+}
+
+let sealVolatileCredentialsMutex: Promise<void> = Promise.resolve();
+
+async function sealVolatileCredentialMaterialsAfterHydrate() {
+  const run = async () => {
+    const upgrade = async (m: PasswordMaterial): Promise<PasswordMaterial> => {
+      if (m.kind !== "plain") return m;
+      return materialFromUserPassword(m.value);
+    };
+    snmpConfig.communityMaterial = await upgrade(snmpConfig.communityMaterial);
+    snmpConfig.communitiesMaterials = await Promise.all(snmpConfig.communitiesMaterials.map(upgrade));
+    ldapConfig = {
+      admin: { ...ldapConfig.admin, bindPasswordMaterial: await upgrade(ldapConfig.admin.bindPasswordMaterial) },
+      operator: { ...ldapConfig.operator, bindPasswordMaterial: await upgrade(ldapConfig.operator.bindPasswordMaterial) },
+    };
+    if (sshReadonlyProfile) {
+      sshReadonlyProfile = {
+        ...sshReadonlyProfile,
+        passwordMaterial: await upgrade(sshReadonlyProfile.passwordMaterial),
+      };
+    }
+    const cred = backupConfig.credentials;
+    if (cred?.passwordMaterial) {
+      backupConfig = {
+        ...backupConfig,
+        credentials: {
+          ...cred,
+          passwordMaterial: await upgrade(cred.passwordMaterial),
+        },
+      };
+    }
+  };
+  sealVolatileCredentialsMutex = sealVolatileCredentialsMutex.then(run, run);
+  return sealVolatileCredentialsMutex;
+}
+
 let backupHistory: BackupHistoryItem[] = [];
 let backupScheduler: NodeJS.Timeout | null = null;
 let backupRunLock = false;
@@ -3668,7 +3760,7 @@ function applyPgKv(key: string, value: unknown) {
         }
         break;
       case APP_KV_KEYS.backup_config:
-        if (typeof value === "object") backupConfig = { ...backupConfig, ...(value as typeof backupConfig) };
+        if (value && typeof value === "object") backupConfig = hydrateBackupConfigFromKv(value);
         break;
       case APP_KV_KEYS.backup_history:
         if (Array.isArray(value)) backupHistory = value as BackupHistoryItem[];
@@ -6010,14 +6102,7 @@ type MacSearchEvent = {
 
   app.get("/api/backup/config", checkRole(["admin", "operator", "viewer"]), (_req, res) => {
     res.json({
-      config: {
-        ...backupConfig,
-        credentials: {
-          username: backupConfig.credentials?.username || "",
-          domain: backupConfig.credentials?.domain || "",
-          hasPassword: Boolean(backupConfig.credentials?.password),
-        },
-      },
+      config: backupConfigApiConfigPayload(),
       scheduler: {
         enabled: backupConfig.enabled,
         lastTickAt: backupSchedulerLastTickAt,
@@ -6027,7 +6112,9 @@ type MacSearchEvent = {
   });
 
   app.post("/api/backup/config", checkRole(["admin", "operator"]), async (req, res) => {
-    const body = req.body as Partial<BackupConfig>;
+    const body = req.body as Partial<BackupConfig> & {
+      credentials?: { username?: string; domain?: string; password?: string };
+    };
     backupConfig.enabled = body.enabled === true;
     backupConfig.intervalHours = Math.max(1, Math.min(168, Number(body.intervalHours || backupConfig.intervalHours || 6)));
     backupConfig.networkSharePath = String(body.networkSharePath || backupConfig.networkSharePath || "").trim();
@@ -6037,14 +6124,10 @@ type MacSearchEvent = {
       vendors: Array.isArray(body.scope?.vendors) ? body.scope?.vendors.map((x) => String(x)) : [],
       branches: Array.isArray(body.scope?.branches) ? body.scope?.branches.map((x) => String(x)) : [],
     };
-    backupConfig.credentials = {
-      username: String(body.credentials?.username || backupConfig.credentials?.username || "").trim(),
-      domain: String(body.credentials?.domain || backupConfig.credentials?.domain || "").trim(),
-      password: String(body.credentials?.password || backupConfig.credentials?.password || ""),
-    };
+    await mergeBackupCredentialsFromBody(body);
     logAction(actorName(req), "Backup Config Update", `enabled=${backupConfig.enabled}, interval=${backupConfig.intervalHours}h`, "config");
     await persistPgConfigs("backup");
-    return res.json({ success: true, config: backupConfig });
+    return res.json({ success: true, config: backupConfigApiConfigPayload() });
   });
 
   app.post("/api/backup/run", checkRole(["admin", "operator"]), async (req, res) => {

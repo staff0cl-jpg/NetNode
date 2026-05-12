@@ -43,13 +43,14 @@ test("materialFromUserPasswordSync matches async for strong key", async () => {
   }
 });
 
-test("legacy g1 round-trip when key is 8–31 bytes", async () => {
+test("short key (8–31 bytes) does not seal new material — stays plain", async () => {
   process.env.NETNODE_CREDENTIALS_KEY = "legacy-8-chars-min";
   try {
-    const m = materialFromUserPasswordSync("legacy-secret");
-    assert.equal(m.kind, "sealed");
-    assert.ok(m.payload.startsWith("g1:"));
-    assert.equal(await readPasswordMaterial(m), "legacy-secret");
+    const m = await materialFromUserPassword("secret");
+    assert.equal(m.kind, "plain");
+    assert.equal(await readPasswordMaterial(m), "secret");
+    const s = materialFromUserPasswordSync("x");
+    assert.equal(s.kind, "plain");
   } finally {
     delete process.env.NETNODE_CREDENTIALS_KEY;
   }

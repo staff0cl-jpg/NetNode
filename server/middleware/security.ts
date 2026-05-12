@@ -7,6 +7,13 @@ function clientIp(req: Request): string {
 }
 
 /** Basic hardening headers without extra dependencies (Helmet-equivalent subset). */
+const DEFAULT_CSP_PROD =
+  "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss:; base-uri 'self'; form-action 'self'; frame-ancestors 'self'";
+
+/** Dev: Vite needs unsafe-eval for HMR; connect-src allows local WS. */
+const DEFAULT_CSP_DEV =
+  "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss: http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*; base-uri 'self'; form-action 'self'";
+
 export function applySecurityMiddleware(app: Express, opts: { isProd: boolean }): void {
   app.use((_req: Request, res: Response, next: NextFunction) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -15,6 +22,12 @@ export function applySecurityMiddleware(app: Express, opts: { isProd: boolean })
     res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
     if (opts.isProd) {
       res.setHeader("Strict-Transport-Security", "max-age=15552000; includeSubDomains");
+    }
+    const cspOverride = String(process.env.NETNODE_CONTENT_SECURITY_POLICY || "").trim();
+    if (cspOverride && cspOverride !== "0") {
+      res.setHeader("Content-Security-Policy", cspOverride);
+    } else {
+      res.setHeader("Content-Security-Policy", opts.isProd ? DEFAULT_CSP_PROD : DEFAULT_CSP_DEV);
     }
     next();
   });
